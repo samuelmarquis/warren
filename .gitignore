@@ -1,0 +1,4 @@
+# Vendored dependency repos — their own git repos on a `warren` branch.
+# See README "Repository layout". Tracked separately, not by warren.
+/abduco/
+/dvtm/

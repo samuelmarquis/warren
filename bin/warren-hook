@@ -1,0 +1,24 @@
+#!/bin/sh
+# warren-hook - record a warren agent's lifecycle state for the dashboard.
+#
+# Invoked by Claude Code hooks (wired up via `claude --settings`, see the
+# launcher's ensure_hooks_file) with the desired state as $1:
+#
+#   working    | a turn / tool is in progress  -> sidebar row dim
+#   waiting    | turn finished, awaiting input  -> sidebar row bold
+#   attention  | blocked on a permission prompt -> sidebar row bold + '!'
+#   gone       | session ended                  -> clear the state
+#
+# The state is written to $WARREN_META/$WARREN_AGENT.state, which dvtm polls.
+# WARREN_AGENT / WARREN_META are exported into each agent by the launcher, so
+# this is a silent no-op for any Claude run outside warren. Claude pipes the
+# hook's JSON payload in on stdin; we don't need it. Always exits 0 so it can
+# never block or perturb Claude.
+[ -n "${WARREN_AGENT:-}" ] && [ -n "${WARREN_META:-}" ] || exit 0
+case ${1:-} in
+	gone)
+		rm -f "$WARREN_META/$WARREN_AGENT.state" 2>/dev/null ;;
+	working|waiting|attention)
+		printf '%s' "$1" > "$WARREN_META/$WARREN_AGENT.state" 2>/dev/null ;;
+esac
+exit 0

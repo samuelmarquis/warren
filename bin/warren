@@ -1,0 +1,233 @@
+#!/bin/sh
+# warren - a Claude Code agent multiplexer built on abduco + dvtm.
+#
+# Layout: a left sidebar lists every agent; the focused agent's Claude Code TUI
+# fills the pane on the right. Each agent runs in its own abduco session (so it
+# survives even a dvtm crash and can be reattached individually), and the whole
+# dashboard runs in a second abduco session (so it survives the SSH connection
+# being dropped -- reattach by simply running `warren` again).
+#
+#   warren            launch the dashboard, or reattach if already running
+#   warren new NAME [DIR] [COLOR] [new|resume|continue]   create an agent
+#   warren ls         list agents and their status
+#   warren kill NAME  terminate an agent session
+#   warren help       show this help
+#
+# An agent can start fresh (new), open Claude's session picker (resume =
+# `claude --resume`), or continue the most recent conversation (continue).
+#
+# Inside the dashboard:
+#   Ctrl-Space          focus the next agent (cycles agents only)
+#   click a sidebar row jump to that agent; click "+ new agent" to open the form
+#   Ctrl-Shift-Space    open the "+ new agent" form (terminals that send it; see README)
+#   Ctrl-\              detach (agents keep running; reattach with `warren`)
+set -eu
+
+# ---------------------------------------------------------------- configuration
+self=$0
+case $self in */*) ;; *) self=$(command -v "$self" || echo "$self") ;; esac
+BINDIR=$(CDPATH= cd -- "$(dirname -- "$self")" && pwd)
+PATH="$BINDIR:$PATH"; export PATH
+
+WARREN_HOME=${WARREN_HOME:-$HOME/.warren}
+WARREN_AGENTS_DIR=${WARREN_AGENTS_DIR:-$WARREN_HOME/agents}
+WARREN_DASH_DIR=${WARREN_DASH_DIR:-$WARREN_HOME/dash}
+WARREN_META=${WARREN_META:-$WARREN_HOME/meta}
+WARREN_FIFO=${WARREN_FIFO:-$WARREN_HOME/dvtm.fifo}
+WARREN_DASH_NAME=${WARREN_DASH_NAME:-dashboard}
+WARREN_AGENT_CMD=${WARREN_AGENT_CMD:-claude}
+WARREN_ABDUCO=${WARREN_ABDUCO:-$BINDIR/warren-abduco}
+WARREN_DVTM=${WARREN_DVTM:-$BINDIR/warren-dvtm}
+[ -x "$WARREN_ABDUCO" ] || WARREN_ABDUCO=warren-abduco
+[ -x "$WARREN_DVTM" ] || WARREN_DVTM=warren-dvtm
+
+# warren-hook records each agent's working/waiting/attention state (via Claude
+# Code hooks) so the sidebar can show it; WARREN_HOOKS is the generated settings
+# file we hand to `claude --settings`.
+WARREN_HOOK=${WARREN_HOOK:-$BINDIR/warren-hook}
+[ -x "$WARREN_HOOK" ] || WARREN_HOOK=warren-hook
+WARREN_HOOKS=${WARREN_HOOKS:-$WARREN_HOME/hooks.json}
+
+# TERM for the agent windows. screen-256color is present in every ncurses
+# terminfo db and is plenty capable for Claude's TUI; using it avoids terminfo
+# location mismatches between the system and Homebrew ncurses.
+DVTM_TERM=${DVTM_TERM:-screen-256color}
+
+export WARREN_HOME WARREN_AGENTS_DIR WARREN_DASH_DIR WARREN_META \
+       WARREN_FIFO WARREN_DASH_NAME WARREN_AGENT_CMD \
+       WARREN_ABDUCO WARREN_DVTM DVTM_TERM WARREN_HOOK WARREN_HOOKS
+
+# These MUST exist before abduco runs: abduco's create_socket_dir does a
+# non-recursive mkdir of "$ABDUCO_SOCKET_DIR/abduco" and, if the parent is
+# missing, silently falls back to a shared dir ($TMPDIR/abduco or /tmp/abduco/
+# $USER) -- which would make every warren instance share one agent pool and
+# scatter sockets outside $WARREN_HOME. Creating them keeps each home isolated.
+mkdir -p "$WARREN_HOME" "$WARREN_AGENTS_DIR" "$WARREN_DASH_DIR" "$WARREN_META" 2>/dev/null || true
+
+# ----------------------------------------------------------------------- helpers
+abduco_agents() { ABDUCO_SOCKET_DIR=$WARREN_AGENTS_DIR "$WARREN_ABDUCO" "$@"; }
+abduco_dash()   { ABDUCO_SOCKET_DIR=$WARREN_DASH_DIR   "$WARREN_ABDUCO" "$@"; }
+
+sanitize() { printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9._-' '-' | cut -c1-32; }
+
+agent_color() { # echo stored tab-color index for an agent name (default 0)
+	cat "$WARREN_META/$1.color" 2>/dev/null || echo 0
+}
+
+agent_display() { # echo the display name (set by an in-TUI rename), else the session name
+	cat "$WARREN_META/$1.name" 2>/dev/null || printf '%s' "$1"
+}
+
+agent_pinned() { # echo 1 if the name was manually pinned (so Claude's title won't override)
+	[ -f "$WARREN_META/$1.namepin" ] && echo 1 || echo 0
+}
+
+# emit a dvtm `create` line for agent session $1 (cmd, display-name, cwd, color, session, pinned)
+create_line() {
+	printf 'create "%s" "%s" "" "%s" "%s" "%s"\n' \
+		"$(attach_cmd "$1")" "$(agent_display "$1")" "$(agent_color "$1")" "$1" "$(agent_pinned "$1")"
+}
+
+# active agent names, skipping terminated ('+') sessions, oldest listed first
+list_names() {
+	abduco_agents 2>/dev/null | awk -F'\t' 'NR>1 && substr($0,1,1)!="+"{print $NF}'
+}
+
+dashboard_running() { abduco_dash -d "$WARREN_DASH_NAME" >/dev/null 2>&1; }
+
+# the shell command a dvtm window runs to display one agent. ABDUCO_NO_ALTSCREEN
+# keeps the agent on the normal screen so dvtm can scroll back through its output.
+attach_cmd() { printf 'exec env ABDUCO_SOCKET_DIR=%s ABDUCO_NO_ALTSCREEN=1 %s -a %s' \
+	"$WARREN_AGENTS_DIR" "$WARREN_ABDUCO" "$1"; }
+
+# Write the Claude Code settings file that wires agent lifecycle hooks to
+# warren-hook, handed to each agent via `claude --settings`. The hooks let the
+# sidebar distinguish working / waiting / attention -- crucially keeping an
+# agent "working" through a silent tool run that no screen heuristic can see.
+# Regenerated each run so the warren-hook path survives a move/reinstall.
+ensure_hooks_file() {
+	cat > "$WARREN_HOOKS" <<EOF
+{
+  "hooks": {
+    "SessionStart":     [{ "hooks": [{ "type": "command", "command": "$WARREN_HOOK waiting" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "$WARREN_HOOK working" }] }],
+    "PreToolUse":       [{ "matcher": "*", "hooks": [{ "type": "command", "command": "$WARREN_HOOK working" }] }],
+    "PostToolUse":      [{ "matcher": "*", "hooks": [{ "type": "command", "command": "$WARREN_HOOK working" }] }],
+    "Notification":     [{ "hooks": [{ "type": "command", "command": "$WARREN_HOOK attention" }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "$WARREN_HOOK waiting" }] }],
+    "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "$WARREN_HOOK gone" }] }]
+  }
+}
+EOF
+}
+
+# choose a session name not already in use (auto-suffix on collision)
+unique_name() {
+	base=$1 name=$1 n=2
+	while abduco_agents -d "$name" >/dev/null 2>&1; do name="$base-$n"; n=$((n+1)); done
+	printf '%s' "$name"
+}
+
+# create a detached agent session running Claude in DIR, return its final name.
+# mode: new (fresh), resume (claude --resume [id]), continue (most recent).
+# When mode=resume and a session id is given, that exact session is resumed
+# (run in DIR, which should be the session's own cwd).
+spawn_agent() { # name dir color mode [session-id]
+	_n=$(unique_name "$1"); _dir=${2:-$HOME}; _color=${3:-0}; _mode=${4:-new}; _sid=${5:-}
+	mkdir -p "$WARREN_META"
+	printf '%s' "$_color" > "$WARREN_META/$_n.color"
+	_cmd=$WARREN_AGENT_CMD
+	case $_mode in
+		resume)   _cmd="$WARREN_AGENT_CMD --resume${_sid:+ $_sid}" ;;
+		continue) _cmd="$WARREN_AGENT_CMD --continue" ;;
+	esac
+	# wire Claude's lifecycle hooks so the sidebar can show this agent's state.
+	ensure_hooks_file
+	[ -n "$WARREN_HOOKS" ] && _cmd="$_cmd --settings '$WARREN_HOOKS'"
+	# The agent runs inside dvtm's vt, which emulates DVTM_TERM (screen-256color).
+	# Force the agent's TERM to match, and drop COLORTERM: with the outer
+	# xterm-256color, apps like vis quantize 256-color themes to the wrong
+	# (dark) palette, and COLORTERM=truecolor (set by iTerm2, forwarded over SSH)
+	# would make Claude emit 24-bit SGR that dvtm's vt can't parse.
+	( cd "$_dir" 2>/dev/null || cd "$HOME"
+	  exec env -u COLORTERM TERM="${DVTM_TERM:-screen-256color}" \
+	      WARREN_AGENT="$_n" WARREN_META="$WARREN_META" \
+	      ABDUCO_SOCKET_DIR="$WARREN_AGENTS_DIR" "$WARREN_ABDUCO" -n "$_n" \
+	      ${SHELL:-/bin/sh} -c "$_cmd" ) >/dev/null 2>&1
+	printf '%s' "$_n"
+}
+
+# ------------------------------------------------------------------ subcommands
+cmd_new() {
+	[ $# -ge 1 ] || { echo "usage: warren new NAME [DIR] [COLOR 0-6] [new|resume|continue] [session-id]" >&2; exit 1; }
+	name=$(sanitize "$1"); [ -n "$name" ] || { echo "warren: empty name" >&2; exit 1; }
+	dir=${2:-$PWD}; color=${3:-0}; mode=${4:-new}; sid=${5:-}
+	case $dir in "~") dir=$HOME ;; "~/"*) dir=$HOME/${dir#"~/"} ;; esac
+	final=$(spawn_agent "$name" "$dir" "$color" "$mode" "$sid")
+	if dashboard_running && [ -p "$WARREN_FIFO" ]; then
+		create_line "$final" > "$WARREN_FIFO"
+		echo "warren: added agent '$final' to the running dashboard"
+	else
+		echo "warren: created agent '$final' (will appear next time you run warren)"
+	fi
+}
+
+cmd_ls() {
+	if dashboard_running; then echo "dashboard: running"; else echo "dashboard: stopped"; fi
+	echo "agents (in $WARREN_AGENTS_DIR):"
+	abduco_agents 2>/dev/null || true
+}
+
+cmd_kill() {
+	[ $# -ge 1 ] || { echo "usage: warren kill NAME" >&2; exit 1; }
+	name=$(sanitize "$1")
+	pid=$(abduco_agents 2>/dev/null | awk -F'\t' -v n="$name" 'NR>1 && $NF==n{print $(NF-1)}')
+	if [ -n "$pid" ]; then
+		kill "$pid" 2>/dev/null && echo "warren: killed agent '$name' (pid $pid)"
+		rm -f "$WARREN_META/$name.color" "$WARREN_META/$name.name" \
+		      "$WARREN_META/$name.state" "$WARREN_META/$name.namepin"
+	else
+		echo "warren: no live agent named '$name'" >&2; exit 1
+	fi
+}
+
+cmd_up() {
+	mkdir -p "$WARREN_HOME" "$WARREN_META"
+	ensure_hooks_file
+	if dashboard_running; then
+		# already running -> reattach to the live view (no rediscovery).
+		# exec the binary directly (abduco_dash is a shell function, not execable).
+		exec env ABDUCO_SOCKET_DIR="$WARREN_DASH_DIR" "$WARREN_ABDUCO" -a "$WARREN_DASH_NAME"
+	fi
+	# fresh start: create the dashboard and inject a window per existing agent.
+	# The writer blocks on opening the FIFO until dvtm starts reading it, which
+	# neatly synchronises us with dvtm coming up.
+	rm -f "$WARREN_FIFO"
+	mkfifo -m 600 "$WARREN_FIFO"
+	(
+		names=$(list_names)
+		exec >"$WARREN_FIFO"          # blocks until dvtm opens the cmd FIFO
+		printf '%s\n' "$names" | while IFS= read -r name; do
+			[ -n "$name" ] || continue
+			create_line "$name"
+		done
+	) &
+	exec env ABDUCO_SOCKET_DIR="$WARREN_DASH_DIR" \
+		"$WARREN_ABDUCO" -c "$WARREN_DASH_NAME" \
+		"$WARREN_DVTM" -c "$WARREN_FIFO"
+}
+
+cmd_help() { awk 'NR<2{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$self"; }
+
+# ----------------------------------------------------------------------- dispatch
+sub=${1:-up}
+[ $# -gt 0 ] && shift || true
+case $sub in
+	up|"")        cmd_up "$@" ;;
+	new|create)   cmd_new "$@" ;;
+	ls|list)      cmd_ls "$@" ;;
+	sessions)     warren-sessions ;;   # all resumable Claude sessions (id<TAB>mtime<TAB>cwd<TAB>title)
+	kill|rm)      cmd_kill "$@" ;;
+	help|-h|--help) cmd_help ;;
+	*) echo "warren: unknown command '$sub' (try: warren help)" >&2; exit 1 ;;
+esac
