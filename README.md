@@ -344,11 +344,19 @@ change). The agent list column is `SIDEBAR_WIDTH` (default 24).
   continuously). A manual `r`/`e` rename now sets `Client.name_pinned`, which the
   sync respects; the pin is persisted (`<agent>.namepin`, a 6th `create` arg) so
   it survives a dashboard restart.
-- **dvtm** (`dvtm/vt.c`, `vt_is_scrolled`): a window **scrolled back is frozen** —
-  the main loop skips `draw_content` for it, so Claude's in-place status/spinner
-  updates (cursor moves with no newline) no longer paint over the scrollback view.
-  (Newline output still snaps to the live bottom, as `cursor_line_down` calls
-  `vt_noscroll` — unchanged.)
+- **dvtm** (`dvtm/vt.c`, `view_offset`): **scroll-and-stay scrollback.** A window
+  scrolled back keeps a stable view while live output keeps flowing below it
+  (iTerm-like), instead of freezing the pane or snapping to the bottom on every
+  newline. The fix decouples user scroll from the live write target: `b->lines`
+  is now *always* the live screen (the producer's cursor never moves on user
+  scroll); user scroll is a read-only `view_offset` and `vt_draw` renders the
+  scrolled window from the ring iterators, so in-place spinner/status output
+  lands off-window and can't corrupt the view. A real newline while scrolled
+  banks to history and bumps `view_offset` in lockstep, pinning the view to its
+  content. `vt_scroll` is split from a new `vt_app_scroll` (CSI S/T = SU/SD) so
+  apps that scroll their own content no longer falsely trip the scrollback state.
+  Replaces the earlier freeze-while-scrolled mitigation (the two `draw_content`
+  draw-gates are gone). Covered by `dvtm/t_vt.c` (a 29-check libvt harness).
 - **dvtm** (`dvtm/vt.c`, OSC 52 clipboard): the vt now forwards an **OSC 52**
   clipboard write (`vt_clipboard_handler`) from the *focused* agent to the real
   terminal fd, instead of dropping it in the `default` OSC case. That's how
