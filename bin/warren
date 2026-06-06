@@ -48,10 +48,11 @@ WARREN_HOOK=${WARREN_HOOK:-$BINDIR/warren-hook}
 [ -x "$WARREN_HOOK" ] || WARREN_HOOK=warren-hook
 WARREN_HOOKS=${WARREN_HOOKS:-$WARREN_HOME/hooks.json}
 
-# TERM for the agent windows. screen-256color is present in every ncurses
-# terminfo db and is plenty capable for Claude's TUI; using it avoids terminfo
-# location mismatches between the system and Homebrew ncurses.
-DVTM_TERM=${DVTM_TERM:-screen-256color}
+# TERM for the agent windows. MUST be xterm-ish, NOT screen-/tmux-*: Claude Code
+# detects a "screen" TERM and falls back to its alternate-screen renderer (no
+# scrollback at all), whereas under xterm-256color it uses the inline renderer —
+# history flows into dvtm's scrollback with the input/tasks pinned at the bottom.
+DVTM_TERM=${DVTM_TERM:-xterm-256color}
 
 export WARREN_HOME WARREN_AGENTS_DIR WARREN_DASH_DIR WARREN_META \
        WARREN_FIFO WARREN_DASH_NAME WARREN_AGENT_CMD \
@@ -144,13 +145,13 @@ spawn_agent() { # name dir color mode [session-id]
 	# wire Claude's lifecycle hooks so the sidebar can show this agent's state.
 	ensure_hooks_file
 	[ -n "$WARREN_HOOKS" ] && _cmd="$_cmd --settings '$WARREN_HOOKS'"
-	# The agent runs inside dvtm's vt, which emulates DVTM_TERM (screen-256color).
-	# Force the agent's TERM to match, and drop COLORTERM: with the outer
-	# xterm-256color, apps like vis quantize 256-color themes to the wrong
-	# (dark) palette, and COLORTERM=truecolor (set by iTerm2, forwarded over SSH)
-	# would make Claude emit 24-bit SGR that dvtm's vt can't parse.
+	# Run the agent under xterm-256color (see DVTM_TERM above: gets Claude's
+	# inline/scrollback renderer) with COLORTERM=truecolor. dvtm's vt now
+	# quantizes 24-bit SGR to 256, so truecolor is safe and apps emit their best
+	# colors. (Tradeoff: a 256-color-only app like `vis` may quantize its theme
+	# differently than under screen-256color; scrollback is the priority.)
 	( cd "$_dir" 2>/dev/null || cd "$HOME"
-	  exec env -u COLORTERM TERM="${DVTM_TERM:-screen-256color}" \
+	  exec env COLORTERM=truecolor TERM="${DVTM_TERM:-xterm-256color}" \
 	      WARREN_AGENT="$_n" WARREN_META="$WARREN_META" \
 	      ABDUCO_SOCKET_DIR="$WARREN_AGENTS_DIR" "$WARREN_ABDUCO" -n "$_n" \
 	      ${SHELL:-/bin/sh} -c "$_cmd" ) >/dev/null 2>&1
