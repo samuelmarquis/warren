@@ -94,6 +94,22 @@ list_names() {
 	abduco_agents 2>/dev/null | awk -F'\t' 'NR>1 && substr($0,1,1)!="+"{print $NF}'
 }
 
+# Remove orphan meta files (.color/.name/.namepin/.state) for agents with no
+# live session — a backstop for the warren-hook `gone` cleanup when a session
+# dies hard (crash/SSH-drop) and SessionEnd never fired.
+prune_meta() {
+	[ -d "$WARREN_META" ] || return 0
+	live=$(list_names)
+	for f in "$WARREN_META"/*.color "$WARREN_META"/*.name \
+	         "$WARREN_META"/*.namepin "$WARREN_META"/*.state; do
+		[ -e "$f" ] || continue                 # no-match glob stays literal
+		base=${f##*/}; base=${base%.*}
+		printf '%s\n' "$live" | grep -Fxq "$base" && continue
+		rm -f "$WARREN_META/$base".color "$WARREN_META/$base".name \
+		      "$WARREN_META/$base".namepin "$WARREN_META/$base".state 2>/dev/null
+	done
+}
+
 dashboard_running() { abduco_dash -d "$WARREN_DASH_NAME" >/dev/null 2>&1; }
 
 # the shell command a dvtm window runs to display one agent. ABDUCO_NO_ALTSCREEN
@@ -200,9 +216,10 @@ cmd_up() {
 		# exec the binary directly (abduco_dash is a shell function, not execable).
 		exec env ABDUCO_SOCKET_DIR="$WARREN_DASH_DIR" "$WARREN_ABDUCO" -a "$WARREN_DASH_NAME"
 	fi
-	# fresh start: create the dashboard and inject a window per existing agent.
-	# The writer blocks on opening the FIFO until dvtm starts reading it, which
-	# neatly synchronises us with dvtm coming up.
+	# fresh start: prune meta for dead agents, then create the dashboard and
+	# inject a window per existing agent. The writer blocks on opening the FIFO
+	# until dvtm starts reading it, which neatly synchronises us with dvtm.
+	prune_meta
 	rm -f "$WARREN_FIFO"
 	mkfifo -m 600 "$WARREN_FIFO"
 	(
