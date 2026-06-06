@@ -356,7 +356,15 @@ change). The agent list column is `SIDEBAR_WIDTH` (default 24).
   content. `vt_scroll` is split from a new `vt_app_scroll` (CSI S/T = SU/SD) so
   apps that scroll their own content no longer falsely trip the scrollback state.
   Replaces the earlier freeze-while-scrolled mitigation (the two `draw_content`
-  draw-gates are gone). Covered by `dvtm/t_vt.c` (a 29-check libvt harness).
+  draw-gates are gone). Covered by `dvtm/t_vt.c` (a libvt harness, 46 checks).
+- **scrollback depth** (`bin/warren`, abduco `-L`): an agent's scrollback lives
+  in the *dashboard's* dvtm window, which is (re)populated from abduco's replay
+  buffer when the relay (`abduco -a <agent>`) attaches. abduco defaults that
+  buffer to **120 lines** (`screen_max_rows`), which walled scrolling off just
+  above where the dashboard attached. warren now spawns agents with
+  `-L $WARREN_SCROLLBACK` (default **5000**, matching dvtm's `SCROLL_HISTORY`) so
+  the full history replays. Applies to newly-spawned agents; existing sessions
+  keep their 120-line buffer until recreated.
 - **dvtm** (`dvtm/vt.c`, OSC 52 clipboard): the vt now forwards an **OSC 52**
   clipboard write (`vt_clipboard_handler`) from the *focused* agent to the real
   terminal fd, instead of dropping it in the `default` OSC case. That's how
