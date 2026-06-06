@@ -36,6 +36,12 @@ WARREN_META=${WARREN_META:-$WARREN_HOME/meta}
 WARREN_FIFO=${WARREN_FIFO:-$WARREN_HOME/dvtm.fifo}
 WARREN_DASH_NAME=${WARREN_DASH_NAME:-dashboard}
 WARREN_AGENT_CMD=${WARREN_AGENT_CMD:-claude}
+# How many lines of each agent's output abduco buffers for replay on (re)attach.
+# This is the ceiling on how far you can scroll back into an agent: the agent's
+# scrollback lives in the dashboard's dvtm window, which is (re)populated from
+# abduco's replay buffer, so a small value walls off the conversation above the
+# point where the dashboard attached. Match dvtm's own SCROLL_HISTORY (5000).
+WARREN_SCROLLBACK=${WARREN_SCROLLBACK:-5000}
 WARREN_ABDUCO=${WARREN_ABDUCO:-$BINDIR/warren-abduco}
 WARREN_DVTM=${WARREN_DVTM:-$BINDIR/warren-dvtm}
 [ -x "$WARREN_ABDUCO" ] || WARREN_ABDUCO=warren-abduco
@@ -169,7 +175,7 @@ spawn_agent() { # name dir color mode [session-id]
 	( cd "$_dir" 2>/dev/null || cd "$HOME"
 	  exec env COLORTERM=truecolor TERM="${DVTM_TERM:-xterm-256color}" \
 	      WARREN_AGENT="$_n" WARREN_META="$WARREN_META" \
-	      ABDUCO_SOCKET_DIR="$WARREN_AGENTS_DIR" "$WARREN_ABDUCO" -n "$_n" \
+	      ABDUCO_SOCKET_DIR="$WARREN_AGENTS_DIR" "$WARREN_ABDUCO" -L "$WARREN_SCROLLBACK" -n "$_n" \
 	      ${SHELL:-/bin/sh} -c "$_cmd" ) >/dev/null 2>&1
 	printf '%s' "$_n"
 }
