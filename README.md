@@ -365,6 +365,14 @@ change). The agent list column is `SIDEBAR_WIDTH` (default 24).
   `-L $WARREN_SCROLLBACK` (default **5000**, matching dvtm's `SCROLL_HISTORY`) so
   the full history replays. Applies to newly-spawned agents; existing sessions
   keep their 120-line buffer until recreated.
+- **fullscreen agents** (`dvtm`, wheel forwarding): the above scrollback is for
+  *inline* Claude (`tui: "default"`). Claude's **fullscreen** renderer
+  (`tui: "fullscreen"`) draws on the terminal's **alternate screen**, which has
+  no scrollback by design — there, scrolling is Claude's own. So dvtm routes the
+  wheel by screen: normal screen → dvtm scrollback; **alt screen → forward the
+  wheel to the app** (`vt_mouse_wheel`) so Claude's fullscreen scroll works.
+  dvtm tracks the app's mouse modes (DECSET 1000/1002/1003 + SGR 1006) and only
+  forwards when the app is listening, in the encoding it asked for.
 - **dvtm** (`dvtm/vt.c`, OSC 52 clipboard): the vt now forwards an **OSC 52**
   clipboard write (`vt_clipboard_handler`) from the *focused* agent to the real
   terminal fd, instead of dropping it in the `default` OSC case. That's how
