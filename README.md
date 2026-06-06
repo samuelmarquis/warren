@@ -36,10 +36,13 @@ ssh ── warren-abduco (dashboard session)        ← survives the SSH drop
           └── warren-dvtm  (sidebar + fullscreen)
                 ├── warren-abduco -a <agent-1>   ← each agent is its own
                 │     └── claude                    independent session…
-                ├── warren-abduco -a <agent-2>
-                │     └── claude
-                └── warren-control  (the "+ new agent" form)
+                └── warren-abduco -a <agent-2>
+                      └── claude
 ```
+
+The "+ new agent" tab and the rename/edit screens are **native dvtm
+screens** (warren's `SUB_NEW` / `SUB_EDIT`), not separate programs — the
+pinned tab just shows a hint and `Enter` opens the form in the pane.
 
 - **Per-agent sessions** live in `~/.warren/agents/` and are completely
   independent — an agent survives even if dvtm itself crashes, and can be
@@ -71,9 +74,9 @@ two directories; `install.sh` builds both in place and installs everything to
 cd ~/Developer/warren && ./install.sh   # builds the patched dvtm + abduco
 ```
 
-Installs six programs into `~/.local/bin` (override with `PREFIX=…`):
-`warren`, `warren-control`, `warren-sessions`, `warren-hook`, `warren-dvtm`,
-`warren-abduco`. Make sure `~/.local/bin` is on your `PATH`.
+Installs five programs into `~/.local/bin` (override with `PREFIX=…`):
+`warren`, `warren-sessions`, `warren-hook`, `warren-dvtm`, `warren-abduco`.
+Make sure `~/.local/bin` is on your `PATH`.
 
 > **ncurses:** dvtm builds against **Homebrew's ncurses 6** if present
 > (`brew install ncurses`) — needed for SGR mouse, i.e. trackpad/wheel scrolling

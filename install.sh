@@ -20,7 +20,6 @@ mkdir -p "$BIN"
 install -m 0755 "$ABDUCO_SRC/abduco"        "$BIN/warren-abduco"
 install -m 0755 "$DVTM_SRC/dvtm"            "$BIN/warren-dvtm"
 install -m 0755 "$HERE/bin/warren"          "$BIN/warren"
-install -m 0755 "$HERE/bin/warren-control"  "$BIN/warren-control"
 install -m 0755 "$HERE/bin/warren-sessions" "$BIN/warren-sessions"
 install -m 0755 "$HERE/bin/warren-hook"     "$BIN/warren-hook"
 
