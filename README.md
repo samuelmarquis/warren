@@ -123,7 +123,7 @@ agent screen (focus one and the create form appears in the pane).
 | `c` | open the **color-grid picker** (arrow around all 256 colors; Enter picks) |
 | `e` | edit form for the selected agent — change **name + color** together (persists) |
 | `x` | close the selected agent (terminates it; `y`/`n` confirm) |
-| `:` | command line — `:q!` quits warren; `:color`/`:c` sets the tab color (below) |
+| `:` | command line — `:q` detaches the dashboard (agents keep running), `:q!` quits **and kills every agent**; `:color`/`:c` sets the tab color (below) |
 | `i` `a` `Enter` `Esc` | back to INSERT (type into Claude) |
 | `Ctrl-Space` | toggle back to INSERT |
 
