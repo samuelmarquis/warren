@@ -235,6 +235,9 @@ cmd_up() {
 			[ -n "$name" ] || continue
 			create_line "$name"
 		done
+		# tell dvtm injection is done; it opens the new-agent form if no
+		# agents were created (fresh dashboard lands on the form, not a hint).
+		printf 'warrenready\n'
 	) &
 	exec env ABDUCO_SOCKET_DIR="$WARREN_DASH_DIR" \
 		"$WARREN_ABDUCO" -c "$WARREN_DASH_NAME" \
