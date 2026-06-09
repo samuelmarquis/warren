@@ -230,9 +230,12 @@ limited to the current dir and won't break if that picker's behavior changes.
 From the CLI: `warren sessions` lists them; `warren new mywork ~/proj 4 resume <id>`
 resumes a specific one.
 
-Reach the form from NORMAL mode with `n` (or move to the `+ new agent` row and
-press `i`/`Enter`). Closing an agent is `x` in NORMAL mode (or just quit Claude
-inside it with `Ctrl-C` / exit) — the row disappears from the sidebar.
+Reach the form from NORMAL mode with `n`, by jumping to an empty slot (a digit),
+or just by moving onto the `+ new agent` row — landing on it opens the form
+directly. A freshly launched dashboard with no agents yet also opens straight
+into the form. `Esc` steps back out to the `+ new agent` row; `:` works inside
+the form too (e.g. `:q` to quit). Closing an agent is `x` in NORMAL mode (or just
+quit Claude inside it with `Ctrl-C` / exit) — the row disappears from the sidebar.
 
 Renames (`r`) and colors (`c`) are remembered in `~/.warren/meta` and reapplied
 when you relaunch.
