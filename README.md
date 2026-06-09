@@ -230,12 +230,15 @@ limited to the current dir and won't break if that picker's behavior changes.
 From the CLI: `warren sessions` lists them; `warren new mywork ~/proj 4 resume <id>`
 resumes a specific one.
 
-Reach the form from NORMAL mode with `n`, by jumping to an empty slot (a digit),
-or just by moving onto the `+ new agent` row — landing on it opens the form
-directly. A freshly launched dashboard with no agents yet also opens straight
-into the form. `Esc` steps back out to the `+ new agent` row; `:` works inside
-the form too (e.g. `:q` to quit). Closing an agent is `x` in NORMAL mode (or just
-quit Claude inside it with `Ctrl-C` / exit) — the row disappears from the sidebar.
+The `+ new agent` screen behaves like any other tab: focusing it (move onto it,
+or a freshly launched dashboard with no agents) shows the form in **NORMAL**
+mode, so `j`/`k`, `1`–`9`, `n` and `:` commands (e.g. `:q`) all keep working —
+you can always leave without creating an agent. Press `l`/`i`/`Enter` (or
+`Ctrl-Space`) to enter **INSERT** and fill out the form; `Enter` then creates the
+agent, and `Esc`/`Ctrl-Space` returns to NORMAL with the form still up. `n` or an
+empty numbered slot jump straight into INSERT, ready to type. Closing an agent is
+`x` in NORMAL mode (or just quit Claude inside it with `Ctrl-C` / exit) — the row
+disappears from the sidebar.
 
 Renames (`r`) and colors (`c`) are remembered in `~/.warren/meta` and reapplied
 when you relaunch.
