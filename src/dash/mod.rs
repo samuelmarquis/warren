@@ -149,6 +149,31 @@ impl Dash {
         self.set_focus(self.agents.len());
         self.enter_insert();
     }
+
+    /// Swap the focused agent's sidebar position with row N (1-based).
+    /// Slots live in daemon meta, so the swap is two SetMeta messages; the
+    /// MetaChanged broadcasts resort the sidebar (and any other viewer's).
+    pub fn swap_with_row(&mut self, n: u8) {
+        let target = n as usize - 1;
+        if target >= self.agents.len() || target == self.focus || self.on_newform() {
+            return;
+        }
+        let a_slot = self.agents[self.focus].meta.slot;
+        let b_slot = self.agents[target].meta.slot;
+        self.agents[target].send(&ToDaemon::SetMeta {
+            name: None,
+            color: None,
+            pinned: None,
+            slot: Some(a_slot),
+        });
+        let focused = &mut self.agents[self.focus];
+        focused.send(&ToDaemon::SetMeta {
+            name: None,
+            color: None,
+            pinned: None,
+            slot: Some(b_slot),
+        });
+    }
 }
 
 pub fn run() -> Result<()> {

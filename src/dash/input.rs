@@ -117,6 +117,17 @@ fn normal_key(dash: &mut Dash, bytes: &[u8]) -> (usize, Option<Outcome>) {
         b'G' => dash.focus_last(),
         b'1'..=b'9' => dash.focus_slot(bytes[0] - b'0'),
         b'0' => dash.focus_slot(10),
+        // Shift+digit: swap the focused agent with sidebar row N.
+        b'!' => dash.swap_with_row(1),
+        b'@' => dash.swap_with_row(2),
+        b'#' => dash.swap_with_row(3),
+        b'$' => dash.swap_with_row(4),
+        b'%' => dash.swap_with_row(5),
+        b'^' => dash.swap_with_row(6),
+        b'&' => dash.swap_with_row(7),
+        b'*' => dash.swap_with_row(8),
+        b'(' => dash.swap_with_row(9),
+        b')' => dash.swap_with_row(10),
         b'n' => dash.open_new_form(),
         b'r' => {
             if let Some(agent) = dash.focused() {

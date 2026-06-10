@@ -1,31 +1,27 @@
 #!/bin/sh
-# Build the patched dvtm + abduco and install warren into $PREFIX/bin.
+# Build warren v1 (single Rust binary) and install it into $PREFIX/bin.
+#
+# The legacy v0 pieces (abduco/dvtm/bin) are no longer installed; if you still
+# have running v0 agents, the previous launcher is preserved as `warren0`
+# (reach a v0 agent directly with:
+#   ABDUCO_SOCKET_DIR=~/.warren/agents warren-abduco -a <name>).
 set -eu
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-# abduco and dvtm live inside this repo (their own git repos; see README)
-DVTM_SRC=${DVTM_SRC:-$HERE/dvtm}
-ABDUCO_SRC=${ABDUCO_SRC:-$HERE/abduco}
 PREFIX=${PREFIX:-$HOME/.local}
 BIN=$PREFIX/bin
 
-echo "==> building abduco ($ABDUCO_SRC)"
-make -C "$ABDUCO_SRC" >/dev/null
-
-echo "==> building dvtm ($DVTM_SRC)"
-make -C "$DVTM_SRC" dvtm >/dev/null
+echo "==> building warren v1 (release)"
+cargo build --release --manifest-path "$HERE/v1/Cargo.toml"
 
 echo "==> installing into $BIN"
 mkdir -p "$BIN"
-install -m 0755 "$ABDUCO_SRC/abduco"        "$BIN/warren-abduco"
-install -m 0755 "$DVTM_SRC/dvtm"            "$BIN/warren-dvtm"
-install -m 0755 "$HERE/bin/warren"          "$BIN/warren"
-install -m 0755 "$HERE/bin/warren-sessions" "$BIN/warren-sessions"
-install -m 0755 "$HERE/bin/warren-hook"     "$BIN/warren-hook"
-
-echo "==> installing dvtm terminfo (best effort)"
-tic -s "$DVTM_SRC/dvtm.info" 2>/dev/null && echo "    installed dvtm terminfo" \
-	|| echo "    skipped (will fall back to screen-256color)"
+# Keep the v0 launcher reachable during the transition.
+if [ -f "$BIN/warren" ] && head -2 "$BIN/warren" | grep -q '^#!/bin/sh'; then
+	cp "$BIN/warren" "$BIN/warren0"
+	echo "    (v0 shell launcher preserved as warren0)"
+fi
+install -m 0755 "$HERE/v1/target/release/warren" "$BIN/warren"
 
 echo
 echo "Done. Make sure $BIN is on your PATH, then run:  warren"

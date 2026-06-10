@@ -276,8 +276,10 @@ fn attach_loop(stream: &mut UnixStream, cols: u16, rows: u16) -> Result<String> 
 
     let poller = Poller::new()?;
     unsafe {
+        // Readable interest only: a level-triggered writable socket would
+        // wake the loop continuously. Writes are flushed inline below.
         poller.add_with_mode(&stdin, PollEvent::readable(0), PollMode::Level)?;
-        poller.add_with_mode(&*stream, PollEvent::all(1), PollMode::Level)?;
+        poller.add_with_mode(&*stream, PollEvent::readable(1), PollMode::Level)?;
     }
 
     let mut decoder = FrameDecoder::new();
@@ -285,6 +287,27 @@ fn attach_loop(stream: &mut UnixStream, cols: u16, rows: u16) -> Result<String> 
     let stdout = std::io::stdout();
 
     loop {
+        // Drain queued writes BEFORE waiting: the very first frame (Attach)
+        // must reach the daemon or it will never send us anything to wake on.
+        let mut stalls = 0;
+        while !out_q.is_empty() {
+            match (&*stream).write(&out_q) {
+                Ok(0) => return Ok("daemon closed the connection".into()),
+                Ok(n) => {
+                    out_q.drain(..n);
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    stalls += 1;
+                    if stalls > 200 {
+                        return Ok("daemon stopped accepting input".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+
         events.clear();
         poller.wait(&mut events, None)?;
         for ev in events.iter() {
@@ -308,19 +331,6 @@ fn attach_loop(stream: &mut UnixStream, cols: u16, rows: u16) -> Result<String> 
                     }
                     decoder.push(&buf[..n]);
                 }
-            }
-        }
-
-        // Drain pending writes (input) without ever blocking hard.
-        while !out_q.is_empty() {
-            match (&*stream).write(&out_q) {
-                Ok(0) => return Ok("daemon closed the connection".into()),
-                Ok(n) => {
-                    out_q.drain(..n);
-                }
-                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
-                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e.into()),
             }
         }
 
