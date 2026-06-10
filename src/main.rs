@@ -12,6 +12,7 @@
 
 mod cli;
 mod daemon;
+mod dash;
 mod hooks;
 mod names;
 mod paths;
@@ -42,7 +43,7 @@ fn main() {
     let rest = if args.is_empty() { &args[..] } else { &args[1..] };
 
     let result: Result<()> = match sub {
-        "up" => todo_role("dashboard"),
+        "up" => dash::run(),
         "new" | "create" => cli::cmd_new(rest),
         "ls" | "list" => cli::cmd_ls(),
         "kill" | "rm" => cli::cmd_kill(rest),
@@ -66,6 +67,3 @@ fn main() {
     }
 }
 
-fn todo_role(name: &str) -> Result<()> {
-    anyhow::bail!("'{name}' is not implemented yet in warren v1")
-}
