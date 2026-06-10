@@ -347,6 +347,38 @@ fn pinned_name_resists_title_sync() {
 }
 
 #[test]
+fn mouse_forwarded_only_when_subscribed() {
+    let home = TestHome::new("mouse");
+    // The app subscribes to drag tracking + SGR by WRITING the DECSET (only
+    // app output reaches the emulator); cat -v then makes the forwarded
+    // mouse bytes visible on screen.
+    new_agent(&home, "mousey", "printf '\\033[?1002h\\033[?1006h'; cat -v");
+    let sock = home.sock("mousey");
+    let (mut viewer, _) = Viewer::attach(&sock, 80, 24);
+
+    // Wait until the daemon reports the subscription, so the click can't race
+    // the app's DECSET. (Snapshot may already carry it; ask fresh.)
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let (_, snap) = Viewer::attach(&sock, 80, 24);
+        let ToClient::Snapshot { mouse, .. } = snap else { unreachable!() };
+        if mouse == proto::MouseProto::Drag {
+            break;
+        }
+        assert!(Instant::now() < deadline, "agent never subscribed to mouse");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    viewer.send(&ToDaemon::Mouse { kind: proto::MouseKind::Down(0), col: 4, row: 2, mods: 0 });
+
+    // cat -v echoes the click's SGR encoding: ^[[<0;5;3M.
+    let damage = viewer.await_frame(5_000, |m| {
+        matches!(m, ToClient::Damage { lines, .. }
+            if lines.iter().any(|(_, l)| l.0.iter().any(|s| s.text.contains("[<0;5;3M"))))
+    });
+    assert!(damage.is_some(), "subscribed click reaches the app, SGR-encoded");
+}
+
+#[test]
 fn unique_names_and_slots() {
     let home = TestHome::new("uniq");
     new_agent(&home, "twin", "cat");

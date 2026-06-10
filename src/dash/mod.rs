@@ -55,6 +55,8 @@ pub struct Dash {
     pub editform: Option<forms::EditForm>,
     /// Agent name to focus once discovery sees its socket (form submission).
     pub pending_focus: Option<String>,
+    /// 0-based origin of the 16x16 color grid, when one is on screen.
+    pub palette_origin: Option<(u16, u16)>,
     pub cols: u16,
     pub rows: u16,
     pub sidebar_dirty: bool,
@@ -157,12 +159,14 @@ pub fn run() -> Result<()> {
     let mut raw = saved.clone();
     raw.make_raw();
     rustix::termios::tcsetattr(&stdin, rustix::termios::OptionalActions::Now, &raw)?;
-    print!("\x1b[?1049h\x1b[2J");
+    // Altscreen + SGR mouse (button-drag tracking): sidebar clicks/wheel for
+    // us, everything over the pane forwarded to the focused agent.
+    print!("\x1b[?1049h\x1b[2J\x1b[?1002h\x1b[?1006h");
     let _ = std::io::stdout().flush();
 
     let result = run_inner(&stdin);
 
-    print!("\x1b[0m\x1b[?25h\x1b[?1049l");
+    print!("\x1b[?1002l\x1b[?1006l\x1b[0m\x1b[?25h\x1b[?1049l");
     let _ = std::io::stdout().flush();
     let _ = rustix::termios::tcsetattr(&stdin, rustix::termios::OptionalActions::Now, &saved);
 
@@ -193,6 +197,7 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
         newform: forms::NewForm::reset(),
         editform: None,
         pending_focus: None,
+        palette_origin: None,
         cols,
         rows,
         sidebar_dirty: true,
@@ -279,6 +284,18 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
                             if dash.agents[idx].meta_dirty {
                                 dash.sidebar_dirty = true;
                                 dash.agents[idx].meta_dirty = false;
+                            }
+                            // OSC 52: only the FOCUSED agent may write the
+                            // host clipboard (a backgrounded agent can't
+                            // silently clobber it — v0 rule).
+                            let payload = dash.agents[idx].clipboard_pending.take();
+                            if let Some(b64) = payload {
+                                if idx == dash.focus {
+                                    let stdout = std::io::stdout();
+                                    let mut out = stdout.lock();
+                                    let _ = write!(out, "\x1b]52;c;{b64}\x07");
+                                    let _ = out.flush();
+                                }
                             }
                         }
                         if ev.writable {

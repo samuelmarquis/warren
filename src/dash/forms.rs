@@ -232,7 +232,7 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
         }
     }
 
-    draw_color_field(out, row, x0, form.color, active == NField::Color);
+    dash.palette_origin = draw_color_field(out, row, x0, form.color, active == NField::Color);
 }
 
 // ----------------------------------------------------------------- edit form
@@ -283,7 +283,7 @@ pub fn draw_edit_form(dash: &mut Dash, out: &mut String) {
     }
     let _ = write!(out, "\x1b[2;{}H\x1b[1medit agent\x1b[0m", x0 + 2);
     let row = draw_text_field(out, 4, x0, "Title", &form.title, form.field == 0, true);
-    draw_color_field(out, row, x0, form.color, form.field == 1);
+    dash.palette_origin = draw_color_field(out, row, x0, form.color, form.field == 1);
 }
 
 // ------------------------------------------------------------ shared pieces
@@ -379,7 +379,37 @@ fn draw_text_field(
     row + 2
 }
 
-fn draw_color_field(out: &mut String, row: u16, x0: u16, color: u16, active: bool) {
+/// Click on a palette swatch (0-based screen cell). Routes to whichever form
+/// is showing; the swatch grid origin is recorded at draw time.
+pub fn palette_click(dash: &mut Dash, row: u16, col: u16) {
+    let Some((row0, col0)) = dash.palette_origin else { return };
+    if row < row0 || col < col0 {
+        return;
+    }
+    let (gr, gc) = ((row - row0) as u16, (col - col0) / 2);
+    if gr >= 16 || gc >= 16 {
+        return;
+    }
+    let idx = gr * 16 + gc;
+    if let Some(form) = dash.editform.as_mut() {
+        form.field = 1;
+        form.color = idx;
+    } else if dash.on_newform() {
+        let nfields = dash.newform.fields().len();
+        dash.newform.field = nfields - 1; // Color is always last
+        dash.newform.color = idx;
+    }
+    dash.form_dirty = true;
+}
+
+/// Returns the 0-based (row, col) of the swatch grid's origin when drawn.
+fn draw_color_field(
+    out: &mut String,
+    row: u16,
+    x0: u16,
+    color: u16,
+    active: bool,
+) -> Option<(u16, u16)> {
     let _ = write!(out, "\x1b[{};{}H{}Color    \x1b[0m  ", row, x0 + 2, field_label(active));
     if color == 0 {
         let _ = write!(out, "\x1b[2mnone\x1b[0m");
@@ -388,7 +418,7 @@ fn draw_color_field(out: &mut String, row: u16, x0: u16, color: u16, active: boo
         let _ = write!(out, "\x1b[48;5;{color}m   \x1b[0m  #{r:02x}{g:02x}{b:02x} \u{b7} {color}");
     }
     if !active {
-        return;
+        return None;
     }
     // 16x16 palette grid; swatch 0 is "none".
     for grid_row in 0..16u16 {
@@ -407,10 +437,11 @@ fn draw_color_field(out: &mut String, row: u16, x0: u16, color: u16, active: boo
     }
     let _ = write!(
         out,
-        "\x1b[{};{}H\x1b[2mhjkl/arrows pick \u{b7} 0 none\x1b[0m",
+        "\x1b[{};{}H\x1b[2mhjkl/arrows/click pick \u{b7} 0 none\x1b[0m",
         row + 2 + 16,
         x0 + 4
     );
+    Some((row + 2 - 1, x0 + 4 - 1)) // 1-based draw coords -> 0-based cells
 }
 
 fn short_path(path: &str) -> String {

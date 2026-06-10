@@ -47,6 +47,8 @@ pub struct AgentConn {
     pub unseen: bool,
     /// busy() as of the last sidebar paint, for transition detection.
     pub last_busy: bool,
+    /// OSC 52 payload (base64) awaiting forwarding to the host terminal.
+    pub clipboard_pending: Option<String>,
 }
 
 impl AgentConn {
@@ -92,6 +94,7 @@ impl AgentConn {
             meta_dirty: true,
             unseen: false,
             last_busy: true,
+            clipboard_pending: None,
         };
         conn.send(&ToDaemon::Attach { cols, rows });
         Ok(conn)
@@ -228,8 +231,9 @@ impl AgentConn {
             ToClient::Exited { status } => {
                 self.exited = Some(status);
             }
-            // Clipboard forwarding lands in M8.
-            ToClient::Clipboard(_) => {}
+            ToClient::Clipboard(b64) => {
+                self.clipboard_pending = Some(b64);
+            }
         }
     }
 

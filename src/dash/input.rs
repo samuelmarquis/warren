@@ -10,8 +10,9 @@
 //! typing into an agent; NORMAL still navigates the whole dashboard, so the
 //! form never traps you.
 
+use super::render::SIDEBAR_WIDTH;
 use super::{forms, Dash, Mode, Sub};
-use crate::proto::ToDaemon;
+use crate::proto::{MouseKind, ToDaemon};
 
 pub enum Outcome {
     Continue,
@@ -28,6 +29,12 @@ const ESC: u8 = 0x1b;
 pub fn handle_bytes(dash: &mut Dash, bytes: &[u8]) -> Outcome {
     let mut i = 0;
     while i < bytes.len() {
+        // SGR mouse reports can interleave with anything; route them first.
+        if let Some((mouse, used)) = parse_sgr_mouse(&bytes[i..]) {
+            handle_mouse(dash, mouse);
+            i += used;
+            continue;
+        }
         // The edit form captures everything until Enter/Esc (v0's SUB_EDIT).
         if dash.editform.is_some() {
             i += forms::edit_key(dash, &bytes[i..]).max(1);
@@ -43,12 +50,17 @@ pub fn handle_bytes(dash: &mut Dash, bytes: &[u8]) -> Outcome {
                 }
             }
             Mode::Insert => {
-                // Forward verbatim up to a control toggle.
-                let stop = bytes[i..]
-                    .iter()
-                    .position(|&b| b == CTRL_SPACE || b == CTRL_BACKSLASH)
-                    .map(|p| i + p)
-                    .unwrap_or(bytes.len());
+                // Forward verbatim up to a control toggle or a mouse report.
+                let mut stop = bytes.len();
+                for (p, &b) in bytes[i..].iter().enumerate() {
+                    if b == CTRL_SPACE
+                        || b == CTRL_BACKSLASH
+                        || (b == ESC && bytes[i + p..].starts_with(b"\x1b[<"))
+                    {
+                        stop = i + p;
+                        break;
+                    }
+                }
                 if stop > i {
                     dash.send_input(&bytes[i..stop]);
                 }
@@ -58,6 +70,10 @@ pub fn handle_bytes(dash: &mut Dash, bytes: &[u8]) -> Outcome {
                 match bytes[stop] {
                     CTRL_SPACE => dash.enter_normal(),
                     CTRL_BACKSLASH => return Outcome::Quit,
+                    ESC => {
+                        i = stop; // mouse report; reparsed at loop top
+                        continue;
+                    }
                     _ => unreachable!(),
                 }
                 i = stop + 1;
@@ -232,6 +248,88 @@ fn run_command(dash: &mut Dash, cmd: &str) -> Option<Outcome> {
     }
     dash.flash = Some(format!("unknown command :{cmd}"));
     None
+}
+
+// ---------------------------------------------------------------------- mouse
+
+pub struct MouseReport {
+    pub code: u32,
+    /// 0-based screen cell.
+    pub col: u16,
+    pub row: u16,
+    pub press: bool,
+}
+
+/// Parse one SGR mouse report: ESC [ < code ; col ; row (M|m).
+fn parse_sgr_mouse(bytes: &[u8]) -> Option<(MouseReport, usize)> {
+    let rest = bytes.strip_prefix(b"\x1b[<")?;
+    let end = rest.iter().position(|&b| b == b'M' || b == b'm')?;
+    let body = std::str::from_utf8(&rest[..end]).ok()?;
+    let mut parts = body.split(';');
+    let code: u32 = parts.next()?.parse().ok()?;
+    let col: u16 = parts.next()?.parse().ok()?;
+    let row: u16 = parts.next()?.parse().ok()?;
+    Some((
+        MouseReport {
+            code,
+            col: col.saturating_sub(1),
+            row: row.saturating_sub(1),
+            press: rest[end] == b'M',
+        },
+        3 + end + 1,
+    ))
+}
+
+fn handle_mouse(dash: &mut Dash, ev: MouseReport) {
+    let wheel = ev.code & 64 != 0;
+    let motion = ev.code & 32 != 0;
+    let button = (ev.code & 3) as u8;
+    let mods = (ev.code & 0b11100) as u8;
+
+    // Over the sidebar: wheel cycles focus, click focuses a row.
+    if ev.col < SIDEBAR_WIDTH {
+        if wheel && ev.press {
+            if ev.code & 1 == 0 {
+                dash.focus_prev();
+            } else {
+                dash.focus_next();
+            }
+        } else if ev.press && !motion && button == 0 {
+            let row = ev.row as usize;
+            if row <= dash.agents.len() {
+                dash.set_focus(row);
+            }
+        }
+        return;
+    }
+
+    // Over a form: palette swatch clicks.
+    if dash.editform.is_some() || dash.on_newform() {
+        if ev.press && !motion && !wheel && button == 0 {
+            forms::palette_click(dash, ev.row, ev.col);
+        }
+        return;
+    }
+
+    // Over the content pane: forward semantically; the daemon encodes it
+    // only if the app subscribed (fullscreen Claude scrolls itself this way).
+    let kind = if wheel {
+        if !ev.press {
+            return;
+        }
+        if ev.code & 1 == 0 { MouseKind::WheelUp } else { MouseKind::WheelDown }
+    } else if motion {
+        if button == 3 { MouseKind::Moved } else { MouseKind::Drag(button) }
+    } else if ev.press {
+        MouseKind::Down(button)
+    } else {
+        MouseKind::Up(button)
+    };
+    let col = ev.col - SIDEBAR_WIDTH;
+    let row = ev.row;
+    if let Some(agent) = dash.focused_mut() {
+        agent.send(&ToDaemon::Mouse { kind, col, row, mods });
+    }
 }
 
 /// `:color` argument: an xterm-256 index or `#rrggbb` (quantized to 256).
