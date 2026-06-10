@@ -64,7 +64,7 @@ fn draw_sidebar(dash: &mut Dash, out: &mut String) {
             let mut label = "   + new agent".to_string();
             label.truncate(text_w);
             let pad = text_w.saturating_sub(label.chars().count());
-            let _ = write!(out, "{style}{label}{}\x1b[0m\x1b[2m│\x1b[0m", " ".repeat(pad));
+            let _ = write!(out, "{style}{label}{}\x1b[0m{SEP_STYLE}│\x1b[0m", " ".repeat(pad));
             continue;
         }
         if let Some(agent) = dash.agents.get(row as usize) {
@@ -111,8 +111,17 @@ fn draw_sidebar(dash: &mut Dash, out: &mut String) {
         } else {
             let _ = write!(out, "\x1b[0m{}", " ".repeat(text_w));
         }
-        let _ = write!(out, "\x1b[2m│\x1b[0m");
+        let _ = write!(out, "{SEP_STYLE}│\x1b[0m");
     }
+}
+
+/// Sidebar divider color — matched to the gray Claude uses for its
+/// text-entry box borders.
+const SEP_STYLE: &str = "\x1b[0;38;5;240m";
+
+/// Horizontal box-drawing leads that should joint into the divider with '├'.
+fn joins_divider(c: char) -> bool {
+    matches!(c, '\u{2500}' | '\u{2501}' | '\u{254c}' | '\u{2504}' | '\u{2508}' | '\u{2574}' | '\u{2576}')
 }
 
 fn draw_content(dash: &mut Dash, out: &mut String) {
@@ -144,6 +153,21 @@ fn draw_content(dash: &mut Dash, out: &mut String) {
 }
 
 fn draw_pane_line(out: &mut String, row: u16, x0: u16, width: usize, line: Option<&LineSpans>) {
+    // The divider cell to our left: '├' (in the line's own color) where a
+    // horizontal rule in the agent's UI meets the sidebar, plain '│' elsewhere.
+    let first_span = line.and_then(|l| l.0.first());
+    let joins = first_span
+        .and_then(|s| s.text.chars().next())
+        .map(joins_divider)
+        .unwrap_or(false);
+    if joins {
+        let rule = first_span.unwrap();
+        let style = spans::sgr_sequence(&Span { text: String::new(), ..rule.clone() });
+        let _ = write!(out, "\x1b[{};{}H{style}├\x1b[0m", row + 1, x0 - 1);
+    } else {
+        let _ = write!(out, "\x1b[{};{}H{SEP_STYLE}│\x1b[0m", row + 1, x0 - 1);
+    }
+
     let _ = write!(out, "\x1b[{};{}H\x1b[0m\x1b[K", row + 1, x0);
     let Some(line) = line else { return };
     let mut budget = width;
@@ -158,9 +182,28 @@ fn draw_pane_line(out: &mut String, row: u16, x0: u16, width: usize, line: Optio
     let _ = write!(out, "\x1b[0m");
 }
 
+// Mode-chip styles: CLAUDE = Anthropic orange (#D97757), NORMAL = green,
+// EDIT = purple; the rest of the bar is dark gray with light text.
+const CHIP_CLAUDE: &str = "\x1b[0;48;2;217;119;87;38;5;16;1m";
+const CHIP_NORMAL: &str = "\x1b[0;48;5;34;38;5;16;1m";
+const CHIP_EDIT: &str = "\x1b[0;48;5;93;38;5;231;1m";
+const BAR_BODY: &str = "\x1b[0;48;5;236;38;5;252m";
+
 fn draw_status(dash: &mut Dash, out: &mut String) {
     let row = dash.rows;
     let width = dash.cols as usize;
+
+    // Editing — an agent's metadata or the new-agent form — is EDIT mode;
+    // typing into Claude is CLAUDE mode; navigating is NORMAL.
+    let editing = dash.editform.is_some() || (dash.on_newform() && dash.mode == Mode::Insert);
+    let (chip, chip_style) = if editing {
+        ("EDIT", CHIP_EDIT)
+    } else if dash.mode == Mode::Insert {
+        ("CLAUDE", CHIP_CLAUDE)
+    } else {
+        ("NORMAL", CHIP_NORMAL)
+    };
+
     let body = if let Some(flash) = dash.flash.take() {
         format!(" {flash}")
     } else if matches!(dash.sub, Sub::Cmd) {
@@ -174,34 +217,35 @@ fn draw_status(dash: &mut Dash, out: &mut String) {
         let name = dash.focused().map(|a| a.meta.display.clone()).unwrap_or_default();
         format!(" close agent '{name}'?  [y] yes · [n] no")
     } else if dash.editform.is_some() {
-        " EDIT  Tab field · type / arrows · Enter save · Esc cancel".to_string()
+        " Tab field · type / arrows · Enter save · Esc cancel".to_string()
     } else if dash.on_newform() {
         match dash.mode {
-            Mode::Insert => {
-                " INSERT  Tab field · h/l mode · type · Enter create · Esc done".to_string()
-            }
-            Mode::Normal => {
-                " NORMAL  l/i/Enter edit form · j/k move · n new · :q quit".to_string()
-            }
+            Mode::Insert => " Tab field · h/l mode · type · Enter create · Esc done".to_string(),
+            Mode::Normal => " l/i/Enter edit form · j/k move · n new · :q quit".to_string(),
         }
     } else {
         match dash.mode {
             Mode::Normal => {
-                " NORMAL  j/k move · 1-9 jump · i insert · r rename · e edit · x close · : cmd"
-                    .to_string()
+                " j/k move · 1-9 jump · i claude · r rename · e edit · x close · : cmd".to_string()
             }
             Mode::Insert => {
                 let name = dash
                     .focused()
                     .map(|a| a.meta.display.clone())
                     .unwrap_or_else(|| "—".to_string());
-                format!(" INSERT  {name}  ·  ^Space normal mode · ^\\ detach")
+                format!(" {name}  ·  ^Space normal mode · ^\\ detach")
             }
         }
     };
-    let body: String = body.chars().take(width).collect();
-    let pad = width.saturating_sub(body.chars().count());
-    let _ = write!(out, "\x1b[{row};1H\x1b[0;7m{body}{}\x1b[0m", " ".repeat(pad));
+
+    let chip_text = format!(" {chip} ");
+    let body: String = body.chars().take(width.saturating_sub(chip_text.len())).collect();
+    let pad = width.saturating_sub(chip_text.len() + body.chars().count());
+    let _ = write!(
+        out,
+        "\x1b[{row};1H{chip_style}{chip_text}{BAR_BODY}{body}{}\x1b[0m",
+        " ".repeat(pad)
+    );
 }
 
 fn place_cursor(dash: &Dash, out: &mut String) {

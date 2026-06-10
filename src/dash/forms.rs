@@ -85,10 +85,18 @@ pub fn new_key(dash: &mut Dash, bytes: &[u8]) -> usize {
     let nfields = form.fields().len();
     match key {
         Key::Tab => form.field = (form.field + 1) % nfields,
+        // In the palette, Up/Down walk the grid; they only leave the field
+        // at its edges (top row exits up, bottom row exits down).
+        Key::Up if form.active() == NField::Color && form.color >= 16 => {
+            form.color -= 16;
+        }
+        Key::Down if form.active() == NField::Color && form.color + 16 <= 255 => {
+            form.color += 16;
+        }
         Key::ShiftTab | Key::Up if form.active() != NField::List => {
             form.field = (form.field + nfields - 1) % nfields;
         }
-        Key::Down if form.active() != NField::List && form.active() != NField::Color => {
+        Key::Down if form.active() != NField::List => {
             form.field = (form.field + 1) % nfields;
         }
         Key::Esc => {
@@ -232,7 +240,8 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
         }
     }
 
-    dash.palette_origin = draw_color_field(out, row, x0, form.color, active == NField::Color);
+    dash.palette_geom =
+        draw_color_field(out, row, x0, pane_w, pane_h, form.color, active == NField::Color);
 }
 
 // ----------------------------------------------------------------- edit form
@@ -242,6 +251,8 @@ pub fn edit_key(dash: &mut Dash, bytes: &[u8]) -> usize {
     let (key, consumed) = decode_key(bytes);
     let Some(form) = dash.editform.as_mut() else { return consumed };
     match key {
+        Key::Up if form.field == 1 && form.color >= 16 => form.color -= 16,
+        Key::Down if form.field == 1 && form.color + 16 <= 255 => form.color += 16,
         Key::Tab | Key::ShiftTab | Key::Up | Key::Down => form.field ^= 1,
         Key::Esc => {
             dash.editform = None;
@@ -275,6 +286,7 @@ pub fn edit_key(dash: &mut Dash, bytes: &[u8]) -> usize {
 
 pub fn draw_edit_form(dash: &mut Dash, out: &mut String) {
     let x0 = SIDEBAR_WIDTH + 1;
+    let pane_w = dash.cols.saturating_sub(SIDEBAR_WIDTH) as usize;
     let pane_h = dash.rows.saturating_sub(1);
     let Some(form) = dash.editform.as_ref() else { return };
 
@@ -283,7 +295,8 @@ pub fn draw_edit_form(dash: &mut Dash, out: &mut String) {
     }
     let _ = write!(out, "\x1b[2;{}H\x1b[1medit agent\x1b[0m", x0 + 2);
     let row = draw_text_field(out, 4, x0, "Title", &form.title, form.field == 0, true);
-    dash.palette_origin = draw_color_field(out, row, x0, form.color, form.field == 1);
+    dash.palette_geom =
+        draw_color_field(out, row, x0, pane_w, pane_h, form.color, form.field == 1);
 }
 
 // ------------------------------------------------------------ shared pieces
@@ -380,13 +393,13 @@ fn draw_text_field(
 }
 
 /// Click on a palette swatch (0-based screen cell). Routes to whichever form
-/// is showing; the swatch grid origin is recorded at draw time.
+/// is showing; the swatch grid geometry is recorded at draw time.
 pub fn palette_click(dash: &mut Dash, row: u16, col: u16) {
-    let Some((row0, col0)) = dash.palette_origin else { return };
+    let Some((row0, col0, bw, bh)) = dash.palette_geom else { return };
     if row < row0 || col < col0 {
         return;
     }
-    let (gr, gc) = ((row - row0) as u16, (col - col0) / 2);
+    let (gr, gc) = ((row - row0) / bh, (col - col0) / bw);
     if gr >= 16 || gc >= 16 {
         return;
     }
@@ -402,14 +415,18 @@ pub fn palette_click(dash: &mut Dash, row: u16, col: u16) {
     dash.form_dirty = true;
 }
 
-/// Returns the 0-based (row, col) of the swatch grid's origin when drawn.
+/// Draw the color field; when active, fill the remaining pane with the 16x16
+/// swatch grid, scaling each box to the available space (the v0 big picker).
+/// Returns the grid geometry as 0-based (row, col, box_w, box_h).
 fn draw_color_field(
     out: &mut String,
     row: u16,
     x0: u16,
+    pane_w: usize,
+    pane_h: u16,
     color: u16,
     active: bool,
-) -> Option<(u16, u16)> {
+) -> Option<(u16, u16, u16, u16)> {
     let _ = write!(out, "\x1b[{};{}H{}Color    \x1b[0m  ", row, x0 + 2, field_label(active));
     if color == 0 {
         let _ = write!(out, "\x1b[2mnone\x1b[0m");
@@ -420,28 +437,48 @@ fn draw_color_field(
     if !active {
         return None;
     }
-    // 16x16 palette grid; swatch 0 is "none".
-    for grid_row in 0..16u16 {
-        let _ = write!(out, "\x1b[{};{}H", row + 2 + grid_row, x0 + 4);
-        for grid_col in 0..16u16 {
-            let idx = grid_row * 16 + grid_col;
-            let here = idx == color;
-            if idx == 0 {
-                let _ = write!(out, "\x1b[0;2m{}\x1b[0m", if here { "[]" } else { "--" });
-            } else if here {
-                let _ = write!(out, "\x1b[48;5;{idx}m\x1b[1m[]\x1b[0m");
-            } else {
-                let _ = write!(out, "\x1b[48;5;{idx}m  \x1b[0m");
+
+    let grid_top = row + 2;
+    let avail_rows = pane_h.saturating_sub(grid_top).saturating_sub(1); // 1 for the hint
+    let box_h = (avail_rows / 16).clamp(1, 3);
+    let box_w = ((pane_w.saturating_sub(6)) as u16 / 16).clamp(2, 7);
+
+    for gr in 0..16u16 {
+        for sub in 0..box_h {
+            let _ = write!(out, "\x1b[{};{}H", grid_top + gr * box_h + sub, x0 + 4);
+            let marker_row = sub == box_h / 2;
+            for gc in 0..16u16 {
+                let idx = gr * 16 + gc;
+                let here = idx == color;
+                let body: String = if here && marker_row && box_w >= 2 {
+                    format!("[{}]", " ".repeat(box_w as usize - 2))
+                } else {
+                    " ".repeat(box_w as usize)
+                };
+                if idx == 0 {
+                    let dashes = if here && marker_row {
+                        body
+                    } else {
+                        "\u{2500}".repeat(box_w as usize)
+                    };
+                    let _ = write!(out, "\x1b[0;2m{dashes}\x1b[0m");
+                } else if here {
+                    let (r, g, b) = spans::xterm256_to_rgb(idx as u8);
+                    let fg = if spans::color_is_dark(r, g, b) { 15 } else { 0 };
+                    let _ = write!(out, "\x1b[48;5;{idx};38;5;{fg};1m{body}\x1b[0m");
+                } else {
+                    let _ = write!(out, "\x1b[48;5;{idx}m{body}\x1b[0m");
+                }
             }
         }
     }
     let _ = write!(
         out,
         "\x1b[{};{}H\x1b[2mhjkl/arrows/click pick \u{b7} 0 none\x1b[0m",
-        row + 2 + 16,
+        grid_top + 16 * box_h,
         x0 + 4
     );
-    Some((row + 2 - 1, x0 + 4 - 1)) // 1-based draw coords -> 0-based cells
+    Some((grid_top - 1, x0 + 4 - 1, box_w, box_h)) // 1-based draw -> 0-based cells
 }
 
 fn short_path(path: &str) -> String {

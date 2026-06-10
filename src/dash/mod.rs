@@ -55,8 +55,8 @@ pub struct Dash {
     pub editform: Option<forms::EditForm>,
     /// Agent name to focus once discovery sees its socket (form submission).
     pub pending_focus: Option<String>,
-    /// 0-based origin of the 16x16 color grid, when one is on screen.
-    pub palette_origin: Option<(u16, u16)>,
+    /// 0-based (row, col, box_w, box_h) of the color grid, when on screen.
+    pub palette_geom: Option<(u16, u16, u16, u16)>,
     pub cols: u16,
     pub rows: u16,
     pub sidebar_dirty: bool,
@@ -222,7 +222,7 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
         newform: forms::NewForm::reset(),
         editform: None,
         pending_focus: None,
-        palette_origin: None,
+        palette_geom: None,
         cols,
         rows,
         sidebar_dirty: true,
@@ -240,10 +240,12 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
 
     let mut next_key = KEY_FIRST_AGENT;
     discover_new(&mut dash, &poller, &mut next_key);
+    // Initial focus: the first agent (discover_new's stay-on-form rule is for
+    // MID-SESSION arrivals; before discovery "empty == on the + tab" lies).
+    dash.focus = 0;
     if dash.agents.is_empty() {
         // Fresh dashboard lands on the new-agent form, ready to navigate.
         dash.mode = Mode::Normal;
-        dash.focus = 0;
     }
 
     let mut events = Events::new();

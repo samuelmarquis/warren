@@ -7,6 +7,7 @@ use std::rc::Rc;
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::color::Colors as TermColors;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Processor};
@@ -111,16 +112,18 @@ impl AgentTerm {
 
     fn line_spans(&self, line: Line) -> LineSpans {
         let grid = self.term.grid();
+        let colors = self.term.colors();
         let cols = self.cols as usize;
         let row = &grid[line];
 
         // Find the last cell that isn't a bare default-styled space so we can
-        // skip encoding the (typically long) blank tail of each row.
+        // skip encoding the (typically long) blank tail of each row. A cell
+        // whose background the app redefined (OSC 11) is NOT blank.
         let mut last = 0usize;
         for i in 0..cols {
             let cell = &row[Column(i)];
             let blank = cell.c == ' '
-                && cell.bg == AnsiColor::Named(NamedColor::Background)
+                && resolve_color(colors, cell.bg) == Color::Default
                 && !cell.flags.intersects(Flags::INVERSE | Flags::ALL_UNDERLINES | Flags::STRIKEOUT);
             if !blank {
                 last = i + 1;
@@ -133,8 +136,8 @@ impl AgentTerm {
             if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
                 continue;
             }
-            let fg = map_color(cell.fg);
-            let bg = map_color(cell.bg);
+            let fg = resolve_color(colors, cell.fg);
+            let bg = resolve_color(colors, cell.bg);
             let attrs = map_attrs(cell.flags);
             match spans.last_mut() {
                 Some(prev) if prev.fg == fg && prev.bg == bg && prev.attrs == attrs => {
@@ -147,26 +150,39 @@ impl AgentTerm {
     }
 }
 
-fn map_color(c: AnsiColor) -> Color {
+/// Resolve a cell color against the terminal's LIVE palette: apps like vis
+/// redefine palette slots via OSC 4 (and fg/bg via OSC 10/11) and then paint
+/// with the redefined indices. alacritty records those in `Term::colors()`;
+/// emitting the recorded RGB keeps the app's intended colors on screen
+/// (v0 reimplemented exactly this by hand in dvtm's vt.c).
+fn resolve_color(colors: &TermColors, c: AnsiColor) -> Color {
     match c {
-        AnsiColor::Named(n) => match n {
-            NamedColor::Foreground
-            | NamedColor::Background
-            | NamedColor::Cursor
-            | NamedColor::BrightForeground
-            | NamedColor::DimForeground => Color::Default,
-            NamedColor::DimBlack => Color::Indexed(0),
-            NamedColor::DimRed => Color::Indexed(1),
-            NamedColor::DimGreen => Color::Indexed(2),
-            NamedColor::DimYellow => Color::Indexed(3),
-            NamedColor::DimBlue => Color::Indexed(4),
-            NamedColor::DimMagenta => Color::Indexed(5),
-            NamedColor::DimCyan => Color::Indexed(6),
-            NamedColor::DimWhite => Color::Indexed(7),
-            base => Color::Indexed(base as u8),
-        },
+        AnsiColor::Named(n) => {
+            if let Some(rgb) = colors[n as usize] {
+                return Color::Rgb(rgb.r, rgb.g, rgb.b);
+            }
+            match n {
+                NamedColor::Foreground
+                | NamedColor::Background
+                | NamedColor::Cursor
+                | NamedColor::BrightForeground
+                | NamedColor::DimForeground => Color::Default,
+                NamedColor::DimBlack => Color::Indexed(0),
+                NamedColor::DimRed => Color::Indexed(1),
+                NamedColor::DimGreen => Color::Indexed(2),
+                NamedColor::DimYellow => Color::Indexed(3),
+                NamedColor::DimBlue => Color::Indexed(4),
+                NamedColor::DimMagenta => Color::Indexed(5),
+                NamedColor::DimCyan => Color::Indexed(6),
+                NamedColor::DimWhite => Color::Indexed(7),
+                base => Color::Indexed(base as u8),
+            }
+        }
         AnsiColor::Spec(rgb) => Color::Rgb(rgb.r, rgb.g, rgb.b),
-        AnsiColor::Indexed(i) => Color::Indexed(i),
+        AnsiColor::Indexed(i) => match colors[i as usize] {
+            Some(rgb) => Color::Rgb(rgb.r, rgb.g, rgb.b),
+            None => Color::Indexed(i),
+        },
     }
 }
 
@@ -257,6 +273,22 @@ mod tests {
         at.resize(10, 4);
         assert_eq!((at.cols, at.rows), (10, 4));
         assert_eq!(at.snapshot_screen().len(), 4);
+    }
+
+    #[test]
+    fn osc4_palette_redefinition_resolves_to_rgb() {
+        // vis's exact pattern: redefine slot 16 to white via OSC 4, then
+        // paint with SGR 48;5;16 — must come out as RGB white, not black.
+        let mut at = AgentTerm::new(20, 2, 0);
+        at.advance(b"\x1b]4;16;rgb:ff/ff/ff\x07\x1b[48;5;16m\x1b[38;5;17mX");
+        let snap = at.snapshot_screen();
+        let span = &snap[0].0[0];
+        assert_eq!(span.bg, Color::Rgb(0xff, 0xff, 0xff));
+        assert_eq!(span.fg, Color::Indexed(17)); // untouched slot stays indexed
+        // OSC 104 resets the slot back to the default palette.
+        at.advance(b"\x1b]104;16\x07\x1b[2;1H\x1b[48;5;16mY");
+        let snap = at.snapshot_screen();
+        assert_eq!(snap[1].0[0].bg, Color::Indexed(16));
     }
 
     #[test]

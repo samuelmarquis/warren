@@ -144,6 +144,7 @@ fn normal_key(dash: &mut Dash, bytes: &[u8]) -> (usize, Option<Outcome>) {
                     color: agent.meta.color as u16,
                 });
                 dash.form_dirty = true;
+                dash.status_dirty = true; // mode chip flips to EDIT
             }
         }
         b'x' => {

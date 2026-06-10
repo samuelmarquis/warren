@@ -77,8 +77,10 @@ warren help
 
 ### Inside the dashboard
 
-Two modes, like vim. **INSERT** (default) sends every key verbatim to the
-focused agent; **Ctrl-Space** toggles **NORMAL**:
+Modal, like vim. **CLAUDE** mode (default) sends every key verbatim to the
+focused agent; **Ctrl-Space** toggles **NORMAL**; editing agent metadata or
+the new-agent form is **EDIT** mode. The status bar's mode chip is color-coded
+(CLAUDE orange, NORMAL green, EDIT purple):
 
 | NORMAL key | action |
 |---|---|
@@ -87,7 +89,7 @@ focused agent; **Ctrl-Space** toggles **NORMAL**:
 | `Shift+digit` | swap the focused agent with row N |
 | `g` / `G` | first / last agent |
 | `n` | new-agent form |
-| `i` `a` `l` `Enter` `Esc` | back to INSERT |
+| `i` `a` `l` `Enter` `Esc` | back to CLAUDE |
 | `r` | rename (pins the name against Claude's title sync) |
 | `e` / `c` | edit form: title + 256-color picker |
 | `x` | close agent (y/n confirm) |
