@@ -34,7 +34,9 @@ const KEY_FIRST_CLIENT: usize = 3;
 /// Damage coalescing: at most ~30 frames/sec to viewers.
 const FLUSH_INTERVAL: Duration = Duration::from_millis(33);
 
-const SCROLLBACK: usize = 10_000;
+/// No daemon-side scrollback: agents (Claude's fullscreen TUI) own their own
+/// history; warren serves a live view only.
+const SCROLLBACK: usize = 0;
 
 pub struct DaemonArgs {
     pub name: String,
@@ -401,11 +403,6 @@ impl Daemon {
                     self.pty_in.extend_from_slice(&bytes);
                 }
             }
-            ToDaemon::FetchHistory { start, count } => {
-                let lines = self.term.history_lines(start, count);
-                let reply = ToClient::HistoryLines { start, lines };
-                send_to(self.conns.get_mut(&key).unwrap(), &reply);
-            }
             ToDaemon::SetMeta { name, color, pinned, slot } => {
                 if let Some(n) = name {
                     self.meta.display = n;
@@ -461,7 +458,6 @@ impl Daemon {
             cursor_visible: self.term.cursor_visible(),
             alt_screen: self.term.alt_screen(),
             mouse: self.term.mouse_proto(),
-            history_len: self.term.history_len(),
             meta: self.meta.clone(),
             state: self.state(),
         }
@@ -480,8 +476,6 @@ impl Daemon {
             cell_width: 8,
             cell_height: 16,
         });
-        let invalidate = ToClient::HistoryInvalidate { history_len: self.term.history_len() };
-        self.broadcast(&invalidate);
         let snapshot = self.snapshot();
         self.broadcast(&snapshot);
         self.term.term.reset_damage();
@@ -509,7 +503,6 @@ impl Daemon {
                 lines,
                 cursor: self.term.cursor(),
                 cursor_visible: self.term.cursor_visible(),
-                history_len: self.term.history_len(),
             },
             None => self.snapshot(),
         };

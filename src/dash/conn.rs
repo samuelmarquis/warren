@@ -37,7 +37,6 @@ pub struct AgentConn {
     pub cursor_visible: bool,
     pub alt_screen: bool,
     pub mouse: MouseProto,
-    pub history_len: u32,
 
     pub exited: Option<i32>,
     /// Rows repainted since the dashboard last drew this agent.
@@ -87,7 +86,6 @@ impl AgentConn {
             cursor_visible: true,
             alt_screen: false,
             mouse: MouseProto::None,
-            history_len: 0,
             exited: None,
             damage_rows: Vec::new(),
             full_dirty: true,
@@ -180,7 +178,6 @@ impl AgentConn {
                 cursor_visible,
                 alt_screen,
                 mouse,
-                history_len,
                 meta,
                 state,
             } => {
@@ -191,7 +188,6 @@ impl AgentConn {
                 self.cursor_visible = cursor_visible;
                 self.alt_screen = alt_screen;
                 self.mouse = mouse;
-                self.history_len = history_len;
                 self.meta = meta;
                 self.have_meta = true;
                 self.state = state;
@@ -200,7 +196,7 @@ impl AgentConn {
                 self.full_dirty = true;
                 self.meta_dirty = true;
             }
-            ToClient::Damage { lines, cursor, cursor_visible, history_len } => {
+            ToClient::Damage { lines, cursor, cursor_visible } => {
                 for (row, line) in lines {
                     let row_us = row as usize;
                     if row_us >= self.grid.len() {
@@ -213,7 +209,6 @@ impl AgentConn {
                 }
                 self.cursor = cursor;
                 self.cursor_visible = cursor_visible;
-                self.history_len = history_len;
                 self.output_rx = Instant::now();
             }
             ToClient::ModeChanged { alt_screen, mouse } => {
@@ -233,10 +228,8 @@ impl AgentConn {
             ToClient::Exited { status } => {
                 self.exited = Some(status);
             }
-            // Scrollback (M7) and clipboard (M8) arrive later.
-            ToClient::HistoryLines { .. }
-            | ToClient::HistoryInvalidate { .. }
-            | ToClient::Clipboard(_) => {}
+            // Clipboard forwarding lands in M8.
+            ToClient::Clipboard(_) => {}
         }
     }
 

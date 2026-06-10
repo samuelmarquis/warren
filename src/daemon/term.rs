@@ -5,7 +5,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use alacritty_terminal::event::{Event, EventListener};
-use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::test::TermSize;
@@ -88,10 +87,6 @@ impl AgentTerm {
         (point.line.0.max(0) as u16, point.column.0 as u16)
     }
 
-    pub fn history_len(&self) -> u32 {
-        self.term.history_size() as u32
-    }
-
     /// Visible screen as styled rows.
     pub fn snapshot_screen(&self) -> Vec<LineSpans> {
         (0..self.rows as i32).map(|r| self.line_spans(Line(r))).collect()
@@ -112,17 +107,6 @@ impl AgentTerm {
                 .map(|r| (r as u16, self.line_spans(Line(r as i32))))
                 .collect()
         })
-    }
-
-    /// Scrollback lines [start, start+count); 0 = oldest retained line.
-    /// Clamped to what exists right now.
-    pub fn history_lines(&self, start: u32, count: u16) -> Vec<LineSpans> {
-        let len = self.history_len();
-        let start = start.min(len);
-        let end = (start + count as u32).min(len);
-        (start..end)
-            .map(|h| self.line_spans(Line(h as i32 - len as i32)))
-            .collect()
     }
 
     fn line_spans(&self, line: Line) -> LineSpans {
@@ -261,24 +245,6 @@ mod tests {
         assert!(rows.contains(&2), "row 2 damaged: {rows:?}");
         assert!(!rows.contains(&1), "row 1 untouched: {rows:?}");
         assert_eq!(damage.iter().find(|(r, _)| *r == 2).unwrap().1.0[0].text, "row2");
-    }
-
-    #[test]
-    fn scrollback_and_history_lines() {
-        let mut at = AgentTerm::new(10, 3, 100);
-        for i in 0..6 {
-            at.advance(format!("l{i}\r\n").as_bytes());
-        }
-        // 6 lines + trailing newline on a 3-row screen: 4 lines scrolled off.
-        assert_eq!(at.history_len(), 4);
-        let hist = at.history_lines(0, 10);
-        assert_eq!(hist.len(), 4);
-        assert_eq!(hist[0].0[0].text, "l0");
-        assert_eq!(hist[3].0[0].text, "l3");
-        // Window into the middle.
-        let mid = at.history_lines(1, 2);
-        assert_eq!(mid[0].0[0].text, "l1");
-        assert_eq!(mid.len(), 2);
     }
 
     #[test]

@@ -187,10 +187,8 @@ fn resize_reflows_and_resnapshots_all_viewers() {
     let (mut b, _) = Viewer::attach(&sock, 80, 24);
 
     a.send(&ToDaemon::Resize { cols: 100, rows: 30 });
-    // BOTH viewers get the authoritative new snapshot (and the invalidate).
+    // BOTH viewers get the authoritative new snapshot.
     for v in [&mut a, &mut b] {
-        let inv = v.await_frame(5_000, |m| matches!(m, ToClient::HistoryInvalidate { .. }));
-        assert!(inv.is_some(), "history invalidated");
         let snap = v.await_frame(
             5_000,
             |m| matches!(m, ToClient::Snapshot { cols: 100, rows: 30, .. }),

@@ -111,9 +111,6 @@ pub enum ToDaemon {
     Input(String),
     Resize { cols: u16, rows: u16 },
     Mouse { kind: MouseKind, col: u16, row: u16, mods: u8 },
-    /// Request scrollback lines [start, start+count) where 0 is the oldest
-    /// retained line; the daemon answers with HistoryLines.
-    FetchHistory { start: u32, count: u16 },
     SetMeta {
         name: Option<String>,
         color: Option<u8>,
@@ -132,6 +129,8 @@ pub enum ToDaemon {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToClient {
     /// Full authoritative screen. Sent on attach and after any resize.
+    /// Scrollback is deliberately absent: agents (Claude's fullscreen TUI)
+    /// own their own history; warren is a live view.
     Snapshot {
         cols: u16,
         rows: u16,
@@ -140,7 +139,6 @@ pub enum ToClient {
         cursor_visible: bool,
         alt_screen: bool,
         mouse: MouseProto,
-        history_len: u32,
         meta: Meta,
         state: AgentState,
     },
@@ -149,11 +147,7 @@ pub enum ToClient {
         lines: Vec<(u16, LineSpans)>,
         cursor: (u16, u16),
         cursor_visible: bool,
-        history_len: u32,
     },
-    HistoryLines { start: u32, lines: Vec<LineSpans> },
-    /// History was reflowed (resize); cached pages are invalid.
-    HistoryInvalidate { history_len: u32 },
     ModeChanged { alt_screen: bool, mouse: MouseProto },
     MetaChanged(Meta),
     StateChanged(AgentState),
@@ -281,7 +275,6 @@ mod tests {
             ToDaemon::Input(b64_encode(b"hello\x1b[A")),
             ToDaemon::Resize { cols: 80, rows: 24 },
             ToDaemon::Mouse { kind: MouseKind::Drag(0), col: 5, row: 9, mods: 0 },
-            ToDaemon::FetchHistory { start: 100, count: 50 },
             ToDaemon::SetMeta { name: Some("x".into()), color: None, pinned: Some(true), slot: None },
             ToDaemon::HookState(HookState::Attention),
             ToDaemon::Query,
@@ -313,18 +306,14 @@ mod tests {
                 cursor_visible: true,
                 alt_screen: false,
                 mouse: MouseProto::None,
-                history_len: 42,
                 meta: sample_meta(),
                 state: AgentState { hook: Some(HookState::Working), ms_since_output: 12 },
             },
             ToClient::Damage {
-                lines: vec![(1, line.clone())],
+                lines: vec![(1, line)],
                 cursor: (1, 0),
                 cursor_visible: false,
-                history_len: 43,
             },
-            ToClient::HistoryLines { start: 10, lines: vec![line] },
-            ToClient::HistoryInvalidate { history_len: 0 },
             ToClient::ModeChanged { alt_screen: true, mouse: MouseProto::Motion },
             ToClient::MetaChanged(sample_meta()),
             ToClient::StateChanged(AgentState { hook: None, ms_since_output: 99 }),
