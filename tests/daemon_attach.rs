@@ -292,6 +292,63 @@ fn stalled_viewer_is_dropped_and_never_blocks_the_daemon() {
 }
 
 #[test]
+fn title_sync_policy() {
+    let home = TestHome::new("title");
+    // Claude-style title with a leading spinner glyph; then the idle title.
+    new_agent(
+        &home,
+        "titled",
+        "printf '\\033]0;\\xe2\\x9c\\xb3 Fix the bug\\007'; sleep 0.3; printf '\\033]0;Claude Code\\007'; cat",
+    );
+    let sock = home.sock("titled");
+
+    // The title may land before any viewer attaches, so poll snapshots:
+    // spinner glyph stripped, task title mirrored.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut display = String::new();
+    while Instant::now() < deadline {
+        let (_, snap) = Viewer::attach(&sock, 80, 24);
+        let ToClient::Snapshot { meta, .. } = snap else { unreachable!() };
+        display = meta.display;
+        if display == "Fix the bug" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(display, "Fix the bug", "title mirrored with spinner stripped");
+    // The idle title ("Claude Code", emitted 300ms in) must NOT overwrite it.
+    std::thread::sleep(Duration::from_millis(600));
+    let (_, snap) = Viewer::attach(&sock, 80, 24);
+    let ToClient::Snapshot { meta, .. } = snap else { unreachable!() };
+    assert_eq!(meta.display, "Fix the bug", "idle title ignored");
+}
+
+#[test]
+fn pinned_name_resists_title_sync() {
+    let home = TestHome::new("pin");
+    new_agent(&home, "pinned", "sleep 0.4; printf '\\033]0;Sneaky title\\007'; cat");
+    let sock = home.sock("pinned");
+
+    let (mut viewer, _) = Viewer::attach(&sock, 80, 24);
+    viewer.send(&ToDaemon::SetMeta {
+        name: Some("my-name".into()),
+        color: None,
+        pinned: Some(true),
+        slot: None,
+    });
+    let renamed = viewer.await_frame(5_000, |m| {
+        matches!(m, ToClient::MetaChanged(meta) if meta.display == "my-name" && meta.pinned)
+    });
+    assert!(renamed.is_some(), "manual rename lands");
+
+    // Give the title plenty of time to arrive after the rename.
+    std::thread::sleep(Duration::from_millis(800));
+    let (_, snap) = Viewer::attach(&sock, 80, 24);
+    let ToClient::Snapshot { meta, .. } = snap else { unreachable!() };
+    assert_eq!(meta.display, "my-name", "pinned name wins over Claude's title");
+}
+
+#[test]
 fn unique_names_and_slots() {
     let home = TestHome::new("uniq");
     new_agent(&home, "twin", "cat");

@@ -51,9 +51,19 @@ fn draw_sidebar(dash: &mut Dash, out: &mut String) {
                 n if n < 10 => n.to_string(),
                 _ => " ".to_string(),
             };
-            let mut label = format!(" {number} {}", agent.meta.display);
-            label.truncate(text_w);
-            let pad = text_w - label.chars().count().min(text_w);
+            // Trailing mark: '!' = blocked on a permission prompt and quiet;
+            // '*' = went idle while unfocused, not yet examined.
+            let mark = if agent.needs_attention() {
+                " !"
+            } else if agent.unseen {
+                " *"
+            } else {
+                ""
+            };
+            let name_w = text_w.saturating_sub(3 + mark.len());
+            let name: String = agent.meta.display.chars().take(name_w).collect();
+            let label = format!(" {number} {name}{mark}");
+            let pad = text_w.saturating_sub(label.chars().count());
 
             let color = agent.meta.color;
             let mut style = String::from("\x1b[0");

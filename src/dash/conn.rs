@@ -44,6 +44,10 @@ pub struct AgentConn {
     pub damage_rows: Vec<u16>,
     pub full_dirty: bool,
     pub meta_dirty: bool,
+    /// Went idle while unfocused and not yet examined (sidebar '*').
+    pub unseen: bool,
+    /// busy() as of the last sidebar paint, for transition detection.
+    pub last_busy: bool,
 }
 
 impl AgentConn {
@@ -88,6 +92,8 @@ impl AgentConn {
             damage_rows: Vec::new(),
             full_dirty: true,
             meta_dirty: true,
+            unseen: false,
+            last_busy: true,
         };
         conn.send(&ToDaemon::Attach { cols, rows });
         Ok(conn)
@@ -236,11 +242,17 @@ impl AgentConn {
 
     /// The v0 busy heuristic: hook state wins; otherwise "output within the
     /// last 1500ms" (Claude's status line repaints about once a second).
+    /// `attention` stays activity-based: mid-tool it reads as working.
     pub fn busy(&self) -> bool {
         match self.state.hook {
             Some(crate::proto::HookState::Working) => true,
             Some(crate::proto::HookState::Waiting) => false,
             _ => self.output_rx.elapsed().as_millis() < 1500,
         }
+    }
+
+    /// Blocked on a permission prompt and quiet: the sidebar '!' condition.
+    pub fn needs_attention(&self) -> bool {
+        self.state.hook == Some(crate::proto::HookState::Attention) && !self.busy()
     }
 }

@@ -89,6 +89,7 @@ impl Dash {
         if idx < self.agents.len() && idx != self.focus {
             self.focus = idx;
             self.agents[idx].full_dirty = true;
+            self.agents[idx].unseen = false; // examined
             self.sidebar_dirty = true;
             self.status_dirty = true;
         }
@@ -198,7 +199,10 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
         }
 
         events.clear();
-        match poller.wait(&mut events, Some(Duration::from_millis(1000))) {
+        // 250ms tick: busy/idle is time-based (1500ms quiet threshold), so
+        // transitions must repaint without any socket activity. v0 polled
+        // its meta files at the same cadence.
+        match poller.wait(&mut events, Some(Duration::from_millis(250))) {
             Ok(_) => {}
             Err(e) if e.kind() == ErrorKind::Interrupted => continue,
             Err(e) => return Err(e.into()),
@@ -240,14 +244,8 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
                 key => {
                     if let Some(idx) = dash.keys.iter().position(|&k| k == key) {
                         if ev.readable {
-                            let was_busy = dash.agents[idx].busy();
                             dash.agents[idx].pump();
-                            if idx == dash.focus {
-                                // Focused damage is painted next frame.
-                            }
-                            if dash.agents[idx].meta_dirty
-                                || was_busy != dash.agents[idx].busy()
-                            {
+                            if dash.agents[idx].meta_dirty {
                                 dash.sidebar_dirty = true;
                                 dash.agents[idx].meta_dirty = false;
                             }
@@ -261,6 +259,7 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
         }
 
         reap_agents(&mut dash, &poller);
+        update_busy_transitions(&mut dash);
         update_write_interest(&dash, &poller);
 
         if last_scan.elapsed() >= Duration::from_secs(1) {
@@ -356,6 +355,21 @@ fn reap_agents(dash: &mut Dash, poller: &Poller) {
         dash.full_redraw = true; // pane content belongs to a new focus now
         if dash.agents.is_empty() {
             dash.mode = Mode::Normal;
+        }
+    }
+}
+
+/// Repaint the sidebar on busy/idle edges; flag agents that went idle while
+/// unfocused (the '*' mark, cleared when examined).
+fn update_busy_transitions(dash: &mut Dash) {
+    for i in 0..dash.agents.len() {
+        let busy = dash.agents[i].busy();
+        if dash.agents[i].last_busy != busy {
+            dash.agents[i].last_busy = busy;
+            dash.sidebar_dirty = true;
+            if !busy && i != dash.focus {
+                dash.agents[i].unseen = true;
+            }
         }
     }
 }
