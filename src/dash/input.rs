@@ -5,8 +5,13 @@
 //! v0 dvtm's approach, so every key claude understands keeps working.
 //! Ctrl-Space (NUL) toggles NORMAL mode, which is parsed just enough for the
 //! nav keys; `:` opens a one-line command editor in the status bar.
+//!
+//! When the "+ new agent" tab is focused, INSERT edits the form instead of
+//! typing into an agent; NORMAL still navigates the whole dashboard, so the
+//! form never traps you.
 
-use super::{Dash, Mode, Sub};
+use super::{forms, Dash, Mode, Sub};
+use crate::proto::ToDaemon;
 
 pub enum Outcome {
     Continue,
@@ -23,7 +28,20 @@ const ESC: u8 = 0x1b;
 pub fn handle_bytes(dash: &mut Dash, bytes: &[u8]) -> Outcome {
     let mut i = 0;
     while i < bytes.len() {
+        // The edit form captures everything until Enter/Esc (v0's SUB_EDIT).
+        if dash.editform.is_some() {
+            i += forms::edit_key(dash, &bytes[i..]).max(1);
+            continue;
+        }
         match dash.mode {
+            Mode::Insert if dash.on_newform() => {
+                if bytes[i] == CTRL_SPACE {
+                    dash.enter_normal();
+                    i += 1;
+                } else {
+                    i += forms::new_key(dash, &bytes[i..]).max(1);
+                }
+            }
             Mode::Insert => {
                 // Forward verbatim up to a control toggle.
                 let stop = bytes[i..]
@@ -48,6 +66,8 @@ pub fn handle_bytes(dash: &mut Dash, bytes: &[u8]) -> Outcome {
                 let (consumed, outcome) = match dash.sub {
                     Sub::None => normal_key(dash, &bytes[i..]),
                     Sub::Cmd => cmd_key(dash, &bytes[i..]),
+                    Sub::Rename => rename_key(dash, &bytes[i..]),
+                    Sub::Kill => kill_key(dash, &bytes[i..]),
                 };
                 if let Some(o) = outcome {
                     return o;
@@ -73,7 +93,7 @@ fn normal_key(dash: &mut Dash, bytes: &[u8]) -> (usize, Option<Outcome>) {
         return (3, None);
     }
     match bytes[0] {
-        CTRL_SPACE | b'i' | b'a' | b'\r' | ESC => dash.enter_insert(),
+        CTRL_SPACE | b'i' | b'a' | b'\r' | b'l' | ESC => dash.enter_insert(),
         CTRL_BACKSLASH => return (1, Some(Outcome::Quit)),
         b'j' => dash.focus_next(),
         b'k' => dash.focus_prev(),
@@ -81,6 +101,30 @@ fn normal_key(dash: &mut Dash, bytes: &[u8]) -> (usize, Option<Outcome>) {
         b'G' => dash.focus_last(),
         b'1'..=b'9' => dash.focus_slot(bytes[0] - b'0'),
         b'0' => dash.focus_slot(10),
+        b'n' => dash.open_new_form(),
+        b'r' => {
+            if let Some(agent) = dash.focused() {
+                dash.cmdline = agent.meta.display.clone();
+                dash.sub = Sub::Rename;
+                dash.status_dirty = true;
+            }
+        }
+        b'e' | b'c' => {
+            if let Some(agent) = dash.focused() {
+                dash.editform = Some(forms::EditForm {
+                    field: if bytes[0] == b'c' { 1 } else { 0 },
+                    title: agent.meta.display.clone(),
+                    color: agent.meta.color as u16,
+                });
+                dash.form_dirty = true;
+            }
+        }
+        b'x' => {
+            if dash.focused().is_some() {
+                dash.sub = Sub::Kill;
+                dash.status_dirty = true;
+            }
+        }
         b':' => {
             dash.sub = Sub::Cmd;
             dash.cmdline.clear();
@@ -120,14 +164,85 @@ fn cmd_key(dash: &mut Dash, bytes: &[u8]) -> (usize, Option<Outcome>) {
     }
 }
 
-fn run_command(dash: &mut Dash, cmd: &str) -> Option<Outcome> {
-    match cmd {
-        "q" | "qa" | "wq" => Some(Outcome::Quit),
-        "q!" | "qa!" => Some(Outcome::QuitKillAll),
-        "" => None,
-        other => {
-            dash.flash = Some(format!("unknown command :{other}"));
-            None
+fn rename_key(dash: &mut Dash, bytes: &[u8]) -> (usize, Option<Outcome>) {
+    dash.status_dirty = true;
+    match bytes[0] {
+        b'\r' => {
+            let name = std::mem::take(&mut dash.cmdline);
+            dash.sub = Sub::None;
+            let name = name.trim().to_string();
+            if !name.is_empty() {
+                if let Some(agent) = dash.focused_mut() {
+                    // A manual rename pins the name against title auto-sync.
+                    agent.send(&ToDaemon::SetMeta {
+                        name: Some(name),
+                        color: None,
+                        pinned: Some(true),
+                        slot: None,
+                    });
+                }
+            }
+        }
+        ESC => {
+            dash.cmdline.clear();
+            dash.sub = Sub::None;
+        }
+        0x7f | 0x08 => {
+            dash.cmdline.pop();
+        }
+        b @ 0x20..=0x7e => dash.cmdline.push(b as char),
+        _ => {}
+    }
+    (1, None)
+}
+
+fn kill_key(dash: &mut Dash, bytes: &[u8]) -> (usize, Option<Outcome>) {
+    dash.status_dirty = true;
+    dash.sub = Sub::None;
+    if matches!(bytes[0], b'y' | b'Y') {
+        if let Some(agent) = dash.focused_mut() {
+            agent.send(&ToDaemon::Kill);
         }
     }
+    (1, None)
+}
+
+fn run_command(dash: &mut Dash, cmd: &str) -> Option<Outcome> {
+    match cmd {
+        "q" | "qa" | "wq" => return Some(Outcome::Quit),
+        "q!" | "qa!" => return Some(Outcome::QuitKillAll),
+        "" => return None,
+        _ => {}
+    }
+    if let Some(arg) = cmd.strip_prefix("color ").or_else(|| cmd.strip_prefix("c ")) {
+        match parse_color(arg.trim()) {
+            Some(color) => {
+                if let Some(agent) = dash.focused_mut() {
+                    agent.send(&ToDaemon::SetMeta {
+                        name: None,
+                        color: Some(color),
+                        pinned: None,
+                        slot: None,
+                    });
+                }
+            }
+            None => dash.flash = Some(format!("bad color '{}' (index 0-255 or #rrggbb)", arg)),
+        }
+        return None;
+    }
+    dash.flash = Some(format!("unknown command :{cmd}"));
+    None
+}
+
+/// `:color` argument: an xterm-256 index or `#rrggbb` (quantized to 256).
+pub fn parse_color(arg: &str) -> Option<u8> {
+    if let Some(hex) = arg.strip_prefix('#') {
+        if hex.len() != 6 {
+            return None;
+        }
+        let n = u32::from_str_radix(hex, 16).ok()?;
+        let (r, g, b) = ((n >> 16) as u8, (n >> 8) as u8, n as u8);
+        return Some(crate::spans::nearest_xterm256(r, g, b));
+    }
+    arg.parse().ok()
 }

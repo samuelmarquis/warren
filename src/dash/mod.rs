@@ -6,6 +6,7 @@
 //! loses nothing: rerun `warren` and the same view reassembles.
 
 pub mod conn;
+mod forms;
 mod input;
 mod render;
 
@@ -36,21 +37,29 @@ pub enum Mode {
 pub enum Sub {
     None,
     Cmd,
+    Rename,
+    Kill,
 }
 
 pub struct Dash {
     pub agents: Vec<AgentConn>,
     /// poll key per agent, parallel to `agents`.
     pub keys: Vec<usize>,
+    /// 0..agents.len() = an agent; agents.len() = the "+ new agent" tab.
     pub focus: usize,
     pub mode: Mode,
     pub sub: Sub,
     pub cmdline: String,
     pub flash: Option<String>,
+    pub newform: forms::NewForm,
+    pub editform: Option<forms::EditForm>,
+    /// Agent name to focus once discovery sees its socket (form submission).
+    pub pending_focus: Option<String>,
     pub cols: u16,
     pub rows: u16,
     pub sidebar_dirty: bool,
     pub status_dirty: bool,
+    pub form_dirty: bool,
     pub full_redraw: bool,
 }
 
@@ -60,7 +69,13 @@ impl Dash {
     }
 
     pub fn focused_mut(&mut self) -> Option<&mut AgentConn> {
-        self.agents.get_mut(self.focus)
+        let focus = self.focus;
+        self.agents.get_mut(focus)
+    }
+
+    /// Is the "+ new agent" tab focused (so the pane shows the form)?
+    pub fn on_newform(&self) -> bool {
+        self.focus >= self.agents.len()
     }
 
     fn pane_size(&self) -> (u16, u16) {
@@ -86,25 +101,30 @@ impl Dash {
     }
 
     fn set_focus(&mut self, idx: usize) {
-        if idx < self.agents.len() && idx != self.focus {
-            self.focus = idx;
-            self.agents[idx].full_dirty = true;
-            self.agents[idx].unseen = false; // examined
-            self.sidebar_dirty = true;
-            self.status_dirty = true;
+        let idx = idx.min(self.agents.len()); // last position = the + tab
+        if idx == self.focus {
+            return;
         }
+        self.focus = idx;
+        if let Some(agent) = self.agents.get_mut(idx) {
+            agent.full_dirty = true;
+            agent.unseen = false; // examined
+        } else {
+            // Arriving on the + tab gets a fresh form (v0's nf_reset).
+            self.newform = forms::NewForm::reset();
+            self.form_dirty = true;
+        }
+        self.sidebar_dirty = true;
+        self.status_dirty = true;
     }
 
     pub fn focus_next(&mut self) {
-        if !self.agents.is_empty() {
-            self.set_focus((self.focus + 1) % self.agents.len());
-        }
+        self.set_focus((self.focus + 1) % (self.agents.len() + 1));
     }
 
     pub fn focus_prev(&mut self) {
-        if !self.agents.is_empty() {
-            self.set_focus((self.focus + self.agents.len() - 1) % self.agents.len());
-        }
+        let total = self.agents.len() + 1;
+        self.set_focus((self.focus + total - 1) % total);
     }
 
     pub fn focus_first(&mut self) {
@@ -112,14 +132,19 @@ impl Dash {
     }
 
     pub fn focus_last(&mut self) {
-        if !self.agents.is_empty() {
-            self.set_focus(self.agents.len() - 1);
-        }
+        self.set_focus(self.agents.len().saturating_sub(1));
     }
 
-    /// Jump to sidebar row N (1-based; 10 is the '0' key).
+    /// Jump to sidebar row N (1-based; 10 is the '0' key). An empty row
+    /// lands on the + tab — v0's "empty slot opens the form".
     pub fn focus_slot(&mut self, n: u8) {
         self.set_focus(n as usize - 1);
+        self.enter_insert();
+    }
+
+    /// Jump to the + tab ready to type (NORMAL `n`).
+    pub fn open_new_form(&mut self) {
+        self.set_focus(self.agents.len());
         self.enter_insert();
     }
 }
@@ -165,10 +190,14 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
         sub: Sub::None,
         cmdline: String::new(),
         flash: None,
+        newform: forms::NewForm::reset(),
+        editform: None,
+        pending_focus: None,
         cols,
         rows,
         sidebar_dirty: true,
         status_dirty: true,
+        form_dirty: true,
         full_redraw: true,
     };
 
@@ -182,7 +211,9 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
     let mut next_key = KEY_FIRST_AGENT;
     discover_new(&mut dash, &poller, &mut next_key);
     if dash.agents.is_empty() {
+        // Fresh dashboard lands on the new-agent form, ready to navigate.
         dash.mode = Mode::Normal;
+        dash.focus = 0;
     }
 
     let mut events = Events::new();
@@ -293,8 +324,20 @@ fn discover_new(dash: &mut Dash, poller: &Poller, next_key: &mut usize) {
                         continue;
                     }
                 }
+                let name = agent.meta.name.clone();
+                // Was the + tab focused? Keep it so unless this is the agent
+                // the form just created — that one steals focus (v0 parity).
+                let was_on_form = dash.on_newform();
                 dash.agents.push(agent);
                 dash.keys.push(key);
+                if dash.pending_focus.as_deref() == Some(name.as_str()) {
+                    dash.pending_focus = None;
+                    dash.focus = dash.agents.len() - 1;
+                    dash.agents.last_mut().unwrap().full_dirty = true;
+                    dash.enter_insert();
+                } else if was_on_form {
+                    dash.focus = dash.agents.len(); // stay on the + tab
+                }
                 dash.sidebar_dirty = true;
             }
             Err(_) => {

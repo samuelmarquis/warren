@@ -14,7 +14,6 @@ use crate::proto::{self, AgentState, FrameDecoder, Meta, ToClient, ToDaemon};
 // ------------------------------------------------------------------ discovery
 
 pub struct Agent {
-    pub sock: PathBuf,
     pub meta: Meta,
     pub state: AgentState,
 }
@@ -31,7 +30,7 @@ pub fn discover() -> Vec<Agent> {
             continue;
         }
         match query_agent(&sock) {
-            Some((meta, state)) => agents.push(Agent { sock, meta, state }),
+            Some((meta, state)) => agents.push(Agent { meta, state }),
             None => {
                 // Stale socket from a crashed daemon — clean it up.
                 let _ = std::fs::remove_file(&sock);
@@ -99,14 +98,9 @@ pub fn cmd_new(args: &[String]) -> Result<()> {
 
     // Live agents give us both name collisions and used slots; discover()
     // also garbage-collects stale sockets so dead names become reusable.
-    let live = discover();
-    let names: Vec<&str> = live.iter().map(|a| a.meta.name.as_str()).collect();
-    let name = crate::names::unique(&base, names.iter().copied());
-    let slot = (1..=u8::MAX)
-        .find(|s| !live.iter().any(|a| a.meta.slot == *s))
-        .unwrap_or(0);
-
-    spawn_daemon(&name, slot, color, &mode, &dir, sid.as_deref())?;
+    let live: Vec<(String, u8)> =
+        discover().into_iter().map(|a| (a.meta.name, a.meta.slot)).collect();
+    let name = launch_agent(&base, &dir, color, &mode, sid.as_deref(), &live)?;
 
     // Wait for the daemon's socket to come up so failures surface here.
     let sock = crate::paths::sock_path(&name);
@@ -119,6 +113,22 @@ pub fn cmd_new(args: &[String]) -> Result<()> {
         std::thread::sleep(Duration::from_millis(25));
     }
     bail!("agent '{name}' did not come up (set WARREN_LOG=/tmp/warren.log and retry to debug)");
+}
+
+/// Pick a unique name and free slot against `live` (name, slot) pairs and
+/// spawn the daemon. Shared by the CLI and the dashboard's new-agent form.
+pub fn launch_agent(
+    base: &str,
+    dir: &str,
+    color: u8,
+    mode: &str,
+    sid: Option<&str>,
+    live: &[(String, u8)],
+) -> Result<String> {
+    let name = crate::names::unique(base, live.iter().map(|(n, _)| n.as_str()));
+    let slot = (1..=u8::MAX).find(|s| !live.iter().any(|(_, used)| used == s)).unwrap_or(0);
+    spawn_daemon(&name, slot, color, mode, dir, sid)?;
+    Ok(name)
 }
 
 /// Spawn `warren __daemon` fully detached: new session, no stdio, no cwd tie.
@@ -158,7 +168,7 @@ fn spawn_daemon(
     Ok(())
 }
 
-fn expand_dir(arg: Option<&str>) -> String {
+pub fn expand_dir(arg: Option<&str>) -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
     match arg {
         None | Some("") => std::env::var("PWD").unwrap_or(home),

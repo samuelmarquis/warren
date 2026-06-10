@@ -53,13 +53,6 @@ impl Span {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct LineSpans(pub Vec<Span>);
 
-impl LineSpans {
-    /// Total character width (assumes 1 column per char; wide glyphs are the
-    /// renderer's concern).
-    pub fn width(&self) -> usize {
-        self.0.iter().map(|s| s.text.chars().count()).sum()
-    }
-}
 
 /// Build the SGR escape selecting a span's style (always starts from reset,
 /// so spans are self-contained).
@@ -133,6 +126,24 @@ pub fn xterm256_to_rgb(idx: u8) -> (u8, u8, u8) {
             (v, v, v)
         }
     }
+}
+
+/// Nearest xterm-256 index (cube + grayscale ramp; skips the ambiguous
+/// 16 named colors) for a 24-bit color — used by `:color #rrggbb`.
+pub fn nearest_xterm256(r: u8, g: u8, b: u8) -> u8 {
+    let mut best = 16u8;
+    let mut best_d = u32::MAX;
+    for idx in 16..=255u8 {
+        let (cr, cg, cb) = xterm256_to_rgb(idx);
+        let d = (r as i32 - cr as i32).pow(2) as u32
+            + (g as i32 - cg as i32).pow(2) as u32
+            + (b as i32 - cb as i32).pow(2) as u32;
+        if d < best_d {
+            best_d = d;
+            best = idx;
+        }
+    }
+    best
 }
 
 /// Rec.601 luma test: should text on this background be white?

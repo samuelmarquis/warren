@@ -18,6 +18,7 @@ pub fn paint(dash: &mut Dash) -> String {
         let _ = write!(out, "\x1b[0m\x1b[2J");
         dash.sidebar_dirty = true;
         dash.status_dirty = true;
+        dash.form_dirty = true;
         if let Some(a) = dash.focused_mut() {
             a.full_dirty = true;
         }
@@ -26,7 +27,19 @@ pub fn paint(dash: &mut Dash) -> String {
     if dash.sidebar_dirty {
         draw_sidebar(dash, &mut out);
     }
-    draw_content(dash, &mut out);
+    if dash.editform.is_some() {
+        if dash.form_dirty {
+            super::forms::draw_edit_form(dash, &mut out);
+            dash.form_dirty = false;
+        }
+    } else if dash.on_newform() {
+        if dash.form_dirty {
+            super::forms::draw_new_form(dash, &mut out);
+            dash.form_dirty = false;
+        }
+    } else {
+        draw_content(dash, &mut out);
+    }
     if dash.status_dirty {
         draw_status(dash, &mut out);
     }
@@ -44,6 +57,16 @@ fn draw_sidebar(dash: &mut Dash, out: &mut String) {
     let text_w = (SIDEBAR_WIDTH - 1) as usize;
     for row in 0..rows {
         let _ = write!(out, "\x1b[{};1H", row + 1);
+        if row as usize == dash.agents.len() {
+            // The pinned "+ new agent" tab.
+            let focused = dash.on_newform();
+            let style = if focused { "\x1b[0;7m" } else { "\x1b[0;2m" };
+            let mut label = "   + new agent".to_string();
+            label.truncate(text_w);
+            let pad = text_w.saturating_sub(label.chars().count());
+            let _ = write!(out, "{style}{label}{}\x1b[0m\x1b[2m│\x1b[0m", " ".repeat(pad));
+            continue;
+        }
         if let Some(agent) = dash.agents.get(row as usize) {
             let focused = dash.focus == row as usize;
             let number = match row + 1 {
@@ -99,11 +122,7 @@ fn draw_content(dash: &mut Dash, out: &mut String) {
 
     let focus = dash.focus;
     let Some(agent) = dash.agents.get_mut(focus) else {
-        if dash.full_redraw || dash.sidebar_dirty {
-            let msg = "no agents — create one with `warren new NAME [DIR]`";
-            let _ = write!(out, "\x1b[0m\x1b[3;{}H\x1b[2m{}\x1b[0m", x0 + 2, msg);
-        }
-        return;
+        return; // + tab focused: the form renderer owns the pane
     };
 
     if agent.full_dirty {
@@ -145,11 +164,31 @@ fn draw_status(dash: &mut Dash, out: &mut String) {
     let body = if let Some(flash) = dash.flash.take() {
         format!(" {flash}")
     } else if matches!(dash.sub, Sub::Cmd) {
-        format!(" :{}\u{2588}   q detach · q! quit+kill all", dash.cmdline)
+        format!(
+            " :{}\u{2588}   q detach · q! quit+kill all · color #hex/index",
+            dash.cmdline
+        )
+    } else if matches!(dash.sub, Sub::Rename) {
+        format!(" rename> {}\u{2588}   Enter save · Esc cancel", dash.cmdline)
+    } else if matches!(dash.sub, Sub::Kill) {
+        let name = dash.focused().map(|a| a.meta.display.clone()).unwrap_or_default();
+        format!(" close agent '{name}'?  [y] yes · [n] no")
+    } else if dash.editform.is_some() {
+        " EDIT  Tab field · type / arrows · Enter save · Esc cancel".to_string()
+    } else if dash.on_newform() {
+        match dash.mode {
+            Mode::Insert => {
+                " INSERT  Tab field · h/l mode · type · Enter create · Esc done".to_string()
+            }
+            Mode::Normal => {
+                " NORMAL  l/i/Enter edit form · j/k move · n new · :q quit".to_string()
+            }
+        }
     } else {
         match dash.mode {
             Mode::Normal => {
-                " NORMAL  j/k move · 1-9 jump · i insert · : command".to_string()
+                " NORMAL  j/k move · 1-9 jump · i insert · r rename · e edit · x close · : cmd"
+                    .to_string()
             }
             Mode::Insert => {
                 let name = dash
@@ -166,6 +205,9 @@ fn draw_status(dash: &mut Dash, out: &mut String) {
 }
 
 fn place_cursor(dash: &Dash, out: &mut String) {
+    if dash.editform.is_some() || dash.on_newform() {
+        return; // forms draw their own block cursor glyph
+    }
     if let (Mode::Insert, Some(agent)) = (&dash.mode, dash.focused()) {
         if agent.cursor_visible && agent.exited.is_none() {
             let (row, col) = agent.cursor;
