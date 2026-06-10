@@ -12,7 +12,9 @@
 
 mod names;
 mod paths;
+mod proto;
 mod sessions;
+mod spans;
 
 use anyhow::Result;
 
