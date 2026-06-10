@@ -10,6 +10,9 @@
 //!   warren hook STATE      called by Claude Code hooks; reports state to the agent daemon
 //!   warren __daemon …      internal: the per-agent daemon process
 
+mod cli;
+mod daemon;
+mod hooks;
 mod names;
 mod paths;
 mod proto;
@@ -40,13 +43,13 @@ fn main() {
 
     let result: Result<()> = match sub {
         "up" => todo_role("dashboard"),
-        "new" | "create" => todo_role("new"),
-        "ls" | "list" => todo_role("ls"),
-        "kill" | "rm" => todo_role("kill"),
-        "attach" => todo_role("attach"),
+        "new" | "create" => cli::cmd_new(rest),
+        "ls" | "list" => cli::cmd_ls(),
+        "kill" | "rm" => cli::cmd_kill(rest),
+        "attach" => cli::cmd_attach(rest),
         "sessions" => sessions::cmd_sessions(),
-        "hook" => todo_role("hook"),
-        "__daemon" => todo_role("__daemon"),
+        "hook" => hooks::cmd_hook(rest),
+        "__daemon" => daemon::DaemonArgs::parse(rest).and_then(daemon::run),
         "help" | "-h" | "--help" => {
             print!("{HELP}");
             Ok(())
@@ -56,7 +59,6 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let _ = rest;
 
     if let Err(e) = result {
         eprintln!("warren: {e:#}");

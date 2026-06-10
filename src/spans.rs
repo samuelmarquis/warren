@@ -61,6 +61,45 @@ impl LineSpans {
     }
 }
 
+/// Build the SGR escape selecting a span's style (always starts from reset,
+/// so spans are self-contained).
+pub fn sgr_sequence(span: &Span) -> String {
+    let mut out = String::from("\x1b[0");
+    if span.attrs & attr::BOLD != 0 {
+        out.push_str(";1");
+    }
+    if span.attrs & attr::DIM != 0 {
+        out.push_str(";2");
+    }
+    if span.attrs & attr::ITALIC != 0 {
+        out.push_str(";3");
+    }
+    if span.attrs & attr::UNDERLINE != 0 {
+        out.push_str(";4");
+    }
+    if span.attrs & attr::INVERSE != 0 {
+        out.push_str(";7");
+    }
+    if span.attrs & attr::HIDDEN != 0 {
+        out.push_str(";8");
+    }
+    if span.attrs & attr::STRIKEOUT != 0 {
+        out.push_str(";9");
+    }
+    match span.fg {
+        Color::Default => {}
+        Color::Indexed(i) => out.push_str(&format!(";38;5;{i}")),
+        Color::Rgb(r, g, b) => out.push_str(&format!(";38;2;{r};{g};{b}")),
+    }
+    match span.bg {
+        Color::Default => {}
+        Color::Indexed(i) => out.push_str(&format!(";48;5;{i}")),
+        Color::Rgb(r, g, b) => out.push_str(&format!(";48;2;{r};{g};{b}")),
+    }
+    out.push('m');
+    out
+}
+
 /// Resolve an xterm-256 palette index to RGB (standard xterm values:
 /// 16 named, 6x6x6 cube, 24-step grayscale ramp).
 pub fn xterm256_to_rgb(idx: u8) -> (u8, u8, u8) {

@@ -35,23 +35,6 @@ where
     unreachable!()
 }
 
-/// Names of agents with a socket in the run dir (live or stale — uniqueness
-/// only needs "not currently claimed").
-pub fn taken_names() -> Vec<String> {
-    let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(crate::paths::run_dir()) else {
-        return out;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        if let Some(stem) = name.strip_suffix(".sock") {
-            out.push(stem.to_string());
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
