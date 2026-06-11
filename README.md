@@ -1,11 +1,16 @@
 # warren
 
-A terminal dashboard for running many **Claude Code** agents at once over SSH.
+**A meta-harness for Claude Code: run a colony of agents from one terminal.**
+
+Claude Code is a harness for one agent. warren is the layer above it — a
+dashboard for running *many* Claude Code agents at once, each in its own
+independent process, switched between like vim buffers, over an SSH
+connection you're allowed to lose.
 
 A warren is a maze of interconnected burrows where a colony lives — and
-*survives*. Each agent runs in its own burrow (an independent daemon process);
-you tunnel between them through a left-hand sidebar; and everything outlives
-the SSH connection it was started in.
+*survives*. Each agent runs in its own burrow (a daemon that answers to no
+terminal); you tunnel between them through a left-hand sidebar; and
+everything outlives the connection it was started in.
 
 ```
 ┌────────────────┬───────────────────────────────────────────┐
@@ -19,18 +24,37 @@ the SSH connection it was started in.
    ↑ sidebar: every agent           ↑ the focused agent's live TUI
 ```
 
-- **Left column** — one row per agent. Bold = ready, dim = working, `!` =
-  blocked on a permission prompt, `*` = finished while you were elsewhere.
-  Optional per-agent tab colors. A pinned `+ new agent` tab at the bottom.
-- **Right pane** — the focused agent's actual Claude Code TUI, full screen.
-  Scrollback is Claude's own (fullscreen renderer); the wheel reaches it.
-- **Survives disconnects** — drop your SSH session (cleanly *or* by yanking
-  the cable) and every agent keeps running. Reconnect, run `warren`, and the
-  identical view reassembles.
+- **One row per agent**, state pushed by Claude Code's own lifecycle hooks —
+  no polling. Bold = ready for you, plain = working, `!` = blocked on a
+  permission prompt, `*` = finished while you were looking elsewhere.
+- **The right pane is the real thing** — the focused agent's actual Claude
+  Code TUI, full screen, with working mouse, colors, and Claude's own
+  scrollback.
+- **Survives disconnects.** Drop SSH cleanly or yank the cable: every agent
+  keeps running. Reconnect, type `warren`, and the identical view reassembles
+  from the daemons. The dashboard holds no state worth losing.
+- **Resume anything.** The new-agent form lists every resumable Claude
+  session on the machine, most recent first, with titles — pick one and it
+  reopens in a fresh burrow. Per-agent system prompts and extra CLI args too.
+- **One static Rust binary.** No tmux, no screen, no ncurses, no Python, no
+  config file.
 
-## How it's built (v1)
+## Why
 
-One Rust binary, two kinds of process:
+Running a fleet of agents from a phone or laptop against a headless box
+exposes every weakness of the classical multiplexer stack: replay artifacts
+on reattach, scrollback fights with fullscreen TUIs, and — fatally — one
+slow reader freezing every session at once. warren v0 was patched abduco +
+forked dvtm + scripts; the seams between those layers generated a new
+failure mode for every one they fixed.
+
+v1 is a ground-up rewrite around one rule: **nothing ever blocks on a
+peer.** Each agent is its own daemon owning a pty and an embedded terminal
+emulator; viewers get a snapshot of styled cells plus a damage stream, never
+a raw escape-sequence replay. Every connection has a bounded outbound queue
+— a stalled viewer is dropped (and reconnects to a clean snapshot) rather
+than wedging an agent. There's a regression test that stalls a viewer
+mid-firehose and asserts the daemon doesn't care.
 
 ```
 your terminal ──> warren            (dashboard: a STATELESS viewer)
@@ -43,25 +67,23 @@ your terminal ──> warren            (dashboard: a STATELESS viewer)
       claude
 ```
 
-- Each **agent daemon** owns the pty running Claude and an embedded terminal
-  emulator. Viewers get a snapshot of styled cells on attach and a coalesced
-  damage stream after that — no raw-escape replay, no resize mismatch.
-- The **dashboard is stateless**: kill it, kill SSH under it, nothing is lost.
-  All durable state (screen, name, color, hook state) lives in the daemons.
-- **Nothing ever blocks on a peer.** Every connection has a bounded outbound
-  queue; a stalled viewer is dropped (it reconnects to a fresh snapshot)
-  instead of freezing the world — the failure mode that ended v0.
-- **Agent states are pushed, not polled**: Claude Code lifecycle hooks run
-  `warren hook <state>`, which pokes the agent's own daemon socket.
+Kill the dashboard, kill SSH under it, kill nine of ten daemons — whatever
+is left keeps working. Agent state (screen, name, color, hook state) lives
+in the daemon; the daemon *is* the agent.
 
 ## Install
 
+Requires a Rust toolchain and [Claude Code](https://claude.com/claude-code).
+Developed and daily-driven on macOS (a headless Apple Silicon machine over
+SSH); the code is plain POSIX + rustix and should work on Linux, but it
+hasn't soaked there yet.
+
 ```sh
-cd ~/Developer/warren && ./install.sh   # cargo build --release + install
+git clone https://github.com/samuelmarquis/warren
+cd warren && ./install.sh        # cargo build --release → ~/.local/bin/warren
 ```
 
-Installs a single `warren` binary into `~/.local/bin` (override with
-`PREFIX=…`). Requires a Rust toolchain. No ncurses, no Python.
+Override the destination with `PREFIX=…`.
 
 ## Use
 
@@ -80,8 +102,8 @@ warren help
 
 Modal, like vim. **CLAUDE** mode (default) sends every key verbatim to the
 focused agent; **Ctrl-Space** toggles **NORMAL**; editing agent metadata or
-the new-agent form is **EDIT** mode. The status bar's mode chip is color-coded
-(CLAUDE orange, NORMAL green, EDIT purple):
+the new-agent form is **EDIT** mode. The status bar's mode chip is
+color-coded (CLAUDE orange, NORMAL green, EDIT purple):
 
 | NORMAL key | action |
 |---|---|
@@ -94,16 +116,25 @@ the new-agent form is **EDIT** mode. The status bar's mode chip is color-coded
 | `r` | rename (pins the name against Claude's title sync) |
 | `e` / `c` | edit form: title + 256-color picker |
 | `x` | close agent (y/n confirm) |
-| `:` | command line — `:q` detach · `:q!` kill all and quit · `:color #hex\|index` |
+| `:` | command line — `:q` detach · `:q!` kill all · `:color #hex\|index` |
 
 `Ctrl-\` detaches from anywhere. Mouse: click sidebar rows to focus, wheel
-over the sidebar cycles, clicks/wheel over the pane go to the agent (Claude's
-fullscreen TUI handles its own scrolling), palette swatches are clickable.
+over the sidebar cycles agents, clicks and wheel over the pane go to the
+agent (Claude's fullscreen TUI handles its own scrolling), palette swatches
+are clickable.
 
 The **new-agent form** (the `+` tab): pick `new` / `resume` / `continue`,
-title, root dir, a session from the resume picker (most-recent first, across
-all projects), a system prompt (`--system-prompt`), extra claude CLI args,
-and a tab color. NORMAL always navigates away — the form never traps you.
+title, root dir, a session from the resume picker, a system prompt
+(`--system-prompt`), extra claude CLI args, and a tab color. Tab/Shift+Tab
+cycle fields; NORMAL always navigates away — the form never traps you.
+
+### How agent states work
+
+warren generates a Claude Code settings file whose lifecycle hooks run
+`warren hook <state>`, which pokes the agent's own daemon over its socket:
+prompt submitted or tool running → *working*, turn finished → *ready*,
+permission prompt → *attention*. Outside warren the hook is a silent no-op,
+and it always exits 0 — a wedged daemon can never stall Claude.
 
 ## Files
 
@@ -112,14 +143,16 @@ and a tab color. NORMAL always navigates away — the form never traps you.
 ~/.warren/hooks.json        Claude Code hook settings (regenerated on spawn)
 ```
 
-That's all v1 writes. (Other `~/.warren` entries are v0 leftovers.)
+That's everything warren writes. Agents die with the machine (conversations
+persist in `~/.claude` and come back through the resume picker).
 
-## Repository layout
+## Development
 
-- `v1/` — warren itself (Rust, single crate). Tests: `cargo test` — includes
-  headless integration tests that spawn real daemons around scripted children,
-  including a regression test for the v0 freeze (a viewer that stops reading
-  must be dropped while the daemon keeps serving).
-- `abduco/`, `dvtm/`, `bin/` — **retired v0** (patched C + shell). Kept until
-  the v1 cutover has soaked; their patch sets live on `warren` branches of the
-  two nested repos.
+```sh
+cargo test
+```
+
+Unit tests plus headless integration tests that spawn real daemons around
+scripted children and drive them over the socket — snapshot fidelity, damage
+streaming, resize fan-out, hook round-trips, exit reaping, and the
+stalled-viewer regression test.

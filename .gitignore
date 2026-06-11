@@ -1,4 +1,7 @@
-# Vendored dependency repos — their own git repos on a `warren` branch.
-# See README "Repository layout". Tracked separately, not by warren.
-/abduco/
-/dvtm/
+/target/
+
+# Retired v0 (patched abduco + dvtm + scripts), kept locally for reference.
+/old/
+
+# Local feedback scratchpad.
+/warren-v1-notes.md

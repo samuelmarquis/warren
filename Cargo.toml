@@ -1,8 +1,10 @@
 [package]
 name = "warren"
-version = "1.0.0-dev"
+version = "1.0.0"
 edition = "2024"
-description = "Claude Code agent multiplexer: per-agent daemons + a stateless dashboard"
+description = "A meta-harness for Claude Code: run a colony of agents from one dashboard"
+repository = "https://github.com/samuelmarquis/warren"
+readme = "README.md"
 
 [dependencies]
 alacritty_terminal = "0.26"
