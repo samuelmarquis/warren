@@ -104,6 +104,7 @@ pub fn new_key(dash: &mut Dash, bytes: &[u8]) -> usize {
     let nfields = form.fields().len();
     match key {
         Key::Tab => form.field = (form.field + 1) % nfields,
+        Key::ShiftTab => form.field = (form.field + nfields - 1) % nfields,
         // In the palette, Up/Down walk the grid; they only leave the field
         // at its edges (top row exits up, bottom row exits down).
         Key::Up if form.active() == NField::Color && form.color >= 16 => {
@@ -112,7 +113,7 @@ pub fn new_key(dash: &mut Dash, bytes: &[u8]) -> usize {
         Key::Down if form.active() == NField::Color && form.color + 16 <= 255 => {
             form.color += 16;
         }
-        Key::ShiftTab | Key::Up if form.active() != NField::List => {
+        Key::Up if form.active() != NField::List => {
             form.field = (form.field + nfields - 1) % nfields;
         }
         Key::Down if form.active() != NField::List => {
