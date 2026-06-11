@@ -68,6 +68,7 @@ Installs a single `warren` binary into `~/.local/bin` (override with
 ```
 warren                 open the dashboard (rebuilds the view from running agents)
 warren new NAME [DIR] [COLOR 0-255] [new|resume|continue] [session-id]
+           [--sys=SYSTEM-PROMPT] [--extra=EXTRA-CLAUDE-ARGS]
 warren ls              list agents and their states
 warren kill NAME       terminate an agent
 warren attach NAME     view a single agent raw (no sidebar; Ctrl-\ detaches)
@@ -101,8 +102,8 @@ fullscreen TUI handles its own scrolling), palette swatches are clickable.
 
 The **new-agent form** (the `+` tab): pick `new` / `resume` / `continue`,
 title, root dir, a session from the resume picker (most-recent first, across
-all projects), and a tab color. NORMAL always navigates away — the form never
-traps you.
+all projects), a system prompt (`--system-prompt`), extra claude CLI args,
+and a tab color. NORMAL always navigates away — the form never traps you.
 
 ## Files
 
