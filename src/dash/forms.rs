@@ -20,6 +20,8 @@ pub enum NField {
     Title,
     Root,
     List,
+    Sys,
+    Extra,
     Color,
 }
 
@@ -34,6 +36,10 @@ pub struct NewForm {
     pub root: String,
     pub sessions: Option<Vec<Session>>,
     pub sess_sel: usize,
+    /// `--system-prompt` value; empty = omit the flag.
+    pub sys: String,
+    /// Raw extra CLI args appended to the claude command line.
+    pub extra: String,
     pub color: u16, // 0 = none, 1..=255 xterm index
 }
 
@@ -46,15 +52,28 @@ impl NewForm {
             root: std::env::var("HOME").unwrap_or_else(|_| "/".into()),
             sessions: None,
             sess_sel: 0,
+            sys: String::new(),
+            extra: String::new(),
             color: 0,
         }
     }
 
     pub fn fields(&self) -> &'static [NField] {
         match self.mode {
-            MODE_RESUME => &[NField::Mode, NField::List, NField::Color],
-            MODE_CONTINUE => &[NField::Mode, NField::Root, NField::Color],
-            _ => &[NField::Mode, NField::Title, NField::Root, NField::Color],
+            MODE_RESUME => {
+                &[NField::Mode, NField::List, NField::Sys, NField::Extra, NField::Color]
+            }
+            MODE_CONTINUE => {
+                &[NField::Mode, NField::Root, NField::Sys, NField::Extra, NField::Color]
+            }
+            _ => &[
+                NField::Mode,
+                NField::Title,
+                NField::Root,
+                NField::Sys,
+                NField::Extra,
+                NField::Color,
+            ],
         }
     }
 
@@ -121,6 +140,8 @@ pub fn new_key(dash: &mut Dash, bytes: &[u8]) -> usize {
             }
             NField::Title => line_edit(&mut form.title, key),
             NField::Root => line_edit(&mut form.root, key),
+            NField::Sys => line_edit(&mut form.sys, key),
+            NField::Extra => line_edit(&mut form.extra, key),
             NField::List => {
                 form.ensure_sessions();
                 let len = form.sessions.as_ref().map(Vec::len).unwrap_or(0);
@@ -164,7 +185,18 @@ fn submit_new(dash: &mut Dash) {
     let color = form.color.min(255) as u8;
     let live: Vec<(String, u8)> =
         dash.agents.iter().map(|a| (a.meta.name.clone(), a.meta.slot)).collect();
-    match crate::cli::launch_agent(&base, &dir, color, mode_str, sid.as_deref(), &live) {
+    let sys = form.sys.trim().to_string();
+    let extra = form.extra.trim().to_string();
+    match crate::cli::launch_agent(
+        &base,
+        &dir,
+        color,
+        mode_str,
+        sid.as_deref(),
+        (!sys.is_empty()).then_some(sys.as_str()),
+        (!extra.is_empty()).then_some(extra.as_str()),
+        &live,
+    ) {
         Ok(name) => {
             dash.flash = Some(format!("creating agent '{name}'…"));
             dash.pending_focus = Some(name);
@@ -190,7 +222,7 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
 
     // Mode selector.
     let _ = write!(out, "\x1b[4;{}H", x0 + 2);
-    let _ = write!(out, "{}Mode     \x1b[0m  ", field_label(active == NField::Mode));
+    let _ = write!(out, "{}Mode      \x1b[0m  ", field_label(active == NField::Mode));
     for (i, label) in ["new", "resume", "continue"].iter().enumerate() {
         if form.mode == i as u8 {
             let _ = write!(out, "\x1b[7m[ {label} ]\x1b[0m ");
@@ -199,6 +231,7 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
         }
     }
 
+    #[allow(unused_assignments)]
     let mut row = 6u16;
     match form.mode {
         MODE_RESUME => {
@@ -206,7 +239,7 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
             let sessions = form.sessions.as_deref().unwrap_or(&[]);
             let _ = write!(
                 out,
-                "\x1b[{};{}H{}Session  \x1b[0m",
+                "\x1b[{};{}H{}Session   \x1b[0m",
                 row,
                 x0 + 2,
                 field_label(active == NField::List)
@@ -239,6 +272,8 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
             row = draw_text_field(out, row, x0, "Root dir", &form.root, active == NField::Root, insert);
         }
     }
+    row = draw_text_field(out, row, x0, "Sys prompt", &form.sys, active == NField::Sys, insert);
+    row = draw_text_field(out, row, x0, "Extra args", &form.extra, active == NField::Extra, insert);
 
     dash.palette_geom =
         draw_color_field(out, row, x0, pane_w, pane_h, form.color, active == NField::Color);
@@ -383,7 +418,7 @@ fn draw_text_field(
     let cursor = if active && insert { "\u{2588}" } else { "" };
     let _ = write!(
         out,
-        "\x1b[{};{}H{}{:<9}\x1b[0m  {value}{cursor}",
+        "\x1b[{};{}H{}{:<10}\x1b[0m  {value}{cursor}",
         row,
         x0 + 2,
         field_label(active),
@@ -427,7 +462,7 @@ fn draw_color_field(
     color: u16,
     active: bool,
 ) -> Option<(u16, u16, u16, u16)> {
-    let _ = write!(out, "\x1b[{};{}H{}Color    \x1b[0m  ", row, x0 + 2, field_label(active));
+    let _ = write!(out, "\x1b[{};{}H{}Color     \x1b[0m  ", row, x0 + 2, field_label(active));
     if color == 0 {
         let _ = write!(out, "\x1b[2mnone\x1b[0m");
     } else {
@@ -446,17 +481,17 @@ fn draw_color_field(
     for gr in 0..16u16 {
         for sub in 0..box_h {
             let _ = write!(out, "\x1b[{};{}H", grid_top + gr * box_h + sub, x0 + 4);
-            let marker_row = sub == box_h / 2;
             for gc in 0..16u16 {
                 let idx = gr * 16 + gc;
                 let here = idx == color;
-                let body: String = if here && marker_row && box_w >= 2 {
+                // Cursor brackets span the swatch's full height.
+                let body: String = if here && box_w >= 2 {
                     format!("[{}]", " ".repeat(box_w as usize - 2))
                 } else {
                     " ".repeat(box_w as usize)
                 };
                 if idx == 0 {
-                    let dashes = if here && marker_row {
+                    let dashes = if here {
                         body
                     } else {
                         "\u{2500}".repeat(box_w as usize)

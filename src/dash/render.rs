@@ -24,6 +24,17 @@ pub fn paint(dash: &mut Dash) -> String {
         }
     }
 
+    // The divider column repaints whenever its inputs may have changed
+    // (sidebar/junction rows are derived from the focused agent's content).
+    // Decide BEFORE drawing: draw_content consumes the damage flags.
+    let divider_due = dash.full_redraw
+        || dash.sidebar_dirty
+        || dash.form_dirty
+        || dash
+            .focused()
+            .map(|a| a.full_dirty || !a.damage_rows.is_empty())
+            .unwrap_or(false);
+
     if dash.sidebar_dirty {
         draw_sidebar(dash, &mut out);
     }
@@ -42,6 +53,9 @@ pub fn paint(dash: &mut Dash) -> String {
     }
     if dash.status_dirty {
         draw_status(dash, &mut out);
+    }
+    if divider_due {
+        draw_divider(dash, &mut out);
     }
 
     place_cursor(dash, &mut out);
@@ -64,7 +78,7 @@ fn draw_sidebar(dash: &mut Dash, out: &mut String) {
             let mut label = "   + new agent".to_string();
             label.truncate(text_w);
             let pad = text_w.saturating_sub(label.chars().count());
-            let _ = write!(out, "{style}{label}{}\x1b[0m{SEP_STYLE}│\x1b[0m", " ".repeat(pad));
+            let _ = write!(out, "{style}{label}{}\x1b[0m", " ".repeat(pad));
             continue;
         }
         if let Some(agent) = dash.agents.get(row as usize) {
@@ -90,15 +104,15 @@ fn draw_sidebar(dash: &mut Dash, out: &mut String) {
 
             let color = agent.meta.color;
             let mut style = String::from("\x1b[0");
-            if agent.busy() {
-                style.push_str(";2"); // dim while working
-            } else {
-                style.push_str(";1"); // bold when ready
+            // Busy = plain weight, idle = bold. Never dim: dim fg over a
+            // colored background reads as unreadable mid-gray.
+            if !agent.busy() {
+                style.push_str(";1");
             }
             if focused {
                 if color != 0 {
                     let (r, g, b) = spans::xterm256_to_rgb(color);
-                    let fg = if spans::color_is_dark(r, g, b) { 15 } else { 0 };
+                    let fg = if spans::color_is_dark(r, g, b) { 231 } else { 16 };
                     let _ = write!(style, ";48;5;{color};38;5;{fg}");
                 } else {
                     style.push_str(";7");
@@ -111,17 +125,53 @@ fn draw_sidebar(dash: &mut Dash, out: &mut String) {
         } else {
             let _ = write!(out, "\x1b[0m{}", " ".repeat(text_w));
         }
-        let _ = write!(out, "{SEP_STYLE}│\x1b[0m");
     }
 }
-
-/// Sidebar divider color — matched to the gray Claude uses for its
-/// text-entry box borders.
-const SEP_STYLE: &str = "\x1b[0;38;5;240m";
 
 /// Horizontal box-drawing leads that should joint into the divider with '├'.
 fn joins_divider(c: char) -> bool {
     matches!(c, '\u{2500}' | '\u{2501}' | '\u{254c}' | '\u{2504}' | '\u{2508}' | '\u{2574}' | '\u{2576}')
+}
+
+/// The divider column between sidebar and pane, drawn by ONE owner so
+/// junctions can't be clobbered by sidebar repaints. Where a horizontal rule
+/// in the focused agent's UI meets the column, the cell joins with '├'; the
+/// whole column takes that rule's color (Claude's own divider gray), falling
+/// back to 240 when no rule is on screen.
+fn draw_divider(dash: &Dash, out: &mut String) {
+    let rows = dash.rows.saturating_sub(1);
+    let col = SIDEBAR_WIDTH; // 1-based ANSI column
+
+    let agent = (!dash.on_newform() && dash.editform.is_none())
+        .then(|| dash.focused())
+        .flatten();
+    let mut junctions: Vec<Option<spans::Color>> = vec![None; rows as usize];
+    let mut rule_color: Option<spans::Color> = None;
+    if let Some(agent) = agent {
+        for (row, line) in agent.grid.iter().enumerate().take(rows as usize) {
+            if let Some(span) = line.0.first() {
+                if span.text.chars().next().map(joins_divider).unwrap_or(false) {
+                    junctions[row] = Some(span.fg);
+                    rule_color.get_or_insert(span.fg);
+                }
+            }
+        }
+    }
+    let base = rule_color.unwrap_or(spans::Color::Indexed(240));
+
+    for row in 0..rows {
+        let (glyph, color) = match junctions[row as usize] {
+            Some(fg) => ('\u{251c}', fg), // ├
+            None => ('\u{2502}', base),   // │
+        };
+        let style = spans::sgr_sequence(&Span {
+            text: String::new(),
+            fg: color,
+            bg: spans::Color::Default,
+            attrs: 0,
+        });
+        let _ = write!(out, "\x1b[{};{}H{style}{glyph}\x1b[0m", row + 1, col);
+    }
 }
 
 fn draw_content(dash: &mut Dash, out: &mut String) {
@@ -153,21 +203,6 @@ fn draw_content(dash: &mut Dash, out: &mut String) {
 }
 
 fn draw_pane_line(out: &mut String, row: u16, x0: u16, width: usize, line: Option<&LineSpans>) {
-    // The divider cell to our left: '├' (in the line's own color) where a
-    // horizontal rule in the agent's UI meets the sidebar, plain '│' elsewhere.
-    let first_span = line.and_then(|l| l.0.first());
-    let joins = first_span
-        .and_then(|s| s.text.chars().next())
-        .map(joins_divider)
-        .unwrap_or(false);
-    if joins {
-        let rule = first_span.unwrap();
-        let style = spans::sgr_sequence(&Span { text: String::new(), ..rule.clone() });
-        let _ = write!(out, "\x1b[{};{}H{style}├\x1b[0m", row + 1, x0 - 1);
-    } else {
-        let _ = write!(out, "\x1b[{};{}H{SEP_STYLE}│\x1b[0m", row + 1, x0 - 1);
-    }
-
     let _ = write!(out, "\x1b[{};{}H\x1b[0m\x1b[K", row + 1, x0);
     let Some(line) = line else { return };
     let mut budget = width;

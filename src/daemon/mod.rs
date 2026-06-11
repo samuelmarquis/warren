@@ -45,20 +45,29 @@ pub struct DaemonArgs {
     pub mode: String,
     pub dir: String,
     pub sid: Option<String>,
+    /// `--system-prompt` for claude (replaces the default).
+    pub sys: Option<String>,
+    /// Raw extra args appended to the claude command line.
+    pub extra: Option<String>,
 }
 
 impl DaemonArgs {
     pub fn parse(rest: &[String]) -> Result<Self> {
-        if rest.len() < 5 {
-            bail!("usage: warren __daemon NAME SLOT COLOR MODE DIR [SESSION-ID]");
+        let sys = rest.iter().find_map(|a| a.strip_prefix("--sys=")).map(String::from);
+        let extra = rest.iter().find_map(|a| a.strip_prefix("--extra=")).map(String::from);
+        let pos: Vec<&String> = rest.iter().filter(|a| !a.starts_with("--")).collect();
+        if pos.len() < 5 {
+            bail!("usage: warren __daemon NAME SLOT COLOR MODE DIR [SESSION-ID] [--sys=…] [--extra=…]");
         }
         Ok(DaemonArgs {
-            name: rest[0].clone(),
-            slot: rest[1].parse().context("slot")?,
-            color: rest[2].parse().context("color")?,
-            mode: rest[3].clone(),
-            dir: rest[4].clone(),
-            sid: rest.get(5).cloned(),
+            name: pos[0].clone(),
+            slot: pos[1].parse().context("slot")?,
+            color: pos[2].parse().context("color")?,
+            mode: pos[3].clone(),
+            dir: pos[4].clone(),
+            sid: pos.get(5).map(|s| s.to_string()),
+            sys,
+            extra,
         })
     }
 }
@@ -103,7 +112,7 @@ pub fn run(args: DaemonArgs) -> Result<()> {
         Ok(custom) if !custom.is_empty() => custom,
         _ => {
             let hooks = crate::hooks::ensure_hooks_json()?;
-            let base = match args.mode.as_str() {
+            let mut cmd = match args.mode.as_str() {
                 "resume" => match &args.sid {
                     Some(sid) => format!("claude --resume {sid}"),
                     None => "claude --resume".to_string(),
@@ -111,7 +120,17 @@ pub fn run(args: DaemonArgs) -> Result<()> {
                 "continue" => "claude --continue".to_string(),
                 _ => "claude".to_string(),
             };
-            format!("{base} --settings '{}'", hooks.display())
+            if let Some(sys) = &args.sys {
+                // Single-quote for the shell, escaping embedded quotes.
+                let escaped = sys.replace('\'', r"'\''");
+                cmd.push_str(&format!(" --system-prompt '{escaped}'"));
+            }
+            if let Some(extra) = &args.extra {
+                // User-authored args, passed through verbatim.
+                cmd.push_str(&format!(" {extra}"));
+            }
+            cmd.push_str(&format!(" --settings '{}'", hooks.display()));
+            cmd
         }
     };
 

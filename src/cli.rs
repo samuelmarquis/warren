@@ -81,26 +81,35 @@ fn query_agent(sock: &Path) -> Option<(Meta, AgentState)> {
 // ------------------------------------------------------------------------ new
 
 pub fn cmd_new(args: &[String]) -> Result<()> {
-    let Some(raw) = args.first() else {
-        bail!("usage: warren new NAME [DIR] [COLOR 0-255] [new|resume|continue] [session-id]");
+    // Flag-style options can appear anywhere; the rest are positional.
+    let sys = args.iter().find_map(|a| a.strip_prefix("--sys="));
+    let extra = args.iter().find_map(|a| a.strip_prefix("--extra="));
+    let pos: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+
+    let Some(raw) = pos.first() else {
+        bail!(
+            "usage: warren new NAME [DIR] [COLOR 0-255] [new|resume|continue] [session-id] \
+             [--sys=SYSTEM-PROMPT] [--extra=EXTRA-CLAUDE-ARGS]"
+        );
     };
     let base = crate::names::sanitize(raw);
     if base.is_empty() {
         bail!("empty name");
     }
-    let dir = expand_dir(args.get(1).map(String::as_str));
-    let color: u8 = args.get(2).map(|c| c.parse()).transpose().context("COLOR must be 0-255")?.unwrap_or(0);
-    let mode = args.get(3).cloned().unwrap_or_else(|| "new".to_string());
+    let dir = expand_dir(pos.get(1).map(|s| s.as_str()));
+    let color: u8 =
+        pos.get(2).map(|c| c.parse()).transpose().context("COLOR must be 0-255")?.unwrap_or(0);
+    let mode = pos.get(3).cloned().cloned().unwrap_or_else(|| "new".to_string());
     if !matches!(mode.as_str(), "new" | "resume" | "continue") {
         bail!("mode must be new, resume, or continue");
     }
-    let sid = args.get(4).cloned();
+    let sid = pos.get(4).map(|s| s.to_string());
 
     // Live agents give us both name collisions and used slots; discover()
     // also garbage-collects stale sockets so dead names become reusable.
     let live: Vec<(String, u8)> =
         discover().into_iter().map(|a| (a.meta.name, a.meta.slot)).collect();
-    let name = launch_agent(&base, &dir, color, &mode, sid.as_deref(), &live)?;
+    let name = launch_agent(&base, &dir, color, &mode, sid.as_deref(), sys, extra, &live)?;
 
     // Wait for the daemon's socket to come up so failures surface here.
     let sock = crate::paths::sock_path(&name);
@@ -117,22 +126,26 @@ pub fn cmd_new(args: &[String]) -> Result<()> {
 
 /// Pick a unique name and free slot against `live` (name, slot) pairs and
 /// spawn the daemon. Shared by the CLI and the dashboard's new-agent form.
+#[allow(clippy::too_many_arguments)]
 pub fn launch_agent(
     base: &str,
     dir: &str,
     color: u8,
     mode: &str,
     sid: Option<&str>,
+    sys: Option<&str>,
+    extra: Option<&str>,
     live: &[(String, u8)],
 ) -> Result<String> {
     let name = crate::names::unique(base, live.iter().map(|(n, _)| n.as_str()));
     let slot = (1..=u8::MAX).find(|s| !live.iter().any(|(_, used)| used == s)).unwrap_or(0);
-    spawn_daemon(&name, slot, color, mode, dir, sid)?;
+    spawn_daemon(&name, slot, color, mode, dir, sid, sys, extra)?;
     Ok(name)
 }
 
 /// Spawn `warren __daemon` fully detached: new session, no stdio, no cwd tie.
 /// We exit immediately after, so it reparents to init (ppid 1).
+#[allow(clippy::too_many_arguments)]
 fn spawn_daemon(
     name: &str,
     slot: u8,
@@ -140,6 +153,8 @@ fn spawn_daemon(
     mode: &str,
     dir: &str,
     sid: Option<&str>,
+    sys: Option<&str>,
+    extra: Option<&str>,
 ) -> Result<()> {
     let exe = std::env::current_exe()?;
     let mut cmd = std::process::Command::new(exe);
@@ -155,6 +170,12 @@ fn spawn_daemon(
         .current_dir("/");
     if let Some(sid) = sid {
         cmd.arg(sid);
+    }
+    if let Some(sys) = sys {
+        cmd.arg(format!("--sys={sys}"));
+    }
+    if let Some(extra) = extra {
+        cmd.arg(format!("--extra={extra}"));
     }
     unsafe {
         cmd.pre_exec(|| {
