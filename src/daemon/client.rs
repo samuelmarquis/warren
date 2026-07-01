@@ -69,6 +69,11 @@ impl Conn {
         !self.dead && self.sent < self.out.len()
     }
 
+    /// Outbound bytes not yet written (diagnostics).
+    pub fn pending(&self) -> usize {
+        self.out.len() - self.sent
+    }
+
     /// Drain as much of the outbound queue as the socket accepts right now.
     pub fn flush(&mut self) {
         while self.sent < self.out.len() {

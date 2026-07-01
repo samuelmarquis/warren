@@ -90,6 +90,7 @@ struct Daemon {
     sent_mouse: MouseProto,
     dirty: bool,
     log: Option<std::fs::File>,
+    started: Instant,
 }
 
 pub fn run(args: DaemonArgs) -> Result<()> {
@@ -184,6 +185,7 @@ pub fn run(args: DaemonArgs) -> Result<()> {
         sent_mouse: MouseProto::None,
         dirty: false,
         log,
+        started: Instant::now(),
     };
 
     let status = daemon.event_loop()?;
@@ -222,7 +224,8 @@ fn bind_or_replace(sock: &std::path::Path) -> Result<UnixListener> {
 impl Daemon {
     fn logf(&mut self, msg: &str) {
         if let Some(f) = &mut self.log {
-            let _ = writeln!(f, "[{}] {}", self.meta.name, msg);
+            let t = self.started.elapsed();
+            let _ = writeln!(f, "[{}] {:>9.3}ms {}", self.meta.name, t.as_secs_f64() * 1000.0, msg);
         }
     }
 
@@ -238,6 +241,17 @@ impl Daemon {
                 Ok(_) => {}
                 Err(e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e.into()),
+            }
+
+            // Timeout-only wakes are logged when a flush is due (the damage
+            // timer firing); event wakes always.
+            if self.log.is_some() && (events.iter().next().is_some() || self.dirty) {
+                let keys: Vec<String> = events
+                    .iter()
+                    .map(|e| format!("{}{}{}", e.key, if e.readable { "r" } else { "" }, if e.writable { "w" } else { "" }))
+                    .collect();
+                let msg = format!("wake: [{}] dirty={} flush_at={:?}", keys.join(","), self.dirty, flush_at.map(|a| a.saturating_duration_since(Instant::now())));
+                self.logf(&msg);
             }
 
             let mut exited: Option<i32> = None;
@@ -303,10 +317,15 @@ impl Daemon {
     fn read_pty(&mut self) {
         let mut buf = [0u8; 65536];
         let mut total = 0;
+        let log_total = self.log.is_some();
+        let mut preview = String::new();
         loop {
             match self.pty.reader().read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
+                    if log_total && preview.len() < 160 {
+                        preview.push_str(&escape_bytes(&buf[..n.min(160)]));
+                    }
                     self.term.advance(&buf[..n]);
                     self.last_output = Instant::now();
                     self.dirty = true;
@@ -324,9 +343,17 @@ impl Daemon {
                 Err(_) => break,
             }
         }
+        if log_total {
+            let msg = format!("read_pty: {total} bytes  «{preview}»");
+            self.logf(&msg);
+        }
     }
 
     fn write_pty(&mut self) {
+        if self.log.is_some() && !self.pty_in.is_empty() {
+            let msg = format!("write_pty: {} bytes  «{}»", self.pty_in.len(), escape_bytes(&self.pty_in[..self.pty_in.len().min(160)]));
+            self.logf(&msg);
+        }
         while !self.pty_in.is_empty() {
             match self.pty.writer().write(&self.pty_in) {
                 Ok(0) => break,
@@ -536,6 +563,10 @@ impl Daemon {
             Ok(e) => e,
             Err(_) => return,
         };
+        if self.log.is_some() {
+            let msg = format!("flush_frame: {} bytes", encoded.len());
+            self.logf(&msg);
+        }
         for conn in self.conns.values_mut() {
             if conn.attached {
                 conn.send(&encoded);
@@ -665,9 +696,21 @@ impl Daemon {
             }
         }
         // Reflect outbound-queue interest for the living.
+        let mut queued: Vec<String> = Vec::new();
         for (key, conn) in &self.conns {
             let ev = PollEvent::new(*key, true, conn.wants_write());
-            let _ = self.poller.modify_with_mode(&conn.stream, ev, PollMode::Level);
+            let r = self.poller.modify_with_mode(&conn.stream, ev, PollMode::Level);
+            if self.log.is_some() && (conn.wants_write() || r.is_err()) {
+                queued.push(format!(
+                    "{key}:pending={}{}",
+                    conn.pending(),
+                    if r.is_err() { ",modify-ERR" } else { "" }
+                ));
+            }
+        }
+        if !queued.is_empty() {
+            let msg = format!("  conns awaiting writability: [{}]", queued.join(" "));
+            self.logf(&msg);
         }
     }
 }
@@ -676,4 +719,18 @@ fn send_to(conn: &mut Conn, msg: &ToClient) {
     if let Ok(encoded) = proto::encode_frame(msg) {
         conn.send(&encoded);
     }
+}
+
+/// Printable-escape bytes for WARREN_LOG diagnostics.
+fn escape_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|&b| match b {
+            0x20..=0x7e => (b as char).to_string(),
+            0x1b => "\\e".to_string(),
+            b'\r' => "\\r".to_string(),
+            b'\n' => "\\n".to_string(),
+            _ => format!("\\x{b:02x}"),
+        })
+        .collect()
 }

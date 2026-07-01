@@ -113,8 +113,17 @@ impl Viewer {
             }
             match self.stream.read(&mut buf) {
                 Ok(0) => return None,
-                Ok(n) => self.decoder.push(&buf[..n]),
-                Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {}
+                Ok(n) => {
+                    if std::env::var("WARREN_TEST_TRACE").is_ok() {
+                        eprintln!("viewer read: {n} bytes");
+                    }
+                    self.decoder.push(&buf[..n]);
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {
+                    if std::env::var("WARREN_TEST_TRACE").is_ok() {
+                        eprintln!("viewer read: timeout");
+                    }
+                }
                 Err(e) => panic!("viewer read: {e}"),
             }
         }
@@ -438,4 +447,100 @@ fn big_frame_tail_flushes_while_daemon_is_idle() {
         "frame tail never arrived (got {}/1200 cells): daemon slept without writable interest",
         seen.get()
     );
+}
+// Scratch discriminator: is the DAEMON slow to deliver an input-triggered
+// burst to a continuously-reading viewer? (The C-g-opens-editor shape.)
+
+#[test]
+fn input_triggered_burst_arrives_promptly() {
+    let home = TestHome::new("trigburst");
+    // Each input line triggers 600 distinct-color cells (~30KB encoded).
+    new_agent(
+        &home,
+        "trig",
+        "while read x; do i=0; while [ $i -lt 600 ]; do printf '\\033[38;5;%dmY' $((i%256)); i=$((i+1)); done; printf '\\033[0m\\n'; done",
+    );
+    let (mut viewer, _snap) = Viewer::attach(&home.sock("trig"), 120, 30);
+    std::thread::sleep(Duration::from_millis(300)); // let the shell reach read
+
+    for round in 1..=3 {
+        let t0 = Instant::now();
+        viewer.send(&ToDaemon::Input(proto::b64_encode(b"\n")));
+        let seen = std::cell::Cell::new(0usize);
+        let done = viewer.await_frame(4_000, |m| {
+            let text: String = match m {
+                ToClient::Damage { lines, .. } => {
+                    lines.iter().flat_map(|(_, l)| l.0.iter()).map(|s| s.text.as_str()).collect()
+                }
+                ToClient::Snapshot { screen, .. } => screen_text(screen),
+                _ => return false,
+            };
+            seen.set(seen.get() + text.matches('Y').count());
+            seen.get() >= 600
+        });
+        let ms = t0.elapsed().as_millis();
+        assert!(done.is_some(), "round {round}: burst never arrived ({}Y)", seen.get());
+        assert!(ms < 1500, "round {round}: burst took {ms}ms — daemon-side stall");
+    }
+}
+
+/// End-to-end: a REAL dashboard (running as an agent under an outer daemon,
+/// which provides its pty) viewing an inner agent that bursts a vis-like
+/// screen (alt-screen toggle + 600 colored cells) when poked. The burst must
+/// render on the dashboard's actual output WITHOUT any further keypress.
+#[test]
+fn dashboard_paints_triggered_burst_without_extra_keys() {
+    let inner = TestHome::new("e2ein");
+    new_agent(
+        &inner,
+        "trig",
+        "while read x; do printf '\\033[?1049l\\033[?1049h'; i=0; while [ $i -lt 600 ]; do printf '\\033[38;5;%dmY' $((i%256)); i=$((i+1)); done; printf '\\033[0m'; done",
+    );
+
+    let outer = TestHome::new("e2eout");
+    let dash_cmd = format!("WARREN_HOME={} {} up", inner.dir.display(), BIN);
+    new_agent(&outer, "dash", &dash_cmd);
+
+    let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 140, 40);
+
+    // Local model of the dashboard's screen: apply Snapshot/Damage rows.
+    let grid = std::cell::RefCell::new(Vec::<String>::new());
+    let apply = |grid: &std::cell::RefCell<Vec<String>>, m: &ToClient| {
+        let mut g = grid.borrow_mut();
+        match m {
+            ToClient::Snapshot { screen, .. } => {
+                *g = screen.iter().map(|l| l.0.iter().map(|s| s.text.as_str()).collect()).collect();
+            }
+            ToClient::Damage { lines, .. } => {
+                for (row, line) in lines {
+                    let r = *row as usize;
+                    if g.len() <= r {
+                        g.resize(r + 1, String::new());
+                    }
+                    g[r] = line.0.iter().map(|s| s.text.as_str()).collect();
+                }
+            }
+            _ => {}
+        }
+    };
+    apply(&grid, &snap);
+
+    // Wait for the dashboard to attach the inner agent (sidebar shows it).
+    let up = viewer.await_frame(10_000, |m| {
+        apply(&grid, m);
+        grid.borrow().iter().any(|r| r.contains("trig"))
+    });
+    assert!(up.is_some(), "dashboard came up showing the inner agent");
+
+    // The C-g moment: one key through the whole stack.
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"\r")));
+    let t0 = Instant::now();
+    let drawn = viewer.await_frame(5_000, |m| {
+        apply(&grid, m);
+        grid.borrow().iter().map(|r| r.matches('Y').count()).sum::<usize>() >= 300
+    });
+    let ms = t0.elapsed().as_millis();
+    eprintln!("burst rendered by the dashboard in {ms}ms");
+    assert!(drawn.is_some(), "dashboard never painted the burst without another key");
+    assert!(ms < 2000, "dashboard took {ms}ms to paint an input-triggered burst");
 }

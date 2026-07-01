@@ -248,6 +248,25 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
         dash.mode = Mode::Normal;
     }
 
+    // Opt-in field diagnostics, same file the daemons use (WARREN_LOG).
+    let mut log = std::env::var("WARREN_LOG").ok().and_then(|p| {
+        std::fs::OpenOptions::new().create(true).append(true).open(p).ok()
+    });
+    let log_t0 = Instant::now();
+    macro_rules! dlog {
+        ($($arg:tt)*) => {
+            if let Some(f) = &mut log {
+                use std::io::Write;
+                let _ = writeln!(
+                    f,
+                    "[dash] {:>9.3}ms {}",
+                    log_t0.elapsed().as_secs_f64() * 1000.0,
+                    format!($($arg)*)
+                );
+            }
+        };
+    }
+
     let mut events = Events::new();
     let mut last_scan = Instant::now();
     let outcome = 'main: loop {
@@ -260,6 +279,10 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
             let _ = out.write_all(frame.as_bytes());
             let _ = out.flush();
         }
+        // The empty-diff frame is ~14 bytes of sync-update bracketing.
+        if frame.len() > 20 {
+            dlog!("paint: {} bytes", frame.len());
+        }
 
         events.clear();
         // 250ms tick: busy/idle is time-based (1500ms quiet threshold), so
@@ -269,6 +292,20 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
             Ok(_) => {}
             Err(e) if e.kind() == ErrorKind::Interrupted => continue,
             Err(e) => return Err(e.into()),
+        }
+        if log.is_some() && events.iter().next().is_some() {
+            let keys: Vec<String> = events
+                .iter()
+                .map(|e| {
+                    format!(
+                        "{}{}{}",
+                        e.key,
+                        if e.readable { "r" } else { "" },
+                        if e.writable { "w" } else { "" }
+                    )
+                })
+                .collect();
+            dlog!("wake: [{}]", keys.join(","));
         }
 
         for ev in events.iter() {
@@ -308,6 +345,16 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
                     if let Some(idx) = dash.keys.iter().position(|&k| k == key) {
                         if ev.readable {
                             dash.agents[idx].pump();
+                            if log.is_some() {
+                                let a = &dash.agents[idx];
+                                dlog!(
+                                    "pump {}: rows={} full={} dead={}",
+                                    a.meta.name,
+                                    a.damage_rows.len(),
+                                    a.full_dirty,
+                                    a.dead
+                                );
+                            }
                             if dash.agents[idx].meta_dirty {
                                 dash.sidebar_dirty = true;
                                 dash.agents[idx].meta_dirty = false;
