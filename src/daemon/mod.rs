@@ -273,11 +273,6 @@ impl Daemon {
             self.drain_term_events();
             self.write_pty();
             self.update_pty_interest()?;
-            self.reap_dead_conns();
-
-            if let Some(status) = exited {
-                return Ok(status);
-            }
 
             // Damage coalescing: first dirtying event arms the timer; the
             // frame goes out when it expires.
@@ -289,6 +284,18 @@ impl Daemon {
                 }
                 (false, Some(_)) => flush_at = None,
                 _ => {}
+            }
+
+            // Reap + reflect write interest LAST, after anything above may
+            // have queued outbound bytes. A frame bigger than the socket
+            // buffer (8KiB on macOS) leaves a tail in the conn queue; if the
+            // poller isn't watching writability when we go to sleep, that
+            // tail waits for the next unrelated event — the dashboard renders
+            // one redraw behind, "unstuck" by each keypress.
+            self.reap_dead_conns();
+
+            if let Some(status) = exited {
+                return Ok(status);
             }
         }
     }

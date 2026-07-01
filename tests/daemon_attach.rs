@@ -389,3 +389,53 @@ fn unique_names_and_slots() {
     assert!(ls.contains("twin-2"), "auto-suffixed name: {ls}");
     assert!(home.sock("twin").exists() && home.sock("twin-2").exists());
 }
+
+#[test]
+fn big_frame_tail_flushes_while_daemon_is_idle() {
+    // Regression: a Damage frame bigger than the socket buffer (8KiB on
+    // macOS) hits WouldBlock mid-write; the tail sits in the conn queue. The
+    // daemon must arm writable interest BEFORE sleeping, or the tail waits
+    // for the next unrelated event and every viewer renders one redraw
+    // behind, "unstuck" by each keypress.
+    let home = TestHome::new("bigframe");
+
+    // One burst of 1200 cells, every one a different color, so RLE can't
+    // merge spans and the encoded frame is far larger than the socket
+    // buffers (yet under the 64KiB test out-cap: overflow must NOT trip).
+    let mut burst = String::new();
+    for i in 0..1200u32 {
+        burst.push_str(&format!("\x1b[38;5;{}mX", i % 256));
+    }
+    burst.push_str("\x1b[0m");
+    let payload = home.dir.join("burst");
+    std::fs::write(&payload, burst).unwrap();
+
+    // The delay guarantees the burst lands AFTER the attach snapshot, in one
+    // coalesced flush, while the viewer below is deliberately not reading.
+    new_agent(&home, "big", &format!("sleep 1; cat {}; sleep 30", payload.display()));
+
+    let (mut viewer, _snap) = Viewer::attach(&home.sock("big"), 120, 30);
+
+    // Don't read while the daemon flushes: the kernel buffers ~16KiB, the
+    // daemon queues the rest and goes to sleep — the child stays silent and
+    // we send nothing, so writability is the ONLY thing that can wake it.
+    std::thread::sleep(Duration::from_millis(2500));
+
+    let seen = std::cell::Cell::new(0usize);
+    let done = viewer.await_frame(5_000, |m| {
+        let text: String = match m {
+            ToClient::Damage { lines, .. } => {
+                lines.iter().flat_map(|(_, l)| l.0.iter()).map(|s| s.text.as_str()).collect()
+            }
+            ToClient::Snapshot { screen, .. } => screen_text(screen),
+            _ => return false,
+        };
+        seen.set(seen.get() + text.matches('X').count());
+        seen.get() >= 1200
+    });
+    assert!(
+        done.is_some(),
+        "frame tail never arrived (got {}/1200 cells): daemon slept without writable interest",
+        seen.get()
+    );
+}
