@@ -14,12 +14,12 @@ everything outlives the connection it was started in.
 
 ```
 ┌────────────────┬───────────────────────────────────────────┐
-│ > refactor-db  │  ● Claude Code                              │
-│   web-ui     * │                                             │
-│   infra-tf   ! │  > running tests…                           │
-│   scratch      │  ✔ 42 passed                                │
-│                │                                             │
-│   + new agent  │  > _                                        │
+│ > refactor-db  │  ● Claude Code                            │
+│   web-ui     * │                                           │
+│   infra-tf   ! │  > running tests…                         │
+│   scratch      │  ✔ 42 passed                              │
+│                │                                           │
+│   + new agent  │  > _                                      │
 └────────────────┴───────────────────────────────────────────┘
    ↑ sidebar: every agent           ↑ the focused agent's live TUI
 ```
