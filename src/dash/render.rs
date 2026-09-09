@@ -8,7 +8,7 @@ use crate::spans::{self, LineSpans, Span};
 
 use crate::proto::Power;
 
-use super::{Dash, Mode, Sub};
+use super::{Dash, Mode, Row, Sub};
 
 pub const SIDEBAR_WIDTH: u16 = 24;
 
@@ -68,72 +68,103 @@ pub fn paint(dash: &mut Dash) -> String {
     out
 }
 
-fn draw_sidebar(dash: &mut Dash, out: &mut String) {
-    let rows = dash.rows.saturating_sub(1);
-    let text_w = (SIDEBAR_WIDTH - 1) as usize;
-    for row in 0..rows {
-        let _ = write!(out, "\x1b[{};1H", row + 1);
-        if row as usize == dash.agents.len() {
-            // The pinned "+ new agent" tab.
-            let focused = dash.on_newform();
-            let style = if focused { "\x1b[0;7m" } else { "\x1b[0;2m" };
-            let mut label = "   + new agent".to_string();
-            label.truncate(text_w);
-            let pad = text_w.saturating_sub(label.chars().count());
-            let _ = write!(out, "{style}{label}{}\x1b[0m", " ".repeat(pad));
-            continue;
-        }
-        if let Some(agent) = dash.agents.get(row as usize) {
-            let focused = dash.focus == row as usize;
-            let number = match row + 1 {
-                10 => "0".to_string(),
-                n if n < 10 => n.to_string(),
-                _ => " ".to_string(),
-            };
-            // Trailing mark: 'z' = asleep (no process, resumable); '!' =
-            // blocked on a permission prompt and quiet; '*' = went idle while
-            // unfocused, not yet examined.
-            let mark = if agent.asleep() {
-                " z"
-            } else if agent.needs_attention() {
-                " !"
-            } else if agent.unseen {
-                " *"
-            } else {
-                ""
-            };
-            let name_w = text_w.saturating_sub(3 + mark.len());
-            let name: String = agent.meta.display.chars().take(name_w).collect();
-            let label = format!(" {number} {name}{mark}");
-            let pad = text_w.saturating_sub(label.chars().count());
+/// Sidebar row number: 1-9, `0` for ten, blank past that (no key reaches it).
+fn row_number(n: usize) -> String {
+    match n {
+        10 => "0".to_string(),
+        n if n < 10 => n.to_string(),
+        _ => " ".to_string(),
+    }
+}
 
-            let color = agent.meta.color;
-            let mut style = String::from("\x1b[0");
-            // Busy = plain weight, idle = bold. Never dim: dim fg over a
-            // colored background reads as unreadable mid-gray — so a sleeping
-            // row is dimmed only when it isn't the focused (color-backed) one.
-            if agent.asleep() {
-                if !focused {
-                    style.push_str(";2");
-                }
-            } else if !agent.busy() {
-                style.push_str(";1");
-            }
-            if focused {
-                if color != 0 {
-                    let (r, g, b) = spans::xterm256_to_rgb(color);
-                    let fg = if spans::color_is_dark(r, g, b) { 231 } else { 16 };
-                    let _ = write!(style, ";48;5;{color};38;5;{fg}");
-                } else {
-                    style.push_str(";7");
-                }
-            } else if color != 0 {
-                let _ = write!(style, ";38;5;{color}");
-            }
-            style.push('m');
-            let _ = write!(out, "{style}{label}{}\x1b[0m", " ".repeat(pad));
-        } else {
+fn draw_sidebar(dash: &mut Dash, out: &mut String) {
+    let height = dash.rows.saturating_sub(1);
+    let text_w = (SIDEBAR_WIDTH - 1) as usize;
+    let folders = dash.folders();
+    let layout = dash.rows(&folders);
+
+    for row in 0..height {
+        let _ = write!(out, "\x1b[{};1H", row + 1);
+        let Some(item) = layout.get(row as usize) else {
             let _ = write!(out, "\x1b[0m{}", " ".repeat(text_w));
+            continue;
+        };
+        match item {
+            // The pinned "+ new agent" tab.
+            Row::NewAgent => {
+                let focused = dash.on_newform();
+                let style = if focused { "\x1b[0;7m" } else { "\x1b[0;2m" };
+                let mut label = "   + new agent".to_string();
+                label.truncate(text_w);
+                let pad = text_w.saturating_sub(label.chars().count());
+                let _ = write!(out, "{style}{label}{}\x1b[0m", " ".repeat(pad));
+            }
+            // A working directory. Folded, it says how many it is holding.
+            Row::Folder(fi) => {
+                let folder = &folders[*fi];
+                let holds_focus = folder.agents().contains(&dash.focus);
+                let tail =
+                    if folder.collapsed { format!("\u{25b8}{} ", folder.len) } else { String::new() };
+                let room = text_w.saturating_sub(tail.chars().count());
+                let head = format!(" {} {}/", row_number(fi + 1), folder.label);
+                let head: String = head.chars().take(room).collect();
+                let pad = room.saturating_sub(head.chars().count());
+                // Bold while it holds the focused agent — a folded folder is
+                // then the only thing on screen saying where you are.
+                let style = if holds_focus { "\x1b[0;1m" } else { "\x1b[0;2m" };
+                let _ = write!(out, "{style}{head}{}{tail}\x1b[0m", " ".repeat(pad));
+            }
+            Row::Agent(i) => {
+                let folder = folders.iter().find(|f| f.agents().contains(i)).unwrap();
+                let agent = &dash.agents[*i];
+                let focused = dash.focus == *i;
+                let last = *i + 1 == folder.start + folder.len;
+                let number = row_number(*i - folder.start + 1);
+                // Trailing mark: 'z' = asleep (no process, resumable); '!' =
+                // blocked on a permission prompt and quiet; '*' = went idle
+                // while unfocused, not yet examined.
+                let mark = if agent.asleep() {
+                    " z"
+                } else if agent.needs_attention() {
+                    " !"
+                } else if agent.unseen {
+                    " *"
+                } else {
+                    ""
+                };
+                let branch = if last { '\u{2514}' } else { '\u{251c}' };
+                let name_w = text_w.saturating_sub(5 + mark.len());
+                let name: String = agent.meta.display.chars().take(name_w).collect();
+                let label = format!(" {branch} {number} {name}{mark}");
+                let pad = text_w.saturating_sub(label.chars().count());
+
+                let color = agent.meta.color;
+                let mut style = String::from("\x1b[0");
+                // Busy = plain weight, idle = bold. Never dim: dim fg over a
+                // colored background reads as unreadable mid-gray — so a
+                // sleeping row is dimmed only when it isn't the focused
+                // (color-backed) one.
+                if agent.asleep() {
+                    if !focused {
+                        style.push_str(";2");
+                    }
+                } else if !agent.busy() {
+                    style.push_str(";1");
+                }
+                if focused {
+                    if color != 0 {
+                        let (r, g, b) = spans::xterm256_to_rgb(color);
+                        let fg = if spans::color_is_dark(r, g, b) { 231 } else { 16 };
+                        let _ = write!(style, ";48;5;{color};38;5;{fg}");
+                    } else {
+                        style.push_str(";7");
+                    }
+                } else if color != 0 {
+                    let _ = write!(style, ";38;5;{color}");
+                }
+                style.push('m');
+                let _ = write!(out, "{style}{label}{}\x1b[0m", " ".repeat(pad));
+            }
         }
     }
 }
@@ -410,6 +441,15 @@ fn draw_status(dash: &mut Dash, out: &mut String) {
         )
     } else if matches!(dash.sub, Sub::Rename) {
         format!(" rename> {}\u{2588}   Enter save · Esc cancel", dash.cmdline)
+    } else if let Sub::Goto(folder) = dash.sub {
+        let folders = dash.folders();
+        match folders.get(folder as usize - 1) {
+            Some(f) => format!(
+                " go to  {folder} {}/  \u{2588}   agent 1-{} · Esc cancel",
+                f.label, f.len
+            ),
+            None => format!(" go to  {folder} \u{2588}   (no folder {folder})"),
+        }
     } else if matches!(dash.sub, Sub::Kill) {
         let name = dash.focused().map(|a| a.meta.display.clone()).unwrap_or_default();
         format!(" close agent '{name}'?  [y] yes · [n] no")
@@ -423,7 +463,7 @@ fn draw_status(dash: &mut Dash, out: &mut String) {
     } else {
         match dash.mode {
             Mode::Normal => {
-                " j/k move · 1-9 jump · i claude · r rename · e edit · Z sleep · x close · : cmd"
+                " j/k move · N N folder/agent · i claude · r rename · e edit · Z sleep · x close · : cmd"
                     .to_string()
             }
             Mode::Insert => {

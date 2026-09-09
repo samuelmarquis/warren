@@ -11,6 +11,7 @@ mod input;
 mod render;
 
 use std::collections::HashSet;
+use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
@@ -37,12 +38,119 @@ pub enum Mode {
     Normal,
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone, Copy)]
 pub enum Sub {
     None,
     Cmd,
     Rename,
     Kill,
+    /// A folder digit is in hand, waiting for the agent digit (`^Space 1 2`).
+    Goto(u8),
+}
+
+/// One sidebar folder: the run of agents sharing a working directory,
+/// labelled by that directory's own name — `~/Developer/Phylogen` reads
+/// `Phylogen/`, never the path that got you there.
+pub struct Folder {
+    pub label: String,
+    pub cwd: String,
+    /// First agent index, and how many; members are contiguous by sort order.
+    pub start: usize,
+    pub len: usize,
+    pub collapsed: bool,
+}
+
+impl Folder {
+    pub fn agents(&self) -> std::ops::Range<usize> {
+        self.start..self.start + self.len
+    }
+}
+
+/// What occupies one sidebar line.
+pub enum Row {
+    /// Index into `folders()`.
+    Folder(usize),
+    /// Index into `agents`.
+    Agent(usize),
+    /// The pinned "+ new agent" tab.
+    NewAgent,
+}
+
+/// Group agents into folders by working directory, in the order given.
+///
+/// Agents sharing a directory are contiguous (see `sort_agents`), so a folder
+/// is just a range. Labels that would collide take one parent component to
+/// tell them apart — still a name, not a path.
+pub fn group_folders<'a>(
+    cwds: impl Iterator<Item = &'a str>,
+    collapsed: &HashSet<String>,
+) -> Vec<Folder> {
+    let mut out: Vec<Folder> = Vec::new();
+    for (i, cwd) in cwds.enumerate() {
+        match out.last_mut() {
+            Some(f) if f.cwd == cwd => f.len += 1,
+            _ => out.push(Folder {
+                label: folder_label(cwd),
+                cwd: cwd.to_string(),
+                start: i,
+                len: 1,
+                collapsed: collapsed.contains(cwd),
+            }),
+        }
+    }
+    let mut seen: HashMap<&str, usize> = HashMap::new();
+    for f in &out {
+        *seen.entry(f.label.as_str()).or_insert(0) += 1;
+    }
+    let ambiguous: HashSet<String> =
+        seen.iter().filter(|(_, n)| **n > 1).map(|(l, _)| l.to_string()).collect();
+    for f in &mut out {
+        if !ambiguous.contains(&f.label) {
+            continue;
+        }
+        // One step up, and only the step: "src/" becoming "phylo/src/" is a
+        // disambiguation, "…/Developer/phylo/src/" would be a path.
+        let trimmed = f.cwd.trim_end_matches('/');
+        let above = trimmed[..trimmed.len() - f.label.len().min(trimmed.len())]
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or("");
+        if !above.is_empty() {
+            f.label = format!("{above}/{}", f.label);
+        }
+    }
+    out
+}
+
+/// Folder headers, the agents of the folders that are open, and the + tab.
+pub fn layout_rows(folders: &[Folder]) -> Vec<Row> {
+    let mut rows = Vec::new();
+    for (i, folder) in folders.iter().enumerate() {
+        rows.push(Row::Folder(i));
+        if !folder.collapsed {
+            rows.extend(folder.agents().map(Row::Agent));
+        }
+    }
+    rows.push(Row::NewAgent);
+    rows
+}
+
+/// A working directory's own name: the last component, `~` for the home
+/// directory itself, and never a path.
+fn folder_label(cwd: &str) -> String {
+    if cwd.is_empty() {
+        return "…".to_string(); // meta hasn't landed yet
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() && cwd == home {
+            return "~".to_string();
+        }
+    }
+    match cwd.trim_end_matches('/').rsplit('/').next() {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => "/".to_string(),
+    }
 }
 
 pub struct Dash {
@@ -59,6 +167,9 @@ pub struct Dash {
     pub editform: Option<forms::EditForm>,
     /// Agent name to focus once discovery sees its socket (form submission).
     pub pending_focus: Option<String>,
+    /// Folders folded away, by working directory. Viewer-local, like every
+    /// other thing the dashboard knows: fold state is not worth a protocol.
+    pub collapsed: HashSet<String>,
     /// 0-based (row, col, box_w, box_h) of the color grid, when on screen.
     pub palette_geom: Option<(u16, u16, u16, u16)>,
     /// Dashboard start, the clock the sleeping-sheep animation runs on.
@@ -128,28 +239,105 @@ impl Dash {
         self.status_dirty = true;
     }
 
+    // ----------------------------------------------------------- folders
+
+    /// The sidebar's folders, in display order.
+    pub fn folders(&self) -> Vec<Folder> {
+        group_folders(self.agents.iter().map(|a| a.meta.cwd.as_str()), &self.collapsed)
+    }
+
+    /// The sidebar, line by line.
+    pub fn rows(&self, folders: &[Folder]) -> Vec<Row> {
+        layout_rows(folders)
+    }
+
+    /// Is this agent's row on screen (its folder open)?
+    fn shown(&self, idx: usize) -> bool {
+        self.agents.get(idx).map(|a| !self.collapsed.contains(&a.meta.cwd)).unwrap_or(true)
+    }
+
+    /// Fold a folder away, or open it. Its agents keep running either way.
+    pub fn toggle_folder(&mut self, folder: usize) {
+        let Some(f) = self.folders().into_iter().nth(folder) else { return };
+        if !self.collapsed.remove(&f.cwd) {
+            self.collapsed.insert(f.cwd);
+        }
+        self.sidebar_dirty = true;
+        self.status_dirty = true;
+    }
+
+    /// First digit of `^Space <folder> <agent>`: hold it, and show which
+    /// folder is pending in the status bar.
+    pub fn begin_goto(&mut self, folder: u8) {
+        self.sub = Sub::Goto(folder);
+        self.status_dirty = true;
+    }
+
+    /// `^Space <folder> <agent>`: both 1-based, 10 being the `0` key.
+    pub fn goto(&mut self, folder: u8, agent: u8) {
+        let folders = self.folders();
+        let Some(f) = folders.get(folder as usize - 1) else {
+            self.flash = Some(format!("no folder {folder}"));
+            self.status_dirty = true;
+            return;
+        };
+        let Some(idx) = (agent as usize)
+            .checked_sub(1)
+            .map(|n| f.start + n)
+            .filter(|i| *i < f.start + f.len)
+        else {
+            self.flash = Some(format!("{}/ has no agent {agent}", f.label));
+            self.status_dirty = true;
+            return;
+        };
+        // Jumping into a folded folder opens it — you asked to go there.
+        let cwd = f.cwd.clone();
+        drop(folders);
+        if self.collapsed.remove(&cwd) {
+            self.sidebar_dirty = true;
+        }
+        self.set_focus(idx);
+        self.enter_insert();
+    }
+
+    // -------------------------------------------------------------- focus
+
+    /// Next agent in sidebar order, skipping anything folded away; the + tab
+    /// is always reachable.
     pub fn focus_next(&mut self) {
-        self.set_focus((self.focus + 1) % (self.agents.len() + 1));
+        let total = self.agents.len() + 1;
+        let mut i = self.focus;
+        for _ in 0..total {
+            i = (i + 1) % total;
+            if i == self.agents.len() || self.shown(i) {
+                self.set_focus(i);
+                return;
+            }
+        }
     }
 
     pub fn focus_prev(&mut self) {
         let total = self.agents.len() + 1;
-        self.set_focus((self.focus + total - 1) % total);
+        let mut i = self.focus;
+        for _ in 0..total {
+            i = (i + total - 1) % total;
+            if i == self.agents.len() || self.shown(i) {
+                self.set_focus(i);
+                return;
+            }
+        }
     }
 
     pub fn focus_first(&mut self) {
-        self.set_focus(0);
+        if let Some(i) = (0..self.agents.len()).find(|i| self.shown(*i)) {
+            self.set_focus(i);
+        }
     }
 
     pub fn focus_last(&mut self) {
-        self.set_focus(self.agents.len().saturating_sub(1));
-    }
-
-    /// Jump to sidebar row N (1-based; 10 is the '0' key). An empty row
-    /// lands on the + tab — v0's "empty slot opens the form".
-    pub fn focus_slot(&mut self, n: u8) {
-        self.set_focus(n as usize - 1);
-        self.enter_insert();
+        if let Some(i) = (0..self.agents.len()).rev().find(|i| self.shown(*i)) {
+            self.set_focus(i);
+        }
     }
 
     /// Jump to the + tab ready to type (NORMAL `n`).
@@ -204,12 +392,22 @@ impl Dash {
         }
     }
 
-    /// Swap the focused agent's sidebar position with row N (1-based).
+    /// Shift+digit: swap the focused agent with position N *of its own
+    /// folder*. Folders come from working directories, so renumbering moves
+    /// an agent within its folder and can never smuggle it into another.
+    ///
     /// Slots live in daemon meta, so the swap is two SetMeta messages; the
     /// MetaChanged broadcasts resort the sidebar (and any other viewer's).
     pub fn swap_with_row(&mut self, n: u8) {
-        let target = n as usize - 1;
-        if target >= self.agents.len() || target == self.focus || self.on_newform() {
+        if self.on_newform() {
+            return;
+        }
+        let focus = self.focus;
+        let Some(folder) = self.folders().into_iter().find(|f| f.agents().contains(&focus)) else {
+            return;
+        };
+        let target = folder.start + n as usize - 1;
+        if target >= folder.start + folder.len || target == self.focus {
             return;
         }
         let a_slot = self.agents[self.focus].meta.slot;
@@ -276,6 +474,7 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
         newform: forms::NewForm::reset(),
         editform: None,
         pending_focus: None,
+        collapsed: HashSet::new(),
         palette_geom: None,
         started: Instant::now(),
         sheep_frame: u64::MAX,
@@ -495,22 +694,45 @@ fn discover_new(dash: &mut Dash, poller: &Poller, next_key: &mut usize) {
     }
 }
 
-/// Keep sidebar order = (slot, created); follow the focused agent across sorts.
+/// Sidebar order: folders by their earliest member, agents by (slot, created)
+/// within a folder — so a working directory's agents are always contiguous,
+/// which is what lets a folder be a range. Follows the focused agent across
+/// sorts.
 fn sort_agents(dash: &mut Dash) {
     if dash.agents.len() < 2 {
         return;
     }
-    let sorted = dash
-        .agents
-        .windows(2)
-        .all(|w| (w[0].meta.slot, w[0].meta.created) <= (w[1].meta.slot, w[1].meta.created));
-    if sorted {
+    // A folder ranks by its earliest agent, so swapping two agents inside one
+    // can never reshuffle the folders around it. This runs every frame, so
+    // the already-sorted path (nearly all of them) allocates nothing.
+    fn order<'a>(
+        agent: &'a AgentConn,
+        rank: &HashMap<&str, (u8, u64)>,
+    ) -> ((u8, u64), &'a str, u8, u64) {
+        let folder = rank.get(agent.meta.cwd.as_str()).copied().unwrap_or((u8::MAX, u64::MAX));
+        (folder, agent.meta.cwd.as_str(), agent.meta.slot, agent.meta.created)
+    }
+    let mut rank: HashMap<&str, (u8, u64)> = HashMap::new();
+    for agent in &dash.agents {
+        let key = (agent.meta.slot, agent.meta.created);
+        rank.entry(agent.meta.cwd.as_str())
+            .and_modify(|r| *r = (*r).min(key))
+            .or_insert(key);
+    }
+    if dash.agents.windows(2).all(|w| order(&w[0], &rank) <= order(&w[1], &rank)) {
         return;
     }
+    // Owned keys from here: the sort has to outlive the agents' current home.
+    let rank: HashMap<String, (u8, u64)> =
+        rank.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    let owned = |a: &AgentConn| {
+        let folder = rank.get(&a.meta.cwd).copied().unwrap_or((u8::MAX, u64::MAX));
+        (folder, a.meta.cwd.clone(), a.meta.slot, a.meta.created)
+    };
     let focused_name = dash.focused().map(|a| a.meta.name.clone());
     let mut zipped: Vec<(AgentConn, usize)> =
         dash.agents.drain(..).zip(dash.keys.drain(..)).collect();
-    zipped.sort_by_key(|(a, _)| (a.meta.slot, a.meta.created));
+    zipped.sort_by_key(|(a, _)| owned(a));
     for (agent, key) in zipped {
         dash.agents.push(agent);
         dash.keys.push(key);
@@ -588,6 +810,72 @@ fn read_nb(mut src: impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
         Ok(n) => Ok(n),
         Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(0),
         Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn folders(cwds: &[&str], folded: &[&str]) -> Vec<Folder> {
+        let collapsed: HashSet<String> = folded.iter().map(|s| s.to_string()).collect();
+        group_folders(cwds.iter().copied(), &collapsed)
+    }
+
+    fn labels(f: &[Folder]) -> Vec<String> {
+        f.iter().map(|f| format!("{}/{}", f.label, f.len)).collect()
+    }
+
+    #[test]
+    fn a_folder_is_a_directory_named_by_itself() {
+        let f = folders(
+            &[
+                "/Users/x/Research",
+                "/Users/x/Research",
+                "/Users/x/Developer/Phylogen",
+                "/Users/x/Developer",
+            ],
+            &[],
+        );
+        // ~/Developer/Phylogen reads Phylogen/, never the path to it.
+        assert_eq!(labels(&f), ["Research/2", "Phylogen/1", "Developer/1"]);
+        assert_eq!(f[0].agents(), 0..2);
+        assert_eq!(f[1].agents(), 2..3);
+    }
+
+    #[test]
+    fn colliding_names_take_one_parent_and_no_more() {
+        let f = folders(&["/Users/x/phylo/src", "/Users/x/warren/src", "/Users/x/lone"], &[]);
+        assert_eq!(labels(&f), ["phylo/src/1", "warren/src/1", "lone/1"]);
+    }
+
+    #[test]
+    fn odd_directories_still_get_a_name() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        if !home.is_empty() {
+            assert_eq!(folder_label(&home), "~");
+        }
+        assert_eq!(folder_label("/"), "/");
+        assert_eq!(folder_label("/opt/tools/"), "tools");
+        assert_eq!(folder_label(""), "…"); // meta not in yet
+    }
+
+    #[test]
+    fn folding_hides_a_folders_agents_but_never_the_new_tab() {
+        let f = folders(&["/a/one", "/a/one", "/b/two"], &["/a/one"]);
+        let rows = layout_rows(&f);
+        let shape: Vec<String> = rows
+            .iter()
+            .map(|r| match r {
+                Row::Folder(i) => format!("[{}]", f[*i].label),
+                Row::Agent(i) => format!("{i}"),
+                Row::NewAgent => "+".to_string(),
+            })
+            .collect();
+        assert_eq!(shape, ["[one]", "[two]", "2", "+"]);
+
+        let open = layout_rows(&folders(&["/a/one", "/a/one", "/b/two"], &[]));
+        assert_eq!(open.len(), 6, "two headers, three agents, the + tab");
     }
 }
 

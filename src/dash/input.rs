@@ -11,7 +11,7 @@
 //! form never traps you.
 
 use super::render::SIDEBAR_WIDTH;
-use super::{forms, Dash, Mode, Sub};
+use super::{forms, Dash, Mode, Row, Sub};
 use crate::proto::{MouseKind, ToDaemon};
 
 pub enum Outcome {
@@ -87,6 +87,7 @@ pub fn handle_bytes(dash: &mut Dash, bytes: &[u8]) -> Outcome {
                     Sub::Cmd => cmd_key(dash, &bytes[i..]),
                     Sub::Rename => rename_key(dash, &bytes[i..]),
                     Sub::Kill => kill_key(dash, &bytes[i..]),
+                    Sub::Goto(folder) => goto_key(dash, folder, &bytes[i..]),
                 };
                 if let Some(o) = outcome {
                     return o;
@@ -118,8 +119,9 @@ fn normal_key(dash: &mut Dash, bytes: &[u8]) -> (usize, Option<Outcome>) {
         b'k' => dash.focus_prev(),
         b'g' => dash.focus_first(),
         b'G' => dash.focus_last(),
-        b'1'..=b'9' => dash.focus_slot(bytes[0] - b'0'),
-        b'0' => dash.focus_slot(10),
+        // A digit names a folder; the next one names an agent inside it.
+        b'1'..=b'9' => dash.begin_goto(bytes[0] - b'0'),
+        b'0' => dash.begin_goto(10),
         // Shift+digit: swap the focused agent with sidebar row N.
         b'!' => dash.swap_with_row(1),
         b'@' => dash.swap_with_row(2),
@@ -165,6 +167,26 @@ fn normal_key(dash: &mut Dash, bytes: &[u8]) -> (usize, Option<Outcome>) {
         _ => {}
     }
     (1, None)
+}
+
+/// The agent digit of `^Space <folder> <agent>`. Anything that isn't a digit
+/// abandons the jump and is handled as the NORMAL key it is, so a mistyped
+/// folder never swallows the keystroke after it.
+fn goto_key(dash: &mut Dash, folder: u8, bytes: &[u8]) -> (usize, Option<Outcome>) {
+    dash.sub = Sub::None;
+    dash.status_dirty = true;
+    match bytes[0] {
+        b'1'..=b'9' => {
+            dash.goto(folder, bytes[0] - b'0');
+            (1, None)
+        }
+        b'0' => {
+            dash.goto(folder, 10);
+            (1, None)
+        }
+        ESC => (1, None),
+        _ => normal_key(dash, bytes),
+    }
 }
 
 /// `:` command-line editing in the status bar.
@@ -311,9 +333,26 @@ fn handle_mouse(dash: &mut Dash, ev: MouseReport) {
                 dash.focus_next();
             }
         } else if ev.press && !motion && button == 0 {
-            let row = ev.row as usize;
-            if row <= dash.agents.len() {
-                dash.set_focus(row);
+            // Click an agent to focus it; click its folder to fold that
+            // directory away, or open it again.
+            let folders = dash.folders();
+            match dash.rows(&folders).get(ev.row as usize) {
+                Some(Row::Folder(fi)) => {
+                    let fi = *fi;
+                    drop(folders);
+                    dash.toggle_folder(fi);
+                }
+                Some(Row::Agent(i)) => {
+                    let i = *i;
+                    drop(folders);
+                    dash.set_focus(i);
+                }
+                Some(Row::NewAgent) => {
+                    let last = dash.agents.len();
+                    drop(folders);
+                    dash.set_focus(last);
+                }
+                None => {}
             }
         }
         return;

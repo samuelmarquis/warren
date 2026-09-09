@@ -15,7 +15,7 @@ mod spans;
 #[allow(dead_code)]
 #[path = "../src/proto.rs"]
 mod proto;
-use proto::{FrameDecoder, HookState, Power, ToClient, ToDaemon};
+use proto::{FrameDecoder, HookState, MouseKind, Power, ToClient, ToDaemon};
 
 const BIN: &str = env!("CARGO_BIN_EXE_warren");
 
@@ -138,6 +138,17 @@ fn screen_text(screen: &[spans::LineSpans]) -> String {
         .join("\n")
 }
 
+/// `warren new NAME DIR` — the working directory is what groups the sidebar.
+fn new_agent_in(home: &TestHome, name: &str, dir: &Path, agent_cmd: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    let out = home
+        .warren(agent_cmd)
+        .args(["new", name, dir.to_str().unwrap()])
+        .output()
+        .expect("run warren new");
+    assert!(out.status.success(), "warren new failed: {}", String::from_utf8_lossy(&out.stderr));
+}
+
 fn new_agent(home: &TestHome, name: &str, agent_cmd: &str) {
     let out = home.warren(agent_cmd).args(["new", name]).output().expect("run warren new");
     assert!(
@@ -159,11 +170,18 @@ fn attach_snapshot_input_echo_and_kill() {
     let (mut viewer, snap) = Viewer::attach(&sock, 80, 24);
     let ToClient::Snapshot { cols, rows, screen, .. } = &snap else { unreachable!() };
     assert_eq!((*cols, *rows), (80, 24));
-    assert!(
-        screen_text(screen).contains("hello from agent"),
-        "snapshot shows initial output: {:?}",
-        screen_text(screen)
-    );
+    // The agent races us: its greeting is either already in the snapshot or
+    // arrives as the damage right after.
+    let greeted = screen_text(screen).contains("hello from agent")
+        || viewer
+            .await_frame(5_000, |m| match m {
+                ToClient::Damage { lines, .. } => lines.iter().any(|(_, l)| {
+                    screen_text(std::slice::from_ref(l)).contains("hello from agent")
+                }),
+                _ => false,
+            })
+            .is_some();
+    assert!(greeted, "the agent's first output reaches the viewer");
 
     // Typed input reaches the child's pty (echo mode bounces it back).
     viewer.send(&ToDaemon::Input(proto::b64_encode(b"typed-line\r")));
@@ -722,6 +740,127 @@ fn input_triggered_burst_arrives_promptly() {
         assert!(done.is_some(), "round {round}: burst never arrived ({}Y)", seen.get());
         assert!(ms < 1500, "round {round}: burst took {ms}ms — daemon-side stall");
     }
+}
+
+/// End-to-end, on a REAL dashboard: agents are grouped into folders by their
+/// working directory, `^Space <folder> <agent>` reaches one, and clicking a
+/// folder header folds that directory away.
+#[test]
+fn sidebar_groups_agents_by_directory_and_two_digits_navigate() {
+    let inner = TestHome::new("folders");
+    let research = inner.dir.join("Research");
+    let phylogen = inner.dir.join("Developer").join("Phylogen");
+    new_agent_in(&inner, "svm", &research, "sleep 300");
+    new_agent_in(&inner, "splitr", &research, "sleep 300");
+    new_agent_in(&inner, "phylo", &phylogen, "sleep 300");
+
+    let outer = TestHome::new("foldersout");
+    let dash_cmd = format!("WARREN_HOME={} {} up", inner.dir.display(), BIN);
+    new_agent(&outer, "dash", &dash_cmd);
+    let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 20);
+
+    let grid = std::cell::RefCell::new(Vec::<String>::new());
+    let apply = |grid: &std::cell::RefCell<Vec<String>>, m: &ToClient| {
+        let mut g = grid.borrow_mut();
+        match m {
+            ToClient::Snapshot { screen, .. } => {
+                *g = screen.iter().map(|l| l.0.iter().map(|s| s.text.as_str()).collect()).collect();
+            }
+            ToClient::Damage { lines, .. } => {
+                for (row, line) in lines {
+                    let r = *row as usize;
+                    if g.len() <= r {
+                        g.resize(r + 1, String::new());
+                    }
+                    g[r] = line.0.iter().map(|s| s.text.as_str()).collect();
+                }
+            }
+            _ => {}
+        }
+    };
+    apply(&grid, &snap);
+    /// The sidebar column only, trimmed.
+    fn sidebar(grid: &std::cell::RefCell<Vec<String>>) -> Vec<String> {
+        grid.borrow()
+            .iter()
+            .map(|r| r.chars().take(23).collect::<String>().trim_end().to_string())
+            .collect()
+    }
+
+    let up = viewer.await_frame(15_000, |m| {
+        apply(&grid, m);
+        sidebar(&grid).iter().any(|r| r.contains("Phylogen/"))
+    });
+    assert!(up.is_some(), "dashboard came up with folders: {:?}", sidebar(&grid));
+
+    // A folder is the directory itself, named by its own last component —
+    // never the path that got you there.
+    let rows = sidebar(&grid);
+    let research_row = rows.iter().position(|r| r.contains("Research/")).unwrap();
+    assert_eq!(rows[research_row].trim(), "1 Research/");
+    assert!(rows[research_row + 1].contains("├ 1 svm"), "{rows:?}");
+    assert!(rows[research_row + 2].contains("└ 2 splitr"), "{rows:?}");
+    let phylo_row = rows.iter().position(|r| r.contains("Phylogen/")).unwrap();
+    assert_eq!(rows[phylo_row].trim(), "2 Phylogen/");
+    assert!(rows[phylo_row + 1].contains("└ 1 phylo"), "{rows:?}");
+    assert!(
+        !rows.iter().any(|r| r.contains(&inner.dir.display().to_string())),
+        "no full paths in the sidebar: {rows:?}"
+    );
+
+    // ^Space 1 2 — folder one, agent two.
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x001")));
+    let armed = viewer.await_frame(5_000, |m| {
+        apply(&grid, m);
+        grid.borrow().last().map(|s| s.contains("go to  1 Research/")).unwrap_or(false)
+    });
+    assert!(armed.is_some(), "first digit arms the folder: {:?}", grid.borrow().last());
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"2")));
+    let landed = viewer.await_frame(5_000, |m| {
+        apply(&grid, m);
+        grid.borrow().last().map(|s| s.contains("splitr")).unwrap_or(false)
+    });
+    assert!(landed.is_some(), "second digit lands on it: {:?}", grid.borrow().last());
+
+    // Click the folder header: the directory folds away, agents keep running.
+    viewer.send(&ToDaemon::Mouse {
+        kind: MouseKind::Down(0),
+        col: 3,
+        row: research_row as u16,
+        mods: 0,
+    });
+    viewer.send(&ToDaemon::Mouse {
+        kind: MouseKind::Up(0),
+        col: 3,
+        row: research_row as u16,
+        mods: 0,
+    });
+    let folded = viewer.await_frame(5_000, |m| {
+        apply(&grid, m);
+        let rows = sidebar(&grid);
+        rows.iter().any(|r| r.contains("Research/") && r.contains('▸'))
+            && !rows.iter().any(|r| r.contains("svm"))
+    });
+    assert!(folded.is_some(), "clicking a folder folds it: {:?}", sidebar(&grid));
+
+    // And opens it again.
+    viewer.send(&ToDaemon::Mouse {
+        kind: MouseKind::Down(0),
+        col: 3,
+        row: research_row as u16,
+        mods: 0,
+    });
+    viewer.send(&ToDaemon::Mouse {
+        kind: MouseKind::Up(0),
+        col: 3,
+        row: research_row as u16,
+        mods: 0,
+    });
+    let opened = viewer.await_frame(5_000, |m| {
+        apply(&grid, m);
+        sidebar(&grid).iter().any(|r| r.contains("svm"))
+    });
+    assert!(opened.is_some(), "clicking again opens it: {:?}", sidebar(&grid));
 }
 
 /// End-to-end: a REAL dashboard (running as an agent under an outer daemon,

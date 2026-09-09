@@ -14,16 +14,19 @@ everything outlives the connection it was started in.
 
 ```
 ┌────────────────┬───────────────────────────────────────────┐
-│ > refactor-db  │  ● Claude Code                            │
-│   web-ui     * │                                           │
-│   infra-tf   ! │  > running tests…                         │
-│   scratch      │  ✔ 42 passed                              │
+│ 1 warren/      │  ● Claude Code                            │
+│ ├ 1 refactor-db│                                           │
+│ └ 2 web-ui   * │  > running tests…                         │
+│ 2 infra/    ▸3 │  ✔ 42 passed                              │
 │                │                                           │
 │   + new agent  │  > _                                      │
 └────────────────┴───────────────────────────────────────────┘
-   ↑ sidebar: every agent           ↑ the focused agent's live TUI
+   ↑ agents, by directory           ↑ the focused agent's live TUI
 ```
 
+- **Grouped by working directory.** One folder per directory, named by that
+  directory; `^Space 1 2` is folder one, agent two, and clicking a folder
+  folds it away.
 - **One row per agent**, state pushed by Claude Code's own lifecycle hooks —
   no polling. Bold = ready for you, plain = working, `!` = blocked on a
   permission prompt, `*` = finished while you were looking elsewhere,
@@ -113,9 +116,9 @@ color-coded (CLAUDE orange, NORMAL green, EDIT purple):
 
 | NORMAL key | action |
 |---|---|
-| `j`/`k`, arrows | focus next / previous |
-| `1`-`9`, `0` | jump to row N (an empty row opens the new-agent form) |
-| `Shift+digit` | swap the focused agent with row N |
+| `j`/`k`, arrows | focus next / previous (skipping folded folders) |
+| digit, digit | jump: folder, then the agent inside it (`^Space 1 2`) |
+| `Shift+digit` | move the focused agent to position N *of its folder* |
 | `g` / `G` | first / last agent |
 | `n` | new-agent form |
 | `i` `a` `l` `Enter` `Esc` | back to CLAUDE |
@@ -125,15 +128,37 @@ color-coded (CLAUDE orange, NORMAL green, EDIT purple):
 | `x` | close agent (y/n confirm) |
 | `:` | command line — `:q` detach · `:q!` kill all · `:color #hex\|index` |
 
-`Ctrl-\` detaches from anywhere. Mouse: click sidebar rows to focus, wheel
-over the sidebar cycles agents, clicks and wheel over the pane go to the
-agent (Claude's fullscreen TUI handles its own scrolling), palette swatches
-are clickable.
+`Ctrl-\` detaches from anywhere. Mouse: click sidebar rows to focus, click a
+folder header to fold that directory away, wheel over the sidebar cycles
+agents, clicks and wheel over the pane go to the agent (Claude's fullscreen
+TUI handles its own scrolling), palette swatches are clickable.
 
 The **new-agent form** (the `+` tab): pick `new` / `resume` / `continue`,
 title, root dir, a session from the resume picker, a system prompt
 (`--system-prompt`), extra claude CLI args, and a tab color. Tab/Shift+Tab
 cycle fields; NORMAL always navigates away — the form never traps you.
+
+### Folders
+
+The sidebar groups agents by working directory, and a folder *is* that
+directory — labelled by its own name, never by the path that got you there.
+An agent in `~/Developer/Phylogen` sits under `Phylogen/`; two folders that
+would read the same take one parent component (`phylo/src/`, `warren/src/`)
+and no more.
+
+Navigation is two digits: `^Space 1 2` is folder one, agent two. The first
+digit arms a folder — the status bar names it and how many agents it holds —
+and the second lands; Esc abandons the jump, and any other key is handled as
+the NORMAL key it is, so a mistyped folder never eats the keystroke after it.
+`Shift+digit` moves the focused agent within *its own* folder: folders come
+from working directories, so renumbering can never smuggle an agent into a
+directory it isn't in.
+
+Click a folder header to fold it away. Folded agents keep running, the header
+says how many are in there, and jumping into a folded folder opens it. The
+fold is the one thing the dashboard remembers, it is per-viewer, and it is
+deliberately forgotten when you detach — everything else still lives in the
+daemons.
 
 ### Sleep mode
 
