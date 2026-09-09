@@ -31,7 +31,7 @@ everything outlives the connection it was started in.
   no polling. Bold = ready for you, plain = working, `!` = blocked on a
   permission prompt, `*` = finished while you were looking elsewhere,
   `z` = asleep.
-- **Sleep the agents you aren't using.** `Z` stops a tab's claude process and
+- **Sleep the agents you aren't using.** `z` stops a tab's claude process and
   gives its memory back; the tab stays, and waking it resumes the same
   conversation where it left off.
 - **The right pane is the real thing** — the focused agent's actual Claude
@@ -124,7 +124,7 @@ color-coded (CLAUDE orange, NORMAL green, EDIT purple):
 | `i` `a` `l` `Enter` `Esc` | back to CLAUDE |
 | `r` | rename (pins the name against Claude's title sync) |
 | `e` / `c` | edit form: title + 256-color picker |
-| `Z` | sleep the agent (or wake a sleeping one) |
+| `z` | sleep the agent (or wake a sleeping one) |
 | `x` | close agent (y/n confirm) |
 | `:` | command line — `:q` detach · `:q!` kill all · `:color #hex\|index` |
 
@@ -163,11 +163,11 @@ daemons.
 ### Sleep mode
 
 A colony costs what its members cost, and an idle Claude Code still holds
-its several hundred megabytes. **Ctrl-Space `Z`** stops the focused agent's
+its several hundred megabytes. **Ctrl-Space `z`** stops the focused agent's
 claude process — and its whole process group, so tool children and MCP
 servers go too — while keeping the agent itself: the daemon lives on, so the
 tab keeps its row, name, color, working directory and the last screen claude
-painted, dimmed under a sleeping badge. `Z` again (or just typing at it)
+painted, dimmed under a sleeping badge. `z` again (or just typing at it)
 respawns `claude --resume <session-id>` in the same burrow, and the
 conversation carries on. Keys typed at a sleeping agent are buffered and
 land in the resumed prompt.

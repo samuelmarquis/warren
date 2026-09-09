@@ -306,7 +306,7 @@ const SHEEP_LEGS: [&str; 3] = ["  \" \"", " \"  \"", "  ~~ "];
 const BADGE_H: usize = 8;
 
 fn draw_sleep_badge(out: &mut String, x0: u16, pane_w: usize, pane_h: u16, color: u8, frame: u64) {
-    let hint = "^Space Z  ·  wake";
+    let hint = "^Space z  ·  wake";
     // Too small for a meadow: one honest line, centered.
     if pane_w < 34 || (pane_h as usize) < BADGE_H + 2 {
         let text = format!("asleep  ·  {hint}");
@@ -463,7 +463,7 @@ fn draw_status(dash: &mut Dash, out: &mut String) {
     } else {
         match dash.mode {
             Mode::Normal => {
-                " j/k move · N N folder/agent · i claude · r rename · e edit · Z sleep · x close · : cmd"
+                " j/k move · N N folder/agent · i claude · r rename · e edit · z sleep · x close · : cmd"
                     .to_string()
             }
             Mode::Insert => {
@@ -473,7 +473,7 @@ fn draw_status(dash: &mut Dash, out: &mut String) {
                     .unwrap_or_else(|| "—".to_string());
                 match dash.focused().map(|a| a.power()) {
                     Some(Power::Asleep) => {
-                        format!(" {name}  ·  asleep · type or ^Space Z to wake and resume")
+                        format!(" {name}  ·  asleep · type or ^Space z to wake and resume")
                     }
                     Some(Power::Sleeping) => format!(" {name}  ·  sleeping…"),
                     Some(Power::Waking) => format!(" {name}  ·  waking — resuming the session…"),

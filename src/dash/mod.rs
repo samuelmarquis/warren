@@ -353,7 +353,7 @@ impl Dash {
         (self.started.elapsed().as_millis() / SHEEP_TICK_MS) as u64
     }
 
-    /// NORMAL `Z`: sleep the focused agent, or wake it if it's already down.
+    /// NORMAL `z`: sleep the focused agent, or wake it if it's already down.
     ///
     /// Sleeping kills claude to give its memory back and keeps the tab; the
     /// two refusals are the ones you can't undo — mid-turn (the turn would be
