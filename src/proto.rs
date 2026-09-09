@@ -43,6 +43,31 @@ impl HookState {
     }
 }
 
+/// Whether the agent's claude process is running, and if not, why.
+///
+/// Sleep kills the process to give its RAM back; the daemon (and therefore
+/// the tab, its name, color, slot and last screen) outlives it, and `Wake`
+/// respawns claude with `--resume <session-id>` into the same burrow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Power {
+    #[default]
+    Awake,
+    /// Stop signalled; waiting for the process to actually die.
+    Sleeping,
+    /// No process. The screen is frozen at its last frame.
+    Asleep,
+    /// Respawned, nothing painted yet.
+    Waking,
+}
+
+impl Power {
+    /// Is claude gone (or on its way out)?
+    pub fn is_down(self) -> bool {
+        matches!(self, Power::Sleeping | Power::Asleep)
+    }
+}
+
 /// Everything the sidebar needs about one agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Meta {
@@ -62,13 +87,26 @@ pub struct Meta {
     pub created: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentState {
     /// Last hook-reported state, if any.
     pub hook: Option<HookState>,
     /// Milliseconds since the pty last produced output. Viewers compute the
     /// busy fallback (working if < 1500ms) on their own render tick.
     pub ms_since_output: u64,
+    /// Running, or slept to reclaim its memory.
+    #[serde(default)]
+    pub power: Power,
+    /// The Claude session a wake would `--resume`, once the agent's own
+    /// lifecycle hooks have reported it (or it was given one at spawn).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// Whether waking would bring this agent back at all. Normally that means
+    /// a known session id; an agent running a WARREN_AGENT_CMD command has no
+    /// conversation but respawns that command, so it sleeps fine too. Sleeping
+    /// anything else would be a one-way trip, and viewers refuse it.
+    #[serde(default)]
+    pub resumable: bool,
 }
 
 // --------------------------------------------------------------------- mouse
@@ -119,6 +157,20 @@ pub enum ToDaemon {
     },
     /// From `warren hook` (Claude lifecycle hooks).
     HookState(HookState),
+    /// The agent's Claude session id, read from the same hook payload — this
+    /// is how the daemon learns what to `--resume` after a sleep.
+    ///
+    /// Deliberately its own message rather than a field on HookState: a
+    /// daemon built before sleep mode is still running out there, and this
+    /// way it applies the state frame it understands and only then trips
+    /// over this one (dropping a connection the hook has already finished
+    /// with). Order matters — HookState goes first.
+    Session(String),
+    /// Kill the claude process, keep the agent (its tab, name and last
+    /// screen). No-op if already down.
+    Sleep,
+    /// Respawn claude with `--resume <session-id>`. No-op if already awake.
+    Wake,
     /// One-shot status query (`warren ls`): answered with Snapshot-free
     /// MetaChanged + StateChanged, then the daemon closes the connection.
     Query,
@@ -277,8 +329,11 @@ mod tests {
             ToDaemon::Mouse { kind: MouseKind::Drag(0), col: 5, row: 9, mods: 0 },
             ToDaemon::SetMeta { name: Some("x".into()), color: None, pinned: Some(true), slot: None },
             ToDaemon::HookState(HookState::Attention),
+            ToDaemon::Session("0199b4c1-7f3e-4b2a-9d18-2c6f5a0e77bd".into()),
             ToDaemon::Query,
             ToDaemon::Kill,
+            ToDaemon::Sleep,
+            ToDaemon::Wake,
         ];
         let mut dec = FrameDecoder::new();
         for m in &msgs {
@@ -307,7 +362,13 @@ mod tests {
                 alt_screen: false,
                 mouse: MouseProto::None,
                 meta: sample_meta(),
-                state: AgentState { hook: Some(HookState::Working), ms_since_output: 12 },
+                state: AgentState {
+                    hook: Some(HookState::Working),
+                    ms_since_output: 12,
+                    power: Power::Awake,
+                    session: Some("0199b4c1-7f3e-4b2a-9d18-2c6f5a0e77bd".into()),
+                    resumable: true,
+                },
             },
             ToClient::Damage {
                 lines: vec![(1, line)],
@@ -316,7 +377,13 @@ mod tests {
             },
             ToClient::ModeChanged { alt_screen: true, mouse: MouseProto::Motion },
             ToClient::MetaChanged(sample_meta()),
-            ToClient::StateChanged(AgentState { hook: None, ms_since_output: 99 }),
+            ToClient::StateChanged(AgentState {
+                hook: None,
+                ms_since_output: 99,
+                power: Power::Asleep,
+                session: None,
+                resumable: true,
+            }),
             ToClient::Clipboard("aGVsbG8=".into()),
             ToClient::Exited { status: 0 },
         ];

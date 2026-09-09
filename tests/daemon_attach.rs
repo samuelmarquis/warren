@@ -15,7 +15,7 @@ mod spans;
 #[allow(dead_code)]
 #[path = "../src/proto.rs"]
 mod proto;
-use proto::{FrameDecoder, HookState, ToClient, ToDaemon};
+use proto::{FrameDecoder, HookState, Power, ToClient, ToDaemon};
 
 const BIN: &str = env!("CARGO_BIN_EXE_warren");
 
@@ -209,7 +209,7 @@ fn resize_reflows_and_resnapshots_all_viewers() {
 #[test]
 fn agent_exit_reports_status_and_unlinks() {
     let home = TestHome::new("exit");
-    new_agent(&home, "mortal", "sleep 0.4; exit 7");
+    new_agent(&home, "mortal", "sleep 2; exit 7");
     let sock = home.sock("mortal");
 
     let (mut viewer, _) = Viewer::attach(&sock, 80, 24);
@@ -243,10 +243,250 @@ fn hook_state_round_trip() {
     let (_, snap) = Viewer::attach(&sock, 80, 24);
     let ToClient::Snapshot { state, .. } = snap else { unreachable!() };
     assert_eq!(state.hook, Some(HookState::Attention));
+    // No stdin payload, so no conversation to resume yet.
+    assert_eq!(state.session, None);
+
+    // Claude pipes each hook a JSON payload carrying the session id; that is
+    // what makes the agent sleepable (there is something to --resume).
+    let mut hook = Command::new(BIN)
+        .env("WARREN_SOCK", &sock)
+        .args(["hook", "waiting"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"session_id":"0199b4c1-7f3e-4b2a-9d18-2c6f5a0e77bd","cwd":"/tmp"}"#)
+        .unwrap();
+    assert!(hook.wait().unwrap().success(), "hook must exit 0");
+
+    let (_, snap) = Viewer::attach(&sock, 80, 24);
+    let ToClient::Snapshot { state, .. } = snap else { unreachable!() };
+    assert_eq!(state.hook, Some(HookState::Waiting));
+    assert_eq!(
+        state.session.as_deref(),
+        Some("0199b4c1-7f3e-4b2a-9d18-2c6f5a0e77bd"),
+        "the daemon learns what to --resume from the hook payload"
+    );
+    assert!(state.resumable);
 
     // Without WARREN_SOCK it's silently a no-op (claude outside warren).
     let out = Command::new(BIN).args(["hook", "working"]).output().unwrap();
     assert!(out.status.success());
+}
+
+/// Is that pid still around? (The daemon reaps its child, so a slept agent's
+/// process is gone, not a zombie.)
+fn pid_alive(pid: &str) -> bool {
+    Command::new("kill")
+        .args(["-0", pid])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn sleep_stops_the_process_and_keeps_the_agent() {
+    let home = TestHome::new("sleep");
+    // Announces its own pid, then sits there like an idle claude.
+    new_agent(&home, "napper", "printf 'awake as %s\\n' $$; sleep 300");
+    let sock = home.sock("napper");
+
+    let (mut viewer, snap) = Viewer::attach(&sock, 80, 24);
+    let ToClient::Snapshot { screen, .. } = &snap else { unreachable!() };
+    let mut text = screen_text(screen);
+    if !text.contains("awake as") {
+        let frame = viewer
+            .await_frame(5_000, |m| matches!(m, ToClient::Damage { .. }))
+            .expect("agent output");
+        let ToClient::Damage { lines, .. } = frame else { unreachable!() };
+        text = lines.iter().map(|(_, l)| screen_text(std::slice::from_ref(l))).collect();
+    }
+    let pid: String = text
+        .split("awake as ")
+        .nth(1)
+        .expect("pid on screen")
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    assert!(pid_alive(&pid), "the agent process should be running");
+
+    viewer.send(&ToDaemon::Sleep);
+    let asleep = viewer
+        .await_frame(10_000, |m| {
+            matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep)
+        })
+        .expect("agent reports itself asleep");
+    let ToClient::StateChanged(state) = asleep else { unreachable!() };
+    assert_eq!(state.hook, None, "no process, no lifecycle state");
+
+    // The process is gone — that's the whole point — but the agent is not.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while pid_alive(&pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!pid_alive(&pid), "sleeping must kill the agent's process group");
+    assert!(sock.exists(), "the daemon (and so the tab) outlives its process");
+
+    // A fresh viewer still gets the agent, its metadata and its last screen.
+    let (_, snap) = Viewer::attach(&sock, 80, 24);
+    let ToClient::Snapshot { screen, state, meta, .. } = &snap else { unreachable!() };
+    assert_eq!(meta.name, "napper");
+    assert_eq!(state.power, Power::Asleep);
+    assert!(screen_text(screen).contains("awake as"), "the last frame stays readable");
+
+    // Waking respawns it: same agent, new process.
+    viewer.send(&ToDaemon::Wake);
+    let frame = viewer
+        .await_frame(10_000, |m| match m {
+            ToClient::Damage { lines, .. } => {
+                lines.iter().any(|(_, l)| screen_text(std::slice::from_ref(l)).contains("awake as"))
+            }
+            _ => false,
+        })
+        .expect("the woken agent paints again");
+    let ToClient::Damage { lines, .. } = frame else { unreachable!() };
+    let text: String = lines.iter().map(|(_, l)| screen_text(std::slice::from_ref(l))).collect();
+    let new_pid: String = text
+        .split("awake as ")
+        .nth(1)
+        .unwrap()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    assert_ne!(new_pid, pid, "wake starts a new process");
+    assert!(pid_alive(&new_pid));
+}
+
+#[test]
+fn keys_typed_at_a_sleeping_agent_land_in_the_resumed_one() {
+    let home = TestHome::new("buffer");
+    new_agent(&home, "dozy", "cat");
+    let sock = home.sock("dozy");
+    let (mut viewer, _) = Viewer::attach(&sock, 80, 24);
+
+    viewer.send(&ToDaemon::Sleep);
+    viewer
+        .await_frame(10_000, |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep))
+        .expect("asleep");
+
+    // Typing at a sleeping agent: the daemon holds the bytes…
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"knock knock\r")));
+    assert!(
+        viewer.await_frame(500, |m| matches!(m, ToClient::Damage { .. })).is_none(),
+        "a sleeping agent paints nothing"
+    );
+    // …and hands them to the process the wake starts.
+    viewer.send(&ToDaemon::Wake);
+    let frame = viewer
+        .await_frame(10_000, |m| match m {
+            ToClient::Damage { lines, .. } => lines
+                .iter()
+                .any(|(_, l)| screen_text(std::slice::from_ref(l)).contains("knock knock")),
+            _ => false,
+        });
+    assert!(frame.is_some(), "buffered keystrokes reach the resumed agent");
+}
+
+#[test]
+fn a_wake_that_fails_leaves_the_agent_asleep() {
+    let home = TestHome::new("badwake");
+    // Starts fine; refuses to start again once the marker exists — standing
+    // in for a `claude --resume` whose session has gone missing.
+    let marker = home.dir.join("no-resume");
+    let cmd = format!(
+        "if [ -f {m} ]; then printf 'cannot resume\\r\\n'; exit 3; fi; printf 'up\\r\\n'; sleep 300",
+        m = marker.display()
+    );
+    new_agent(&home, "doomed", &cmd);
+    let sock = home.sock("doomed");
+    let (mut viewer, _) = Viewer::attach(&sock, 80, 24);
+
+    viewer.send(&ToDaemon::Sleep);
+    viewer
+        .await_frame(10_000, |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep))
+        .expect("asleep");
+
+    std::fs::write(&marker, b"").unwrap();
+    viewer.send(&ToDaemon::Wake);
+
+    // The agent tries, fails, and settles back to asleep — with the reason on
+    // screen. What it must NOT do is take its own tab down.
+    let back = viewer.await_frame(10_000, |m| {
+        matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep)
+    });
+    assert!(back.is_some(), "a failed wake falls back to asleep");
+    assert!(sock.exists(), "the agent outlives a resume it could not do");
+
+    let (_, snap) = Viewer::attach(&sock, 80, 24);
+    let ToClient::Snapshot { screen, state, .. } = &snap else { unreachable!() };
+    assert_eq!(state.power, Power::Asleep);
+    assert!(
+        screen_text(screen).contains("cannot resume"),
+        "claude's own complaint stays readable: {:?}",
+        screen_text(screen)
+    );
+
+    // And it can still be woken once the problem goes away.
+    std::fs::remove_file(&marker).unwrap();
+    viewer.send(&ToDaemon::Wake);
+    let up = viewer.await_frame(10_000, |m| match m {
+        ToClient::Damage { lines, .. } => {
+            lines.iter().any(|(_, l)| screen_text(std::slice::from_ref(l)).contains("up"))
+        }
+        _ => false,
+    });
+    assert!(up.is_some(), "the agent comes back when the resume can succeed");
+}
+
+#[test]
+fn closing_an_agent_just_after_waking_it_still_closes_it() {
+    let home = TestHome::new("wakekill");
+    new_agent(&home, "brief", "printf 'up\\r\\n'; sleep 300");
+    let sock = home.sock("brief");
+    let (mut viewer, _) = Viewer::attach(&sock, 80, 24);
+
+    viewer.send(&ToDaemon::Sleep);
+    viewer
+        .await_frame(10_000, |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep))
+        .expect("asleep");
+    viewer.send(&ToDaemon::Wake);
+    viewer
+        .await_frame(10_000, |m| matches!(m, ToClient::Damage { .. }))
+        .expect("awake again");
+
+    // Inside the window where a dying child means "the resume failed" — but
+    // this death was asked for, and must close the agent, not re-sleep it.
+    viewer.send(&ToDaemon::Kill);
+    let exited = viewer.await_frame(10_000, |m| matches!(m, ToClient::Exited { .. }));
+    assert!(exited.is_some(), "kill right after a wake still ends the agent");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while sock.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!sock.exists(), "and unlinks its socket");
+}
+
+#[test]
+fn closing_a_sleeping_agent_ends_its_daemon() {
+    let home = TestHome::new("sleepkill");
+    new_agent(&home, "dozer", "sleep 300");
+    let sock = home.sock("dozer");
+    let (mut viewer, _) = Viewer::attach(&sock, 80, 24);
+
+    viewer.send(&ToDaemon::Sleep);
+    viewer
+        .await_frame(10_000, |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep))
+        .expect("asleep");
+
+    // No child means no child exit to end the daemon: Kill has to do it.
+    viewer.send(&ToDaemon::Kill);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while sock.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!sock.exists(), "closing a sleeping agent must unlink its socket");
 }
 
 #[test]

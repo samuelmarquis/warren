@@ -19,9 +19,13 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use polling::{Event as PollEvent, Events, PollMode, Poller};
 
-use crate::proto::{self, ToDaemon};
+use crate::proto::{self, Power, ToDaemon};
 use conn::AgentConn;
 use render::SIDEBAR_WIDTH;
+
+/// One sheep-step per dashboard tick (the poll timeout below), which is a
+/// sleepy four frames a second.
+const SHEEP_TICK_MS: u128 = 250;
 
 const KEY_STDIN: usize = 0;
 const KEY_SIGWINCH: usize = 1;
@@ -57,6 +61,10 @@ pub struct Dash {
     pub pending_focus: Option<String>,
     /// 0-based (row, col, box_w, box_h) of the color grid, when on screen.
     pub palette_geom: Option<(u16, u16, u16, u16)>,
+    /// Dashboard start, the clock the sleeping-sheep animation runs on.
+    pub started: Instant,
+    /// Animation frame the sleep badge was last drawn at.
+    pub sheep_frame: u64,
     pub cols: u16,
     pub rows: u16,
     pub sidebar_dirty: bool,
@@ -150,6 +158,52 @@ impl Dash {
         self.enter_insert();
     }
 
+    /// Frames elapsed at the sleeping-sheep rate — driven by the clock, not
+    /// by how often the dashboard happens to paint, so the flock keeps its
+    /// pace no matter what else is going on.
+    pub fn anim_frame(&self) -> u64 {
+        (self.started.elapsed().as_millis() / SHEEP_TICK_MS) as u64
+    }
+
+    /// NORMAL `Z`: sleep the focused agent, or wake it if it's already down.
+    ///
+    /// Sleeping kills claude to give its memory back and keeps the tab; the
+    /// two refusals are the ones you can't undo — mid-turn (the turn would be
+    /// lost) and before the agent's first hook has told us its session id
+    /// (there would be nothing to resume).
+    pub fn toggle_sleep(&mut self) {
+        let Some(agent) = self.focused() else { return };
+        let refusal = if agent.asleep() {
+            None // waking is always allowed
+        } else if agent.busy() {
+            Some("AGENT BUSY")
+        } else if !agent.resumable() {
+            Some("NO SESSION YET")
+        } else {
+            None
+        };
+        if let Some(msg) = refusal {
+            self.flash = Some(msg.to_string());
+            self.status_dirty = true;
+            return;
+        }
+        let msg = if agent.asleep() { ToDaemon::Wake } else { ToDaemon::Sleep };
+        if let Some(agent) = self.focused_mut() {
+            agent.send(&msg);
+        }
+    }
+
+    /// Typing at a sleeping agent wakes it; the daemon holds the keystrokes
+    /// until claude is back and then feeds them to the resumed prompt.
+    pub fn wake_on_input(&mut self) {
+        if self.focused().map(|a| a.power()) != Some(Power::Asleep) {
+            return;
+        }
+        if let Some(agent) = self.focused_mut() {
+            agent.send(&ToDaemon::Wake);
+        }
+    }
+
     /// Swap the focused agent's sidebar position with row N (1-based).
     /// Slots live in daemon meta, so the swap is two SetMeta messages; the
     /// MetaChanged broadcasts resort the sidebar (and any other viewer's).
@@ -223,6 +277,8 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
         editform: None,
         pending_focus: None,
         palette_geom: None,
+        started: Instant::now(),
+        sheep_frame: u64::MAX,
         cols,
         rows,
         sidebar_dirty: true,

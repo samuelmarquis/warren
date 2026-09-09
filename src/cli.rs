@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
-use crate::proto::{self, AgentState, FrameDecoder, Meta, ToClient, ToDaemon};
+use crate::proto::{self, AgentState, FrameDecoder, HookState, Meta, Power, ToClient, ToDaemon};
 
 // ------------------------------------------------------------------ discovery
 
@@ -55,7 +55,7 @@ fn query_agent(sock: &Path) -> Option<(Meta, AgentState)> {
     let mut state: Option<AgentState> = None;
     loop {
         if let (Some(m), Some(s)) = (&meta, &state) {
-            return Some((m.clone(), *s));
+            return Some((m.clone(), s.clone()));
         }
         match decoder.next::<ToClient>() {
             Ok(Some(ToClient::MetaChanged(m))) => {
@@ -209,10 +209,13 @@ pub fn cmd_ls() -> Result<()> {
     }
     println!("agents (in {}):", crate::paths::run_dir().display());
     for a in &agents {
-        let state = match a.state.hook {
-            Some(h) => format!("{h:?}").to_lowercase(),
-            None if a.state.ms_since_output < 1500 => "working".to_string(),
-            None => "idle".to_string(),
+        let state = match a.state.power {
+            Power::Awake => match a.state.hook {
+                Some(h) => format!("{h:?}").to_lowercase(),
+                None if a.state.ms_since_output < 1500 => "working".to_string(),
+                None => "idle".to_string(),
+            },
+            power => format!("{power:?}").to_lowercase(),
         };
         let label = if a.meta.display != a.meta.name {
             format!("{} ({})", a.meta.name, a.meta.display)
@@ -248,6 +251,72 @@ pub fn cmd_kill(args: &[String]) -> Result<()> {
         std::thread::sleep(Duration::from_millis(50));
     }
     println!("warren: kill sent to '{name}' (still shutting down)");
+    Ok(())
+}
+
+// ---------------------------------------------------------------- sleep/wake
+
+/// Is this agent mid-turn? The daemon reports the same two signals the
+/// dashboard's sidebar reads: the hook state, else recent pty output.
+fn agent_busy(state: &AgentState) -> bool {
+    match state.hook {
+        Some(HookState::Working) => true,
+        Some(HookState::Waiting) => false,
+        _ => state.ms_since_output < 1500,
+    }
+}
+
+/// `warren sleep NAME` / `warren wake NAME`: stop the agent's claude process
+/// to give its memory back, and start it again on the same conversation.
+pub fn cmd_power(args: &[String], wake: bool) -> Result<()> {
+    let verb = if wake { "wake" } else { "sleep" };
+    let Some(raw) = args.first() else {
+        bail!("usage: warren {verb} NAME");
+    };
+    let name = crate::names::sanitize(raw);
+    let sock = crate::paths::sock_path(&name);
+    let (_, state) =
+        query_agent(&sock).with_context(|| format!("no live agent named '{name}'"))?;
+
+    if wake {
+        if !state.power.is_down() {
+            println!("warren: '{name}' is already awake");
+            return Ok(());
+        }
+    } else {
+        if state.power.is_down() {
+            println!("warren: '{name}' is already asleep");
+            return Ok(());
+        }
+        // The two things sleep can't take back: an unfinished turn, and a
+        // conversation with no id to resume it by.
+        if agent_busy(&state) {
+            bail!("'{name}' is busy — let the turn finish, or interrupt it first");
+        }
+        if !state.resumable {
+            bail!("'{name}' has no session id yet — nothing to resume it from");
+        }
+    }
+
+    let mut stream = UnixStream::connect(&sock)?;
+    stream.set_write_timeout(Some(Duration::from_millis(500)))?;
+    let msg = if wake { ToDaemon::Wake } else { ToDaemon::Sleep };
+    stream.write_all(&proto::encode_frame(&msg)?)?;
+    drop(stream);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+        match query_agent(&sock) {
+            Some((_, s)) if s.power.is_down() != wake => {
+                println!("warren: '{name}' is {}", format!("{:?}", s.power).to_lowercase());
+                return Ok(());
+            }
+            Some(_) => continue,
+            None => bail!("agent '{name}' went away"),
+        }
+    }
+    println!("warren: {verb} sent to '{name}' (still in progress)");
     Ok(())
 }
 

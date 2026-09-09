@@ -7,7 +7,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::proto::{self, AgentState, FrameDecoder, Meta, MouseProto, ToClient, ToDaemon};
+use crate::proto::{self, AgentState, FrameDecoder, Meta, MouseProto, Power, ToClient, ToDaemon};
 use crate::spans::LineSpans;
 
 /// Outbound cap towards a daemon. Input is tiny; hitting this means the
@@ -78,7 +78,13 @@ impl AgentConn {
                 created: u64::MAX,
             },
             have_meta: false,
-            state: AgentState { hook: None, ms_since_output: u64::MAX },
+            state: AgentState {
+                hook: None,
+                ms_since_output: u64::MAX,
+                power: Power::Awake,
+                session: None,
+                resumable: false,
+            },
             state_rx: Instant::now(),
             output_rx: Instant::now(),
             grid: Vec::new(),
@@ -224,6 +230,11 @@ impl AgentConn {
                 self.meta_dirty = true;
             }
             ToClient::StateChanged(state) => {
+                // Sleeping and waking change what the whole pane looks like,
+                // not just the sidebar row.
+                if state.power != self.state.power {
+                    self.full_dirty = true;
+                }
                 self.state = state;
                 self.state_rx = Instant::now();
                 self.meta_dirty = true;
@@ -237,10 +248,30 @@ impl AgentConn {
         }
     }
 
+    /// No process behind this tab: slept to give its memory back, and
+    /// resumable from the frozen screen you can still read.
+    pub fn asleep(&self) -> bool {
+        self.state.power.is_down()
+    }
+
+    pub fn power(&self) -> Power {
+        self.state.power
+    }
+
+    /// Can this agent be slept — i.e. is there a session id to resume from?
+    pub fn resumable(&self) -> bool {
+        self.state.resumable
+    }
+
     /// The v0 busy heuristic: hook state wins; otherwise "output within the
     /// last 1500ms" (Claude's status line repaints about once a second).
     /// `attention` stays activity-based: mid-tool it reads as working.
     pub fn busy(&self) -> bool {
+        // A sleeping agent's last frame may be seconds old and mid-spinner;
+        // nothing is running, so nothing is busy.
+        if self.asleep() {
+            return false;
+        }
         match self.state.hook {
             Some(crate::proto::HookState::Working) => true,
             Some(crate::proto::HookState::Waiting) => false,
@@ -250,6 +281,8 @@ impl AgentConn {
 
     /// Blocked on a permission prompt and quiet: the sidebar '!' condition.
     pub fn needs_attention(&self) -> bool {
-        self.state.hook == Some(crate::proto::HookState::Attention) && !self.busy()
+        !self.asleep()
+            && self.state.hook == Some(crate::proto::HookState::Attention)
+            && !self.busy()
     }
 }

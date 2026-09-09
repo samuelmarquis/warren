@@ -5,6 +5,13 @@
 //! dashboard and of every other agent. Single-threaded `polling` loop over
 //! the pty, a SIGCHLD pipe, the listener, and client sockets — and no write
 //! anywhere that can block on a peer.
+//!
+//! The pty is OPTIONAL, and that is the whole of sleep mode: `Sleep` stops
+//! claude and drops the pty, the daemon keeps running with a frozen screen,
+//! and `Wake` respawns claude with `--resume <session-id>` (learned from the
+//! agent's own lifecycle hooks) into the same burrow. The agent — its tab,
+//! name, color, slot and last frame — is the daemon, so it survives its
+//! process; only the memory goes away.
 
 mod client;
 mod term;
@@ -21,7 +28,7 @@ use anyhow::{Context, Result, bail};
 use polling::{Event as PollEvent, Events, PollMode, Poller};
 
 use crate::proto::{
-    self, AgentState, HookState, Meta, MouseKind, MouseProto, ToClient, ToDaemon,
+    self, AgentState, HookState, Meta, MouseKind, MouseProto, Power, ToClient, ToDaemon,
 };
 use client::Conn;
 
@@ -37,6 +44,21 @@ const FLUSH_INTERVAL: Duration = Duration::from_millis(33);
 /// No daemon-side scrollback: agents (Claude's fullscreen TUI) own their own
 /// history; warren serves a live view only.
 const SCROLLBACK: usize = 0;
+
+/// How long a sleeping agent gets to honor SIGTERM before SIGKILL, and again
+/// before we stop escalating. Claude Code exits on SIGTERM after running its
+/// SessionEnd hooks, which is what leaves a clean transcript behind.
+const SLEEP_GRACE: Duration = Duration::from_secs(4);
+
+/// A woken claude that dies inside this window is treated as a failed resume:
+/// the agent falls back to asleep (error still on screen) instead of taking
+/// its own tab down.
+const WAKE_GRACE: Duration = Duration::from_secs(5);
+
+/// Keystrokes buffered for a sleeping agent (typing at one wakes it, and the
+/// bytes land in the resumed prompt). Bounded: a stuck wake must not grow a
+/// queue forever.
+const ASLEEP_INPUT_CAP: usize = 16 * 1024;
 
 pub struct DaemonArgs {
     pub name: String,
@@ -72,9 +94,88 @@ impl DaemonArgs {
     }
 }
 
+/// Everything needed to start claude — kept for the life of the daemon so a
+/// wake can spawn the identical agent a second time (same cwd, system prompt,
+/// extra args and env), differing only in `--resume <session-id>`.
+struct Spawn {
+    dir: String,
+    sys: Option<String>,
+    extra: Option<String>,
+    /// WARREN_AGENT_CMD (tests and tooling): used verbatim for every spawn,
+    /// with no hooks wiring and no resume rewriting.
+    custom: Option<String>,
+    shell: String,
+    env: HashMap<String, String>,
+}
+
+impl Spawn {
+    /// The shell command line for one run of the agent.
+    fn command(&self, mode: &str, sid: Option<&str>) -> Result<String> {
+        if let Some(custom) = &self.custom {
+            return Ok(custom.clone());
+        }
+        let hooks = crate::hooks::ensure_hooks_json()?;
+        let mut cmd = match mode {
+            "resume" => match sid {
+                Some(sid) => format!("claude --resume {sid}"),
+                // No id: claude's own picker, rather than a wrong guess.
+                None => "claude --resume".to_string(),
+            },
+            "continue" => "claude --continue".to_string(),
+            _ => "claude".to_string(),
+        };
+        if let Some(sys) = &self.sys {
+            // Single-quote for the shell, escaping embedded quotes.
+            let escaped = sys.replace('\'', r"'\''");
+            cmd.push_str(&format!(" --system-prompt '{escaped}'"));
+        }
+        if let Some(extra) = &self.extra {
+            // User-authored args, passed through verbatim.
+            cmd.push_str(&format!(" {extra}"));
+        }
+        // Re-passed on every spawn: a resumed session does NOT inherit the
+        // --settings of the run that created it, so the lifecycle hooks (and
+        // with them the sidebar states and the session id) must be rewired.
+        cmd.push_str(&format!(" --settings '{}'", hooks.display()));
+        Ok(cmd)
+    }
+
+    /// Spawn claude on a fresh pty of the given size.
+    fn pty(&self, mode: &str, sid: Option<&str>, cols: u16, rows: u16) -> Result<tty::Pty> {
+        let cmd = self.command(mode, sid)?;
+        let window_size =
+            WindowSize { num_lines: rows, num_cols: cols, cell_width: 8, cell_height: 16 };
+        let options = Options {
+            shell: Some(Shell::new(self.shell.clone(), vec!["-c".into(), cmd])),
+            working_directory: Some(self.dir.clone().into()),
+            drain_on_exit: false,
+            env: self.env.clone(),
+        };
+        tty::new(&options, window_size, 0).context("spawning agent pty")
+    }
+}
+
 struct Daemon {
     term: term::AgentTerm,
-    pty: tty::Pty,
+    /// None exactly when the agent is asleep (or on its way there): no
+    /// process, no fds, no memory — just the frozen screen above.
+    pty: Option<tty::Pty>,
+    spawn: Spawn,
+    power: Power,
+    /// The session to `--resume`: seeded by `warren new … resume SID`, then
+    /// kept current by every lifecycle hook the agent fires.
+    sid: Option<String>,
+    /// When the current stop signal stops being polite (SIGTERM -> SIGKILL).
+    sleep_deadline: Option<Instant>,
+    /// When the last wake spawned, to catch a resume that dies on arrival.
+    woke_at: Option<Instant>,
+    /// Whether the current sleep has already escalated past SIGTERM.
+    sigkilled: bool,
+    /// Set by Kill while asleep: no child exit will ever end the loop for us.
+    quit: Option<i32>,
+    /// Kill was asked for: the next child exit ends the agent, whatever else
+    /// the daemon might have made of it.
+    killed: bool,
     listener: UnixListener,
     poller: Arc<Poller>,
     conns: HashMap<usize, Conn>,
@@ -83,6 +184,8 @@ struct Daemon {
     hook: Option<HookState>,
     last_output: Instant,
     /// Bytes queued for the application (keyboard input, answer-backs).
+    /// Survives a sleep: keys typed at a sleeping agent wake it and land in
+    /// the resumed prompt.
     pty_in: Vec<u8>,
     pty_wants_write: bool,
     /// Mode state last broadcast, to detect changes.
@@ -107,36 +210,7 @@ pub fn run(args: DaemonArgs) -> Result<()> {
         std::fs::OpenOptions::new().create(true).append(true).open(p)
     }).and_then(Result::ok);
 
-    // Build the agent command. WARREN_AGENT_CMD overrides for tests/tools;
-    // --settings (Claude lifecycle hooks) is only wired onto the default.
-    let cmd = match std::env::var("WARREN_AGENT_CMD") {
-        Ok(custom) if !custom.is_empty() => custom,
-        _ => {
-            let hooks = crate::hooks::ensure_hooks_json()?;
-            let mut cmd = match args.mode.as_str() {
-                "resume" => match &args.sid {
-                    Some(sid) => format!("claude --resume {sid}"),
-                    None => "claude --resume".to_string(),
-                },
-                "continue" => "claude --continue".to_string(),
-                _ => "claude".to_string(),
-            };
-            if let Some(sys) = &args.sys {
-                // Single-quote for the shell, escaping embedded quotes.
-                let escaped = sys.replace('\'', r"'\''");
-                cmd.push_str(&format!(" --system-prompt '{escaped}'"));
-            }
-            if let Some(extra) = &args.extra {
-                // User-authored args, passed through verbatim.
-                cmd.push_str(&format!(" {extra}"));
-            }
-            cmd.push_str(&format!(" --settings '{}'", hooks.display()));
-            cmd
-        }
-    };
-
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    let mut env = std::collections::HashMap::new();
+    let mut env = HashMap::new();
     // TERM must be xterm-ish, NOT screen-*: Claude detects "screen" and falls
     // back to its alternate-screen renderer (no scrollback at all).
     env.insert("TERM".into(), std::env::var("DVTM_TERM").unwrap_or_else(|_| "xterm-256color".into()));
@@ -144,14 +218,18 @@ pub fn run(args: DaemonArgs) -> Result<()> {
     env.insert("WARREN_AGENT".into(), args.name.clone());
     env.insert("WARREN_SOCK".into(), sock.display().to_string());
 
-    let window_size = WindowSize { num_lines: 24, num_cols: 80, cell_width: 8, cell_height: 16 };
-    let options = Options {
-        shell: Some(Shell::new(shell, vec!["-c".into(), cmd])),
-        working_directory: Some(args.dir.clone().into()),
-        drain_on_exit: false,
+    let spawn = Spawn {
+        dir: args.dir.clone(),
+        sys: args.sys.clone(),
+        extra: args.extra.clone(),
+        custom: std::env::var("WARREN_AGENT_CMD").ok().filter(|c| !c.is_empty()),
+        shell: std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
         env,
     };
-    let mut pty = tty::new(&options, window_size, 0).context("spawning agent pty")?;
+    // A `resume` spawn already knows its session id; anything else learns it
+    // from the SessionStart hook a moment from now.
+    let sid = args.sid.clone().filter(|_| args.mode == "resume");
+    let mut pty = spawn.pty(&args.mode, args.sid.as_deref(), 80, 24)?;
 
     let poller = Arc::new(Poller::new()?);
     unsafe {
@@ -163,7 +241,15 @@ pub fn run(args: DaemonArgs) -> Result<()> {
     let created = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let mut daemon = Daemon {
         term: term::AgentTerm::new(80, 24, SCROLLBACK),
-        pty,
+        pty: Some(pty),
+        spawn,
+        power: Power::Awake,
+        sid,
+        sleep_deadline: None,
+        woke_at: None,
+        sigkilled: false,
+        quit: None,
+        killed: false,
         listener,
         poller,
         conns: HashMap::new(),
@@ -235,7 +321,13 @@ impl Daemon {
         let mut flush_at: Option<Instant> = None;
 
         loop {
-            let timeout = flush_at.map(|at| at.saturating_duration_since(Instant::now()));
+            // Wake for whichever comes first: the damage timer, or a stop
+            // signal that needs escalating.
+            let mut timeout = flush_at.map(|at| at.saturating_duration_since(Instant::now()));
+            if let Some(at) = self.sleep_deadline {
+                let until = at.saturating_duration_since(Instant::now());
+                timeout = Some(timeout.map_or(until, |t: Duration| t.min(until)));
+            }
             events.clear();
             match self.poller.wait(&mut events, timeout) {
                 Ok(_) => {}
@@ -266,8 +358,16 @@ impl Daemon {
                         }
                     }
                     KEY_CHILD => {
-                        while let Some(ChildEvent::Exited(status)) = self.pty.next_child_event() {
-                            exited = Some(status.and_then(|s| s.code()).unwrap_or(-1));
+                        let mut child_exit: Option<i32> = None;
+                        if let Some(pty) = self.pty.as_mut() {
+                            while let Some(ChildEvent::Exited(status)) = pty.next_child_event() {
+                                child_exit = Some(status.and_then(|s| s.code()).unwrap_or(-1));
+                            }
+                        }
+                        // A sleep's child exit is the sleep completing, not
+                        // the agent ending; only a real one ends the loop.
+                        if let Some(status) = child_exit {
+                            exited = self.on_child_exit(status);
                         }
                     }
                     KEY_LISTENER => self.accept_clients(),
@@ -287,6 +387,7 @@ impl Daemon {
             self.drain_term_events();
             self.write_pty();
             self.update_pty_interest()?;
+            self.escalate_sleep();
 
             // Damage coalescing: first dirtying event arms the timer; the
             // frame goes out when it expires.
@@ -308,19 +409,52 @@ impl Daemon {
             // one redraw behind, "unstuck" by each keypress.
             self.reap_dead_conns();
 
-            if let Some(status) = exited {
+            // `x` / `warren kill` on a SLEEPING agent has no child to reap,
+            // so the request itself ends the daemon.
+            if let Some(status) = exited.or(self.quit) {
                 return Ok(status);
             }
         }
     }
 
+    /// Route a child exit: a sleep completing, a resume that died on arrival,
+    /// or the agent genuinely ending (the only case that stops the daemon).
+    fn on_child_exit(&mut self, status: i32) -> Option<i32> {
+        self.read_pty(); // last words, before the pty goes away
+        let woke_recently =
+            self.woke_at.map(|t| t.elapsed() < WAKE_GRACE).unwrap_or(false);
+        match self.power {
+            // Closing the agent means closing it — never mistake a kill for a
+            // sleep, or for a resume that failed.
+            _ if self.killed => Some(status),
+            Power::Sleeping => {
+                self.logf(&format!("slept: child exited with status {status}"));
+                self.finish_sleep();
+                None
+            }
+            // A resume claude refuses (session id gone, claude off PATH)
+            // must not take the tab down with it — the whole point of sleep
+            // is that the agent outlives its process. Stay asleep, with
+            // claude's own error frozen on screen to explain why. The cost is
+            // that quitting an agent by hand within seconds of waking it
+            // leaves the tab behind too; `x` closes it.
+            _ if woke_recently => {
+                self.logf(&format!("wake failed: child exited with status {status}"));
+                self.finish_sleep();
+                None
+            }
+            _ => Some(status),
+        }
+    }
+
     fn read_pty(&mut self) {
+        let Some(pty) = self.pty.as_mut() else { return };
         let mut buf = [0u8; 65536];
         let mut total = 0;
         let log_total = self.log.is_some();
         let mut preview = String::new();
         loop {
-            match self.pty.reader().read(&mut buf) {
+            match pty.reader().read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
                     if log_total && preview.len() < 160 {
@@ -343,6 +477,14 @@ impl Daemon {
                 Err(_) => break,
             }
         }
+        // First paint after a resume: the agent is properly back. `woke_at`
+        // stays set — it's the grace window, and a claude that prints
+        // "Failed to resume the conversation" and quits has painted too.
+        if total > 0 && self.power == Power::Waking {
+            self.power = Power::Awake;
+            let update = ToClient::StateChanged(self.state());
+            self.broadcast(&update);
+        }
         if log_total {
             let msg = format!("read_pty: {total} bytes  «{preview}»");
             self.logf(&msg);
@@ -350,12 +492,17 @@ impl Daemon {
     }
 
     fn write_pty(&mut self) {
-        if self.log.is_some() && !self.pty_in.is_empty() {
+        // Asleep: hold the keystrokes. They go in the moment claude is back.
+        if self.pty.is_none() || self.pty_in.is_empty() {
+            return;
+        }
+        if self.log.is_some() {
             let msg = format!("write_pty: {} bytes  «{}»", self.pty_in.len(), escape_bytes(&self.pty_in[..self.pty_in.len().min(160)]));
             self.logf(&msg);
         }
+        let pty = self.pty.as_mut().unwrap();
         while !self.pty_in.is_empty() {
-            match self.pty.writer().write(&self.pty_in) {
+            match pty.writer().write(&self.pty_in) {
                 Ok(0) => break,
                 Ok(n) => {
                     self.pty_in.drain(..n);
@@ -373,12 +520,122 @@ impl Daemon {
     /// Re-register the pty for writability only while input is queued.
     fn update_pty_interest(&mut self) -> Result<()> {
         let want = !self.pty_in.is_empty();
+        let Some(pty) = self.pty.as_mut() else {
+            self.pty_wants_write = false; // nothing registered while asleep
+            return Ok(());
+        };
         if want != self.pty_wants_write {
             let ev = PollEvent::new(KEY_PTY, true, want);
-            self.pty.reregister(&self.poller, ev, PollMode::Level)?;
+            pty.reregister(&self.poller, ev, PollMode::Level)?;
             self.pty_wants_write = want;
         }
         Ok(())
+    }
+
+    // ------------------------------------------------------------ sleep/wake
+
+    /// Stop claude, keep the agent. SIGTERM the whole process group: claude
+    /// spawns tool children and MCP servers, and reclaiming *their* memory is
+    /// the point. Claude Code exits on SIGTERM after running its SessionEnd
+    /// hooks, which is what leaves a transcript `--resume` is happy with.
+    ///
+    /// The daemon does not second-guess the caller about whether the agent is
+    /// busy — viewers own that policy (the dashboard refuses mid-turn).
+    fn start_sleep(&mut self) {
+        if self.power.is_down() {
+            return;
+        }
+        let Some(pty) = self.pty.as_ref() else { return };
+        let pid = pty.child().id() as i32;
+        unsafe { libc::kill(-pid, libc::SIGTERM) };
+        self.logf(&format!("sleep: SIGTERM to process group {pid}"));
+        self.power = Power::Sleeping;
+        self.sigkilled = false;
+        self.sleep_deadline = Some(Instant::now() + SLEEP_GRACE);
+        let update = ToClient::StateChanged(self.state());
+        self.broadcast(&update);
+    }
+
+    /// A claude that won't take SIGTERM gets one SIGKILL, then we stop
+    /// signalling: escalating forever is how a daemon spins.
+    fn escalate_sleep(&mut self) {
+        let Some(deadline) = self.sleep_deadline else { return };
+        if Instant::now() < deadline || self.power != Power::Sleeping {
+            return;
+        }
+        match (self.pty.as_ref(), self.sigkilled) {
+            (Some(pty), false) => {
+                let pid = pty.child().id() as i32;
+                unsafe { libc::kill(-pid, libc::SIGKILL) };
+                self.logf(&format!("sleep: SIGTERM ignored, SIGKILL to group {pid}"));
+                self.sigkilled = true;
+                self.sleep_deadline = Some(Instant::now() + SLEEP_GRACE);
+            }
+            _ => {
+                self.logf("sleep: process survived SIGKILL — giving up on escalation");
+                self.sleep_deadline = None;
+            }
+        }
+    }
+
+    /// The child is gone: drop the pty (closing its fds and unregistering its
+    /// SIGCHLD pipe) and settle into asleep with the last frame frozen.
+    fn finish_sleep(&mut self) {
+        if let Some(mut pty) = self.pty.take() {
+            let _ = pty.deregister(&self.poller);
+            drop(pty); // reaps; the child is already dead, so this is instant
+        }
+        self.pty_wants_write = false;
+        self.sleep_deadline = None;
+        self.woke_at = None;
+        self.sigkilled = false;
+        self.hook = None; // no process, no lifecycle state
+        self.power = Power::Asleep;
+        self.flush_frame(); // the frozen screen is the agent's last word
+        let update = ToClient::StateChanged(self.state());
+        self.broadcast(&update);
+    }
+
+    /// Respawn claude on the same conversation, in a fresh pty at the current
+    /// size. Failing here leaves the agent asleep and the tab alive.
+    fn wake(&mut self) {
+        if self.pty.is_some() || self.power != Power::Asleep {
+            return;
+        }
+        // With an id we resume exactly this conversation; without one (only
+        // reachable via WARREN_AGENT_CMD or a hookless agent) `--continue`
+        // is the best available guess.
+        let (mode, sid) = match self.sid.clone() {
+            Some(sid) => ("resume", Some(sid)),
+            None => ("continue", None),
+        };
+        let (cols, rows) = (self.term.cols, self.term.rows);
+        let mut pty = match self.spawn.pty(mode, sid.as_deref(), cols, rows) {
+            Ok(pty) => pty,
+            Err(e) => {
+                self.logf(&format!("wake failed to spawn: {e:#}"));
+                return;
+            }
+        };
+        let ev = PollEvent::readable(KEY_PTY);
+        if let Err(e) = unsafe { pty.register(&self.poller, ev, PollMode::Level) } {
+            self.logf(&format!("wake failed to register pty: {e}"));
+            return; // pty drops here: SIGHUP + reap, still asleep
+        }
+        self.logf(&format!("wake: {mode} {}", sid.as_deref().unwrap_or("(no session id)")));
+        self.pty = Some(pty);
+        self.pty_wants_write = false;
+        self.power = Power::Waking;
+        self.woke_at = Some(Instant::now());
+        // Claude repaints from scratch; start it on a clean screen so no
+        // frozen cells from the old process survive underneath.
+        self.term = term::AgentTerm::new(cols, rows, SCROLLBACK);
+        self.sent_alt = false;
+        self.sent_mouse = MouseProto::None;
+        let snapshot = self.snapshot();
+        self.broadcast(&snapshot);
+        self.term.term.reset_damage();
+        self.dirty = false;
     }
 
     fn accept_clients(&mut self) {
@@ -447,11 +704,20 @@ impl Daemon {
             }
             ToDaemon::Input(b64) => {
                 if let Ok(bytes) = proto::b64_decode(&b64) {
-                    self.pty_in.extend_from_slice(&bytes);
+                    // While asleep these queue up for the resumed claude; the
+                    // cap keeps a wake that never lands from growing a heap.
+                    if self.pty.is_some() || self.pty_in.len() + bytes.len() <= ASLEEP_INPUT_CAP {
+                        self.pty_in.extend_from_slice(&bytes);
+                    }
                 }
             }
             ToDaemon::Resize { cols, rows } => self.resize_to(cols, rows),
             ToDaemon::Mouse { kind, col, row, mods } => {
+                // No process to click on; a stray wheel event must not queue
+                // up and land in the resumed prompt.
+                if self.pty.is_none() {
+                    return;
+                }
                 if let Some(bytes) = self.encode_mouse(kind, col, row, mods) {
                     self.pty_in.extend_from_slice(&bytes);
                 }
@@ -477,6 +743,19 @@ impl Daemon {
                 let update = ToClient::StateChanged(self.state());
                 self.broadcast(&update);
             }
+            // Every hook event carries the agent's session id, so this is how
+            // a `new`/`continue` agent becomes resumable — and how the id
+            // stays right if claude ever moves the conversation.
+            ToDaemon::Session(sid) => {
+                if !sid.is_empty() && self.sid.as_deref() != Some(sid.as_str()) {
+                    self.logf(&format!("session id: {sid}"));
+                    self.sid = Some(sid);
+                    let update = ToClient::StateChanged(self.state());
+                    self.broadcast(&update);
+                }
+            }
+            ToDaemon::Sleep => self.start_sleep(),
+            ToDaemon::Wake => self.wake(),
             ToDaemon::Query => {
                 let meta = ToClient::MetaChanged(self.meta.clone());
                 let state = ToClient::StateChanged(self.state());
@@ -486,12 +765,18 @@ impl Daemon {
                 conn.close_after_write = true;
                 conn.flush();
             }
-            ToDaemon::Kill => {
+            ToDaemon::Kill => match self.pty.as_ref() {
                 // SIGHUP the agent's process group (it ran setsid, so its pid
                 // leads the group); exit follows via SIGCHLD.
-                let pid = self.pty.child().id() as i32;
-                unsafe { libc::kill(-pid, libc::SIGHUP) };
-            }
+                Some(pty) => {
+                    let pid = pty.child().id() as i32;
+                    self.killed = true;
+                    unsafe { libc::kill(-pid, libc::SIGHUP) };
+                }
+                // Asleep: there is no child whose death could end the loop,
+                // so closing the tab has to end the daemon directly.
+                None => self.quit = Some(0),
+            },
         }
     }
 
@@ -499,6 +784,9 @@ impl Daemon {
         AgentState {
             hook: self.hook,
             ms_since_output: self.last_output.elapsed().as_millis() as u64,
+            power: self.power,
+            session: self.sid.clone(),
+            resumable: self.sid.is_some() || self.spawn.custom.is_some(),
         }
     }
 
@@ -523,12 +811,16 @@ impl Daemon {
             return;
         }
         self.term.resize(cols, rows);
-        self.pty.on_resize(WindowSize {
-            num_lines: rows,
-            num_cols: cols,
-            cell_width: 8,
-            cell_height: 16,
-        });
+        // Asleep, the emulator resizes alone: the frozen screen keeps filling
+        // the pane, and the size is what the next wake spawns at.
+        if let Some(pty) = self.pty.as_mut() {
+            pty.on_resize(WindowSize {
+                num_lines: rows,
+                num_cols: cols,
+                cell_width: 8,
+                cell_height: 16,
+            });
+        }
         let snapshot = self.snapshot();
         self.broadcast(&snapshot);
         self.term.term.reset_damage();

@@ -26,7 +26,11 @@ everything outlives the connection it was started in.
 
 - **One row per agent**, state pushed by Claude Code's own lifecycle hooks —
   no polling. Bold = ready for you, plain = working, `!` = blocked on a
-  permission prompt, `*` = finished while you were looking elsewhere.
+  permission prompt, `*` = finished while you were looking elsewhere,
+  `z` = asleep.
+- **Sleep the agents you aren't using.** `Z` stops a tab's claude process and
+  gives its memory back; the tab stays, and waking it resumes the same
+  conversation where it left off.
 - **The right pane is the real thing** — the focused agent's actual Claude
   Code TUI, full screen, with working mouse, colors, and Claude's own
   scrollback.
@@ -93,6 +97,8 @@ warren new NAME [DIR] [COLOR 0-255] [new|resume|continue] [session-id]
            [--sys=SYSTEM-PROMPT] [--extra=EXTRA-CLAUDE-ARGS]
 warren ls              list agents and their states
 warren kill NAME       terminate an agent
+warren sleep NAME      stop its claude process, keep the agent (resumable)
+warren wake NAME       start it again on the same conversation
 warren attach NAME     view a single agent raw (no sidebar; Ctrl-\ detaches)
 warren sessions        all resumable Claude sessions (id, mtime, cwd, title)
 warren help
@@ -115,6 +121,7 @@ color-coded (CLAUDE orange, NORMAL green, EDIT purple):
 | `i` `a` `l` `Enter` `Esc` | back to CLAUDE |
 | `r` | rename (pins the name against Claude's title sync) |
 | `e` / `c` | edit form: title + 256-color picker |
+| `Z` | sleep the agent (or wake a sleeping one) |
 | `x` | close agent (y/n confirm) |
 | `:` | command line — `:q` detach · `:q!` kill all · `:color #hex\|index` |
 
@@ -128,13 +135,47 @@ title, root dir, a session from the resume picker, a system prompt
 (`--system-prompt`), extra claude CLI args, and a tab color. Tab/Shift+Tab
 cycle fields; NORMAL always navigates away — the form never traps you.
 
+### Sleep mode
+
+A colony costs what its members cost, and an idle Claude Code still holds
+its several hundred megabytes. **Ctrl-Space `Z`** stops the focused agent's
+claude process — and its whole process group, so tool children and MCP
+servers go too — while keeping the agent itself: the daemon lives on, so the
+tab keeps its row, name, color, working directory and the last screen claude
+painted, dimmed under a sleeping badge. `Z` again (or just typing at it)
+respawns `claude --resume <session-id>` in the same burrow, and the
+conversation carries on. Keys typed at a sleeping agent are buffered and
+land in the resumed prompt.
+
+The session id comes from the agent's own lifecycle hooks: Claude passes one
+on stdin with every hook event, so warren knows it a second after spawn and
+keeps it current. Resuming appends to the same session, so an agent can sleep
+and wake forever without ever forking its conversation.
+
+Two refusals, both about not losing anything you can't get back. Sleeping
+**mid-turn** is refused (`AGENT BUSY` in the status bar) — the in-flight turn
+would be lost, and the transcript would end on a tool call that never
+returned; let it finish, or interrupt it yourself first. Sleeping before the
+first hook has reported a session id is refused too (`NO SESSION YET`), since
+there would be nothing to resume from.
+
+The stop itself is SIGTERM to the process group, which Claude Code exits on
+cleanly after running its `SessionEnd` hooks — SIGKILL follows only if it
+ignores that. A wake whose `--resume` fails leaves the agent asleep with
+claude's error frozen on screen, rather than taking the tab down with it.
+
+Sleep is *not* persistence: agents still die with the machine. It buys memory
+back within a session, and the conversations were always resumable anyway.
+
 ### How agent states work
 
 warren generates a Claude Code settings file whose lifecycle hooks run
 `warren hook <state>`, which pokes the agent's own daemon over its socket:
 prompt submitted or tool running → *working*, turn finished → *ready*,
-permission prompt → *attention*. Outside warren the hook is a silent no-op,
-and it always exits 0 — a wedged daemon can never stall Claude.
+permission prompt → *attention*. The hook also reads the `session_id` out of
+the JSON payload Claude hands it on stdin — that's what sleep resumes from.
+Outside warren the hook is a silent no-op, it never blocks on stdin or on the
+socket, and it always exits 0 — a wedged daemon can never stall Claude.
 
 ## Files
 
@@ -154,5 +195,10 @@ cargo test
 
 Unit tests plus headless integration tests that spawn real daemons around
 scripted children and drive them over the socket — snapshot fidelity, damage
-streaming, resize fan-out, hook round-trips, exit reaping, and the
-stalled-viewer regression test.
+streaming, resize fan-out, hook round-trips, exit reaping, sleep/wake (the
+process really dies, the agent really doesn't), and the stalled-viewer
+regression test.
+
+```sh
+cargo test sheep -- --nocapture     # watch the flock
+```

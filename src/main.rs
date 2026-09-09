@@ -5,6 +5,8 @@
 //!   warren new NAME [DIR] [COLOR 0-255] [new|resume|continue] [session-id]
 //!   warren ls              list agents and their status
 //!   warren kill NAME       terminate an agent
+//!   warren sleep NAME      kill the agent's claude process, keeping the resumable tab
+//!   warren wake NAME       respawn it with --resume on the same conversation
 //!   warren attach NAME     raw single-agent viewer
 //!   warren sessions        all resumable Claude sessions (id<TAB>mtime<TAB>cwd<TAB>title)
 //!   warren hook STATE      called by Claude Code hooks; reports state to the agent daemon
@@ -29,6 +31,8 @@ warren - a Claude Code agent multiplexer
   warren new NAME [DIR] [COLOR 0-255] [new|resume|continue] [session-id]
   warren ls              list agents and their status
   warren kill NAME       terminate an agent
+  warren sleep NAME      stop the agent's claude process, keep the agent
+  warren wake NAME       start it again on the same conversation
   warren attach NAME     view a single agent raw (no sidebar)
   warren sessions        list resumable Claude sessions
   warren help            show this help
@@ -47,6 +51,8 @@ fn main() {
         "new" | "create" => cli::cmd_new(rest),
         "ls" | "list" => cli::cmd_ls(),
         "kill" | "rm" => cli::cmd_kill(rest),
+        "sleep" => cli::cmd_power(rest, false),
+        "wake" => cli::cmd_power(rest, true),
         "attach" => cli::cmd_attach(rest),
         "sessions" => sessions::cmd_sessions(),
         "hook" => hooks::cmd_hook(rest),

@@ -62,6 +62,9 @@ pub fn handle_bytes(dash: &mut Dash, bytes: &[u8]) -> Outcome {
                     }
                 }
                 if stop > i {
+                    // Real keys for the agent (^Space and ^\ are warren's,
+                    // and must not wake a tab you were only passing through).
+                    dash.wake_on_input();
                     dash.send_input(&bytes[i..stop]);
                 }
                 if stop == bytes.len() {
@@ -129,6 +132,7 @@ fn normal_key(dash: &mut Dash, bytes: &[u8]) -> (usize, Option<Outcome>) {
         b'(' => dash.swap_with_row(9),
         b')' => dash.swap_with_row(10),
         b'n' => dash.open_new_form(),
+        b'Z' => dash.toggle_sleep(),
         b'r' => {
             if let Some(agent) = dash.focused() {
                 dash.cmdline = agent.meta.display.clone();

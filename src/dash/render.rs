@@ -6,6 +6,8 @@ use std::fmt::Write;
 
 use crate::spans::{self, LineSpans, Span};
 
+use crate::proto::Power;
+
 use super::{Dash, Mode, Sub};
 
 pub const SIDEBAR_WIDTH: u16 = 24;
@@ -88,9 +90,12 @@ fn draw_sidebar(dash: &mut Dash, out: &mut String) {
                 n if n < 10 => n.to_string(),
                 _ => " ".to_string(),
             };
-            // Trailing mark: '!' = blocked on a permission prompt and quiet;
-            // '*' = went idle while unfocused, not yet examined.
-            let mark = if agent.needs_attention() {
+            // Trailing mark: 'z' = asleep (no process, resumable); '!' =
+            // blocked on a permission prompt and quiet; '*' = went idle while
+            // unfocused, not yet examined.
+            let mark = if agent.asleep() {
+                " z"
+            } else if agent.needs_attention() {
                 " !"
             } else if agent.unseen {
                 " *"
@@ -105,8 +110,13 @@ fn draw_sidebar(dash: &mut Dash, out: &mut String) {
             let color = agent.meta.color;
             let mut style = String::from("\x1b[0");
             // Busy = plain weight, idle = bold. Never dim: dim fg over a
-            // colored background reads as unreadable mid-gray.
-            if !agent.busy() {
+            // colored background reads as unreadable mid-gray — so a sleeping
+            // row is dimmed only when it isn't the focused (color-backed) one.
+            if agent.asleep() {
+                if !focused {
+                    style.push_str(";2");
+                }
+            } else if !agent.busy() {
                 style.push_str(";1");
             }
             if focused {
@@ -179,15 +189,23 @@ fn draw_content(dash: &mut Dash, out: &mut String) {
     let pane_h = dash.rows.saturating_sub(1);
     let x0 = SIDEBAR_WIDTH + 1; // 1-based ANSI column
 
+    // Sheep tick: derived from the clock, not from how often we happen to
+    // paint, so the flock keeps its pace whatever else the dashboard is doing.
+    let frame = dash.anim_frame();
     let focus = dash.focus;
+    let color = dash.focused().map(|a| a.meta.color).unwrap_or(0);
     let Some(agent) = dash.agents.get_mut(focus) else {
         return; // + tab focused: the form renderer owns the pane
     };
 
-    if agent.full_dirty {
+    // Asleep: the last frame claude painted, dimmed and frozen. Nothing new
+    // can arrive, so the grid is drawn once and only the badge animates.
+    let asleep = agent.asleep();
+    let repaint = agent.full_dirty;
+    if repaint {
         for row in 0..pane_h {
             let line = agent.grid.get(row as usize);
-            draw_pane_line(out, row, x0, pane_w, line);
+            draw_pane_line(out, row, x0, pane_w, line, asleep);
         }
         agent.full_dirty = false;
         agent.damage_rows.clear();
@@ -196,13 +214,24 @@ fn draw_content(dash: &mut Dash, out: &mut String) {
         for row in rows {
             if row < pane_h {
                 let line = agent.grid.get(row as usize);
-                draw_pane_line(out, row, x0, pane_w, line);
+                draw_pane_line(out, row, x0, pane_w, line, asleep);
             }
         }
     }
+    if asleep && (repaint || frame != dash.sheep_frame) {
+        dash.sheep_frame = frame;
+        draw_sleep_badge(out, x0, pane_w, pane_h, color, frame);
+    }
 }
 
-fn draw_pane_line(out: &mut String, row: u16, x0: u16, width: usize, line: Option<&LineSpans>) {
+fn draw_pane_line(
+    out: &mut String,
+    row: u16,
+    x0: u16,
+    width: usize,
+    line: Option<&LineSpans>,
+    dim: bool,
+) {
     let _ = write!(out, "\x1b[{};{}H\x1b[0m\x1b[K", row + 1, x0);
     let Some(line) = line else { return };
     let mut budget = width;
@@ -212,9 +241,142 @@ fn draw_pane_line(out: &mut String, row: u16, x0: u16, width: usize, line: Optio
         }
         let text: String = span.text.chars().take(budget).collect();
         budget -= text.chars().count();
-        let _ = write!(out, "{}{}", spans::sgr_sequence(span), text);
+        if dim {
+            // Bold and dim fight; the frozen screen is background now, so dim
+            // wins and the badge on top is the only bright thing in the pane.
+            let faded = Span {
+                text: String::new(),
+                fg: span.fg,
+                bg: span.bg,
+                attrs: (span.attrs & !spans::attr::BOLD) | spans::attr::DIM,
+            };
+            let _ = write!(out, "{}{}", spans::sgr_sequence(&faded), text);
+        } else {
+            let _ = write!(out, "{}{}", spans::sgr_sequence(span), text);
+        }
     }
     let _ = write!(out, "\x1b[0m");
+}
+
+// ------------------------------------------------------------------- asleep
+//
+// The badge over a sleeping agent's frozen screen: a fence, a ground line,
+// and a sheep that trots across and hops the fence, one cell per tick.
+
+/// The sheep: wool, face, legs, five cells wide. Drawn standing on the ground
+/// line, or one row higher mid-hop.
+const SHEEP_W: i32 = 5;
+const SHEEP_WOOL: &str = " ⌒⌒⌒";
+const SHEEP_FACE: &str = "(o.o)";
+/// Legs alternate as it runs; tucked up while it's over the fence.
+const SHEEP_LEGS: [&str; 3] = ["  \" \"", " \"  \"", "  ~~ "];
+
+/// Box height: sky, three sheep rows, ground, caption, two borders.
+const BADGE_H: usize = 8;
+
+fn draw_sleep_badge(out: &mut String, x0: u16, pane_w: usize, pane_h: u16, color: u8, frame: u64) {
+    let hint = "^Space Z  ·  wake";
+    // Too small for a meadow: one honest line, centered.
+    if pane_w < 34 || (pane_h as usize) < BADGE_H + 2 {
+        let text = format!("asleep  ·  {hint}");
+        let len = text.chars().count();
+        if pane_h >= 1 && pane_w >= len + 2 {
+            let col = x0 as usize + (pane_w - len) / 2;
+            let row = (pane_h / 2).max(1);
+            let _ = write!(out, "\x1b[{row};{col}H\x1b[0;1masleep\x1b[0;2m  ·  {hint}\x1b[0m");
+        }
+        return;
+    }
+
+    let bw = pane_w.min(40); // box width, borders included
+    let iw = bw - 2; // interior width
+    let left = x0 as usize + (pane_w - bw) / 2;
+    let top = ((pane_h as usize) - BADGE_H) / 2 + 1; // 1-based screen row
+
+    // The border wears the tab's own color; everything inside is moonlight.
+    let border = match color {
+        0 => "\x1b[0;38;5;240m".to_string(),
+        c => format!("\x1b[0;38;5;{c}m"),
+    };
+    let sky_style = "\x1b[0;38;5;244m";
+    let sheep_style = "\x1b[0;38;5;255m";
+    let ground_style = "\x1b[0;38;5;238m";
+    let caption_style = "\x1b[0;2m";
+
+    // The meadow: the sheep walks in off the left edge and out off the right,
+    // hopping the fence in the middle. One cell per tick.
+    let fence = (iw / 2) as i32;
+    let period = iw as i64 + SHEEP_W as i64 + 8;
+    let x = -SHEEP_W + (frame as i64 % period) as i32;
+    // Airborne from a cell before the fence meets its nose to a cell after
+    // it clears its tail — so it never walks through the post.
+    let hop = x + SHEEP_W >= fence && x <= fence + 1;
+    let legs = if hop { 2 } else { (frame % 2) as usize };
+    let sprite_top = if hop { 0 } else { 1 }; // interior row of the wool
+
+    // …and a slow breath of z's over it.
+    let zs: String = (0..3)
+        .map(|i| if i < frame % 4 { "z " } else { "  " })
+        .collect();
+
+    // Interior rows 0..3: sky and the three sheep rows.
+    let mut rows: Vec<String> = Vec::with_capacity(BADGE_H);
+    rows.push(format!("{border}╭{}╮\x1b[0m", "─".repeat(iw)));
+    for r in 0..4usize {
+        let mut pieces: Vec<(i32, &str)> = Vec::new();
+        if r == 0 {
+            pieces.push((2, zs.as_str()));
+        }
+        match r as i32 - sprite_top {
+            0 => pieces.push((x, SHEEP_WOOL)),
+            1 => pieces.push((x, SHEEP_FACE)),
+            2 => pieces.push((x, SHEEP_LEGS[legs])),
+            _ => {}
+        }
+        let has_sheep = r as i32 >= sprite_top && r as i32 <= sprite_top + 2;
+        let style = if has_sheep { sheep_style } else { sky_style };
+        rows.push(format!("{border}│{style}{}{border}│\x1b[0m", cell_row(iw, &pieces)));
+    }
+    // The ground, with the fence post standing on it.
+    let mut ground: Vec<char> = std::iter::repeat_n('▁', iw).collect();
+    if let Some(cell) = ground.get_mut(fence as usize) {
+        *cell = '╥';
+    }
+    let ground: String = ground.into_iter().collect();
+    rows.push(format!("{border}│{ground_style}{ground}{border}│\x1b[0m"));
+    rows.push(format!(
+        "{border}│{caption_style}{}{border}│\x1b[0m",
+        center(iw, &format!("asleep  ·  {hint}"))
+    ));
+    rows.push(format!("{border}╰{}╯\x1b[0m", "─".repeat(iw)));
+
+    for (i, row) in rows.iter().enumerate() {
+        let _ = write!(out, "\x1b[{};{}H{row}", top + i, left);
+    }
+}
+
+/// Lay `pieces` (column, text) into a row of `width` cells, clipping anything
+/// that runs off either edge.
+fn cell_row(width: usize, pieces: &[(i32, &str)]) -> String {
+    let mut cells: Vec<char> = vec![' '; width];
+    for (start, text) in pieces {
+        for (i, ch) in text.chars().enumerate() {
+            let col = start + i as i32;
+            if col >= 0 && (col as usize) < width {
+                cells[col as usize] = ch;
+            }
+        }
+    }
+    cells.into_iter().collect()
+}
+
+fn center(width: usize, text: &str) -> String {
+    let len = text.chars().count();
+    if len >= width {
+        return text.chars().take(width).collect();
+    }
+    let pad = (width - len) / 2;
+    format!("{}{}{}", " ".repeat(pad), text, " ".repeat(width - len - pad))
 }
 
 // Mode-chip styles: CLAUDE = Anthropic orange (#D97757), NORMAL = green,
@@ -261,14 +423,22 @@ fn draw_status(dash: &mut Dash, out: &mut String) {
     } else {
         match dash.mode {
             Mode::Normal => {
-                " j/k move · 1-9 jump · i claude · r rename · e edit · x close · : cmd".to_string()
+                " j/k move · 1-9 jump · i claude · r rename · e edit · Z sleep · x close · : cmd"
+                    .to_string()
             }
             Mode::Insert => {
                 let name = dash
                     .focused()
                     .map(|a| a.meta.display.clone())
                     .unwrap_or_else(|| "—".to_string());
-                format!(" {name}  ·  ^Space normal mode · ^\\ detach")
+                match dash.focused().map(|a| a.power()) {
+                    Some(Power::Asleep) => {
+                        format!(" {name}  ·  asleep · type or ^Space Z to wake and resume")
+                    }
+                    Some(Power::Sleeping) => format!(" {name}  ·  sleeping…"),
+                    Some(Power::Waking) => format!(" {name}  ·  waking — resuming the session…"),
+                    _ => format!(" {name}  ·  ^Space normal mode · ^\\ detach"),
+                }
             }
         }
     };
@@ -288,13 +458,143 @@ fn place_cursor(dash: &Dash, out: &mut String) {
         return; // forms draw their own block cursor glyph
     }
     if let (Mode::Insert, Some(agent)) = (&dash.mode, dash.focused()) {
-        if agent.cursor_visible && agent.exited.is_none() {
+        // A sleeping agent has no process to own the cursor; leaving one
+        // blinking on the frozen screen would look live.
+        if agent.cursor_visible && agent.exited.is_none() && !agent.asleep() {
             let (row, col) = agent.cursor;
             let _ = write!(out, "\x1b[{};{}H\x1b[?25h", row + 1, col + 1 + SIDEBAR_WIDTH);
             return;
         }
     }
     // NORMAL mode / no agent: cursor stays hidden.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Replay the badge's ANSI onto a blank canvas: a tiny terminal, so the
+    /// tests (and a human with --nocapture) see what the pane would show.
+    /// The canvas is deliberately bigger than the pane, so anything drawn
+    /// out of bounds shows up instead of being clipped away.
+    struct Canvas {
+        cells: Vec<Vec<char>>,
+    }
+
+    impl Canvas {
+        fn paint(ansi: &str, w: usize, h: usize) -> Canvas {
+            let mut cells = vec![vec![' '; w]; h];
+            let (mut row, mut col) = (0usize, 0usize);
+            let mut rest = ansi;
+            while !rest.is_empty() {
+                if let Some(after) = rest.strip_prefix('\x1b') {
+                    let body = after.strip_prefix('[').unwrap_or(after);
+                    let end = body.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(0);
+                    if body.as_bytes().get(end) == Some(&b'H') {
+                        let mut parts = body[..end].split(';');
+                        let mut next = || {
+                            parts.next().and_then(|v| v.parse::<usize>().ok()).unwrap_or(1) - 1
+                        };
+                        row = next();
+                        col = next();
+                    }
+                    rest = &body[(end + 1).min(body.len())..];
+                } else {
+                    let upto = rest.find('\x1b').unwrap_or(rest.len());
+                    for ch in rest[..upto].chars() {
+                        if let Some(cell) = cells.get_mut(row).and_then(|r| r.get_mut(col)) {
+                            *cell = ch;
+                        }
+                        col += 1;
+                    }
+                    rest = &rest[upto..];
+                }
+            }
+            Canvas { cells }
+        }
+
+        fn rows(&self) -> Vec<String> {
+            self.cells.iter().map(|r| r.iter().collect::<String>()).collect()
+        }
+
+        /// (row, col) of every painted cell outside the given rectangle.
+        fn outside(&self, rows: usize, cols: std::ops::Range<usize>) -> Vec<(usize, usize)> {
+            let mut stray = Vec::new();
+            for (r, line) in self.cells.iter().enumerate() {
+                for (c, ch) in line.iter().enumerate() {
+                    if *ch != ' ' && (r >= rows || !cols.contains(&c)) {
+                        stray.push((r, c));
+                    }
+                }
+            }
+            stray
+        }
+    }
+
+    fn badge(pane_w: usize, pane_h: u16, frame: u64) -> Canvas {
+        let mut ansi = String::new();
+        draw_sleep_badge(&mut ansi, 1, pane_w, pane_h, 0, frame);
+        Canvas::paint(&ansi, pane_w + 20, pane_h as usize + 4)
+    }
+
+    /// Column (in cells, not bytes — these rows are full of box drawing).
+    fn cell_col(line: &str, needle: &str) -> Option<usize> {
+        line.find(needle).map(|byte| line[..byte].chars().count())
+    }
+
+    #[test]
+    fn sheep_crosses_the_meadow_and_hops_the_fence() {
+        let mut columns: Vec<i32> = Vec::new();
+        let mut hops = 0;
+        for frame in 0..80 {
+            let rows = badge(46, 14, frame).rows();
+            let fence = rows.iter().find(|r| r.contains('╥')).expect("a fence to jump");
+            let fence_col = cell_col(fence, "╥").unwrap() as i32;
+            let ground = rows.iter().position(|r| r.contains('▁')).unwrap();
+            let Some(face) = rows.iter().position(|r| r.contains("(o.o)")) else { continue };
+            let col = cell_col(&rows[face], "(o.o)").unwrap() as i32;
+            columns.push(col);
+            // Grounded, the face sits two rows above the ground; airborne,
+            // three.
+            let airborne = ground - face == 3;
+            if airborne {
+                hops += 1;
+            }
+            // The invariant that makes it a fence and not a decoration.
+            let over_the_post = (col..col + SHEEP_W).contains(&fence_col);
+            assert!(
+                !over_the_post || airborne,
+                "frame {frame}: the sheep walks through the fence \
+                 (sheep at {col}, post at {fence_col})"
+            );
+        }
+        assert!(columns.len() > 20, "the sheep is on screen most of the time");
+        let forward = columns.windows(2).filter(|w| w[1] > w[0]).count();
+        assert!(forward >= columns.len() - 2, "the sheep runs one way: {columns:?}");
+        assert!(hops >= 5, "it clears the fence in an arc, not a twitch");
+    }
+
+    #[test]
+    fn badge_stays_inside_every_pane_a_terminal_can_give_us() {
+        for w in 0..48usize {
+            for h in 0..14u16 {
+                let canvas = badge(w, h, 7);
+                let stray = canvas.outside(h as usize, 0..w);
+                assert!(stray.is_empty(), "badge escapes a {w}x{h} pane at {stray:?}");
+            }
+        }
+    }
+
+    /// `cargo test sheep -- --nocapture` to watch the flock.
+    #[test]
+    fn sheep_frames() {
+        for frame in 17..27 {
+            for line in badge(44, 12, frame).rows() {
+                println!("|{}|", line.trim_end());
+            }
+            println!();
+        }
+    }
 }
 
 /// Convenience used by tests: render one span row to a plain string.
