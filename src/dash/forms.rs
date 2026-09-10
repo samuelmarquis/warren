@@ -377,6 +377,18 @@ fn poll_spawn_job(dash: &mut Dash) {
     }
 }
 
+/// Where the new-agent form's fields landed on screen, recorded as it is
+/// drawn so a click can be turned back into a field. 0-based cells, like the
+/// mouse reports them.
+#[derive(Default)]
+pub struct FormGeom {
+    /// Row, the field drawn on it, and — for a row of chips — the column
+    /// span of each option.
+    pub fields: Vec<(u16, NField, Vec<(u16, u16)>)>,
+    /// Row, and which session it offers.
+    pub sessions: Vec<(u16, usize)>,
+}
+
 pub struct EditForm {
     pub field: usize, // 0 = title, 1 = color
     pub title: String,
@@ -607,17 +619,21 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
     );
 
     // Where it runs decides what everything under it means, so it leads.
+    let mut geom = FormGeom::default();
     let mut row = 4u16;
     if !form.machines.is_empty() {
         let machines = form.machine_labels();
-        draw_choice(out, row, x0, "Machine", &machines, form.machine, active == NField::Machine);
+        let chips =
+            draw_choice(out, row, x0, "Machine", &machines, form.machine, active == NField::Machine);
+        geom.fields.push((row - 1, NField::Machine, chips));
         row += 2;
     }
     // Which harness, then how to start it.
     let kinds: Vec<&str> = KINDS.iter().map(|k| k.as_str()).collect();
-    draw_choice(out, row, x0, "Agent", &kinds, form.kind, active == NField::Kind);
+    let chips = draw_choice(out, row, x0, "Agent", &kinds, form.kind, active == NField::Kind);
+    geom.fields.push((row - 1, NField::Kind, chips));
     row += 2;
-    draw_choice(
+    let chips = draw_choice(
         out,
         row,
         x0,
@@ -626,6 +642,7 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
         form.mode as usize,
         active == NField::Mode,
     );
+    geom.fields.push((row - 1, NField::Mode, chips));
     row += 2;
 
     match form.mode {
@@ -651,6 +668,7 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
                 let mut label = format!("{marker} {} \u{b7} {}", short_path(&sess.cwd), sess.title);
                 label.truncate(pane_w.saturating_sub(4));
                 let _ = write!(out, "\x1b[{};{}H{style}{label}\x1b[0m", row, x0 + 4);
+                geom.sessions.push((row - 1, i));
                 row += 1;
             }
             let more = sessions.len().saturating_sub(first + visible);
@@ -667,23 +685,31 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
             row += 2;
         }
         MODE_CONTINUE => {
+            geom.fields.push((row - 1, NField::Root, Vec::new()));
             row = draw_text_field(out, row, x0, pane_h, "Root dir", &form.root, active == NField::Root, insert);
         }
         _ => {
+            geom.fields.push((row - 1, NField::Title, Vec::new()));
             row = draw_text_field(out, row, x0, pane_h, "Title", &form.title, active == NField::Title, insert);
+            geom.fields.push((row - 1, NField::Root, Vec::new()));
             row = draw_text_field(out, row, x0, pane_h, "Root dir", &form.root, active == NField::Root, insert);
         }
     }
+    geom.fields.push((row - 1, NField::Sys, Vec::new()));
     row = draw_text_field(out, row, x0, pane_h, "Sys prompt", &form.sys, active == NField::Sys, insert);
+    geom.fields.push((row - 1, NField::Extra, Vec::new()));
     row = draw_text_field(out, row, x0, pane_h, "Extra args", &form.extra, active == NField::Extra, insert);
+    geom.fields.push((row - 1, NField::Color, Vec::new()));
 
     dash.palette_geom =
         draw_color_field(out, row, x0, pane_w, pane_h, form.color, active == NField::Color);
+    dash.form_geom = geom;
 }
 
 // ----------------------------------------------------------------- edit form
 
-/// One row of `[ option ]` chips, the form's h/l selector.
+/// One row of `[ option ]` chips, the form's h/l selector. Returns where
+/// each chip landed, 0-based and inclusive, so it can also be clicked.
 fn draw_choice(
     out: &mut String,
     row: u16,
@@ -692,12 +718,19 @@ fn draw_choice(
     options: &[&str],
     selected: usize,
     active: bool,
-) {
+) -> Vec<(u16, u16)> {
     let _ = write!(out, "\x1b[{row};{}H{}{label:<10}\x1b[0m  ", x0 + 2, field_label(active));
+    // The label is padded to ten, then two spaces: chips start after that.
+    let mut at = x0 + 2 + 10 + 2;
+    let mut spans = Vec::with_capacity(options.len());
     for (i, option) in options.iter().enumerate() {
         let style = if i == selected { "\x1b[7m" } else { "\x1b[2m" };
         let _ = write!(out, "{style}[ {option} ]\x1b[0m ");
+        let width = option.chars().count() as u16 + 4; // "[ " + option + " ]"
+        spans.push((at - 1, at + width - 2)); // 1-based draw -> 0-based cells
+        at += width + 1;
     }
+    spans
 }
 
 pub fn edit_key(dash: &mut Dash, bytes: &[u8]) -> usize {
@@ -850,6 +883,84 @@ fn draw_text_field(
         label
     );
     row + 2
+}
+
+/// A click anywhere on a form: the field it landed on, the chip under the
+/// pointer if that field offers any, or a session in the resume picker —
+/// and the colour palette, which was always clickable. Mouse and keyboard
+/// reach the same places, which is the rule the sidebar already follows.
+pub fn form_click(dash: &mut Dash, row: u16, col: u16) {
+    if dash.editform.is_some() || !dash.on_newform() {
+        palette_click(dash, row, col);
+        return;
+    }
+    if let Some(&(_, idx)) = dash.form_geom.sessions.iter().find(|(r, _)| *r == row) {
+        dash.newform.sess_sel = idx;
+        focus_field(dash, NField::List);
+        dash.form_dirty = true;
+        dash.enter_insert();
+        return;
+    }
+    let hit = dash
+        .form_geom
+        .fields
+        .iter()
+        .find(|(r, ..)| *r == row)
+        .map(|(_, field, chips)| (*field, chips.iter().position(|(a, b)| col >= *a && col <= *b)));
+    let Some((field, chip)) = hit else {
+        palette_click(dash, row, col);
+        return;
+    };
+    // The chip first: choosing a mode changes which fields there are, and
+    // the field to land on has to be found in the list that results.
+    if let Some(option) = chip {
+        choose(dash, field, option);
+    }
+    focus_field(dash, field);
+    dash.form_dirty = true;
+    dash.enter_insert();
+}
+
+/// Wheel over the form: the resume picker is the one list here to scroll.
+pub fn form_wheel(dash: &mut Dash, down: bool) {
+    if !dash.on_newform() || dash.newform.mode != MODE_RESUME {
+        return;
+    }
+    let len = dash.newform.sessions.as_ref().map(Vec::len).unwrap_or(0);
+    if len == 0 {
+        return;
+    }
+    let sel = dash.newform.sess_sel;
+    dash.newform.sess_sel = if down { (sel + 1).min(len - 1) } else { sel.saturating_sub(1) };
+    focus_field(dash, NField::List);
+    dash.form_dirty = true;
+}
+
+fn focus_field(dash: &mut Dash, field: NField) {
+    if let Some(pos) = dash.newform.fields().iter().position(|f| *f == field) {
+        dash.newform.field = pos;
+    }
+}
+
+/// Pick one option of a chip row, exactly as `h`/`l` would.
+fn choose(dash: &mut Dash, field: NField, option: usize) {
+    let form = &mut dash.newform;
+    match field {
+        NField::Machine if option <= form.machines.len() && option != form.machine => {
+            form.machine = option;
+            form.follow_machine();
+            form.forget_sessions();
+        }
+        NField::Kind if option < KINDS.len() && option != form.kind => {
+            form.kind = option;
+            form.forget_sessions();
+        }
+        NField::Mode if option < 3 => form.mode = option as u8,
+        _ => return,
+    }
+    if dash.newform.mode == MODE_RESUME {
+        ensure_sessions(dash);
+    }
 }
 
 /// Click on a palette swatch (0-based screen cell). Routes to whichever form

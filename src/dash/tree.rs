@@ -18,12 +18,17 @@ pub struct Entry<'a> {
     /// ssh destination, or None for this machine.
     pub host: Option<&'a str>,
     pub cwd: &'a str,
+    /// Home directory on the machine this agent is on — what makes a folder
+    /// a project rather than a path. Empty if that machine hasn't said.
+    pub home: &'a str,
 }
 
 /// One machine, as the tree needs it.
 pub struct HostView<'a> {
     pub dest: &'a str,
     pub label: &'a str,
+    /// That machine's home directory, if it reported one.
+    pub home: &'a str,
     /// None while it is answering; otherwise what to say on its row.
     pub status: Option<String>,
     /// Rows kept from when it last answered, used only while it is not.
@@ -42,6 +47,10 @@ pub struct Section {
 pub struct Folder {
     pub label: String,
     pub cwd: String,
+    /// The same path as the machine it is on reads it (`~/Developer`), which
+    /// is what says whether two folders are the same place or merely read
+    /// the same.
+    pub rel: String,
     /// Position in the whole sidebar, 1-based — what you type.
     pub number: usize,
     pub collapsed: bool,
@@ -67,18 +76,70 @@ pub enum Row {
     NewAgent,
 }
 
-/// A working directory's own name: the last component, `~` for the home
-/// directory itself, and never a path.
-fn folder_label(cwd: &str) -> String {
-    if cwd.is_empty() {
+/// The folder a working directory belongs to: under home, the first thing
+/// *inside* home — so every checkout under `~/Developer` is one folder, not
+/// one folder each. Home itself is its own folder, and a directory somewhere
+/// else on the machine is still just itself.
+///
+/// Always a prefix of `cwd`, so this costs nothing to compute: the sidebar
+/// works it out for every agent on every frame.
+pub fn folder_key<'a>(cwd: &'a str, home: &str) -> &'a str {
+    let cwd = cwd.trim_end_matches('/');
+    let home = home.trim_end_matches('/');
+    if home.is_empty() || cwd == home {
+        return cwd;
+    }
+    let Some(rest) = cwd.strip_prefix(home).and_then(|r| r.strip_prefix('/')) else {
+        return cwd; // outside home entirely
+    };
+    match rest.find('/') {
+        Some(i) => &cwd[..home.len() + 1 + i],
+        None => cwd, // already directly inside home
+    }
+}
+
+/// Where home probably is, for a machine that has not said: the first two
+/// components of a `/Users` or `/home` path. Only ever used to group rows,
+/// and only for a machine running a warren too old to report its own home.
+fn guess_home(cwd: &str) -> &str {
+    let mut parts = cwd.split('/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(""), Some(base @ ("Users" | "home")), Some(user)) if !user.is_empty() => {
+            &cwd[..1 + base.len() + 1 + user.len()]
+        }
+        _ => "",
+    }
+}
+
+fn home_or_guess<'a>(cwd: &'a str, home: &'a str) -> &'a str {
+    if home.is_empty() { guess_home(cwd) } else { home }
+}
+
+/// A folder's own name: the last component of its path, `~` for home itself,
+/// and never a path.
+/// A folder's path as its own machine reads it: `~/Developer` here is
+/// `~/Developer` over there too, whoever's home it happens to be.
+fn relative_to_home(key: &str, home: &str) -> String {
+    let home = home.trim_end_matches('/');
+    if home.is_empty() {
+        return key.to_string();
+    }
+    match key.strip_prefix(home) {
+        Some("") => "~".to_string(),
+        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+        _ => key.to_string(),
+    }
+}
+
+fn folder_label(key: &str, home: &str) -> String {
+    if key.is_empty() {
         return "…".to_string(); // meta hasn't landed yet
     }
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() && cwd == home {
-            return "~".to_string();
-        }
+    let home = home.trim_end_matches('/');
+    if !home.is_empty() && key == home {
+        return "~".to_string();
     }
-    match cwd.trim_end_matches('/').rsplit('/').next() {
+    match key.rsplit('/').next() {
         Some(name) if !name.is_empty() => name.to_string(),
         _ => "/".to_string(),
     }
@@ -121,7 +182,8 @@ pub fn build(
 
     for entry in entries {
         let s = section_of(entry.host);
-        push_item(&mut sections[s].folders, entry.cwd, Item::Live(entry.index), collapsed);
+        let home = home_or_guess(entry.cwd, entry.home);
+        push_item(&mut sections[s].folders, entry.cwd, home, Item::Live(entry.index), collapsed);
     }
     // A machine that isn't answering shows what it had, greyed.
     for (i, host) in hosts.iter().enumerate() {
@@ -129,7 +191,8 @@ pub fn build(
             continue;
         }
         for (g, ghost) in host.ghosts.iter().enumerate() {
-            push_item(&mut sections[i + 1].folders, &ghost.cwd, Item::Ghost(i, g), collapsed);
+            let home = home_or_guess(&ghost.cwd, host.home);
+            push_item(&mut sections[i + 1].folders, &ghost.cwd, home, Item::Ghost(i, g), collapsed);
         }
     }
 
@@ -145,14 +208,22 @@ pub fn build(
     sections
 }
 
-fn push_item(folders: &mut Vec<Folder>, cwd: &str, item: Item, collapsed: &HashSet<String>) {
+fn push_item(
+    folders: &mut Vec<Folder>,
+    cwd: &str,
+    home: &str,
+    item: Item,
+    collapsed: &HashSet<String>,
+) {
+    let key = folder_key(cwd, home);
     match folders.last_mut() {
-        Some(f) if f.cwd == cwd => f.items.push(item),
+        Some(f) if f.cwd == key => f.items.push(item),
         _ => folders.push(Folder {
-            label: folder_label(cwd),
-            cwd: cwd.to_string(),
+            label: folder_label(key, home),
+            cwd: key.to_string(),
+            rel: relative_to_home(key, home),
             number: 0,
-            collapsed: collapsed.contains(cwd),
+            collapsed: collapsed.contains(key),
             items: vec![item],
         }),
     }
@@ -160,17 +231,26 @@ fn push_item(folders: &mut Vec<Folder>, cwd: &str, item: Item, collapsed: &HashS
 
 /// Labels that would read the same take one parent component to tell them
 /// apart — `phylo/src/`, not the path that got you there. Applied across the
-/// whole sidebar, so two machines with a `src/` each are still distinct.
+/// whole sidebar, so two machines with a different `src/` each are still
+/// distinct — but the same place on two machines is not two places, and
+/// `~/Developer` is `~/Developer` whoever's home it is: spelling out whose
+/// would say nothing the heading above the row has not already said.
 pub fn disambiguate(sections: &mut [Section]) {
-    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut places: std::collections::HashMap<&str, HashSet<&str>> =
+        std::collections::HashMap::new();
     for section in sections.iter() {
         for folder in &section.folders {
-            *seen.entry(folder.label.clone()).or_insert(0) += 1;
+            places.entry(folder.label.as_str()).or_default().insert(folder.rel.as_str());
         }
     }
+    let ambiguous: HashSet<String> = places
+        .iter()
+        .filter(|(_, places)| places.len() > 1)
+        .map(|(label, _)| (*label).to_string())
+        .collect();
     for section in sections.iter_mut() {
         for folder in &mut section.folders {
-            if seen.get(&folder.label).copied().unwrap_or(0) < 2 {
+            if !ambiguous.contains(&folder.label) {
                 continue;
             }
             let trimmed = folder.cwd.trim_end_matches('/');
@@ -265,9 +345,9 @@ mod tests {
     #[test]
     fn one_machine_needs_no_heading() {
         let entries = vec![
-            Entry { index: 0, host: None, cwd: "/w/research" },
-            Entry { index: 1, host: None, cwd: "/w/research" },
-            Entry { index: 2, host: None, cwd: "/w/phylo" },
+            Entry { index: 0, host: None, cwd: "/w/research", home: "" },
+            Entry { index: 1, host: None, cwd: "/w/research", home: "" },
+            Entry { index: 2, host: None, cwd: "/w/phylo", home: "" },
         ];
         let sections = build(&entries, &[], &HashSet::new(), "here");
         assert_eq!(
@@ -278,12 +358,12 @@ mod tests {
 
     #[test]
     fn folder_numbers_run_through_the_machines() {
-        let hosts = [HostView { dest: "smq", label: "smq", status: None, ghosts: &[] }];
+        let hosts = [HostView { dest: "smq", label: "smq", home: "", status: None, ghosts: &[] }];
         let entries = vec![
-            Entry { index: 0, host: None, cwd: "/w/research" },
-            Entry { index: 1, host: None, cwd: "/w/phylo" },
-            Entry { index: 2, host: Some("smq"), cwd: "/r/games" },
-            Entry { index: 3, host: Some("smq"), cwd: "/r/mods" },
+            Entry { index: 0, host: None, cwd: "/w/research", home: "" },
+            Entry { index: 1, host: None, cwd: "/w/phylo", home: "" },
+            Entry { index: 2, host: Some("smq"), cwd: "/r/games", home: "" },
+            Entry { index: 3, host: Some("smq"), cwd: "/r/mods", home: "" },
         ];
         let sections = build(&entries, &hosts, &HashSet::new(), "here");
         assert_eq!(
@@ -305,10 +385,11 @@ mod tests {
         let hosts = [HostView {
             dest: "smq",
             label: "smq",
+            home: "",
             status: Some("reconnecting…".into()),
             ghosts: &ghosts,
         }];
-        let entries = vec![Entry { index: 0, host: None, cwd: "/w/research" }];
+        let entries = vec![Entry { index: 0, host: None, cwd: "/w/research", home: "" }];
         let sections = build(&entries, &hosts, &HashSet::new(), "here");
         assert_eq!(
             shape(&sections),
@@ -320,10 +401,10 @@ mod tests {
 
     #[test]
     fn same_named_directories_on_two_machines_stay_distinct() {
-        let hosts = [HostView { dest: "smq", label: "smq", status: None, ghosts: &[] }];
+        let hosts = [HostView { dest: "smq", label: "smq", home: "", status: None, ghosts: &[] }];
         let entries = vec![
-            Entry { index: 0, host: None, cwd: "/w/phylo/src" },
-            Entry { index: 1, host: Some("smq"), cwd: "/r/warren/src" },
+            Entry { index: 0, host: None, cwd: "/w/phylo/src", home: "" },
+            Entry { index: 1, host: Some("smq"), cwd: "/r/warren/src", home: "" },
         ];
         let mut sections = build(&entries, &hosts, &HashSet::new(), "here");
         disambiguate(&mut sections);
@@ -331,10 +412,86 @@ mod tests {
         assert_eq!(sections[1].folders[0].label, "warren/src");
     }
 
+    /// A folder is a place you keep projects, not a project: everything
+    /// under ~/Developer is one row, however many checkouts deep it goes.
+    #[test]
+    fn folders_are_the_things_directly_inside_home() {
+        let home = "/Users/sam";
+        let entries = vec![
+            Entry { index: 0, host: None, cwd: "/Users/sam/Developer/warren", home },
+            Entry { index: 1, host: None, cwd: "/Users/sam/Developer/Phylogen", home },
+            Entry { index: 2, host: None, cwd: "/Users/sam/Developer/plugins/dsp/src", home },
+            Entry { index: 3, host: None, cwd: "/Users/sam/Research", home },
+            // Home itself, and somewhere else on the machine entirely.
+            Entry { index: 4, host: None, cwd: "/Users/sam", home },
+            Entry { index: 5, host: None, cwd: "/private/tmp", home },
+        ];
+        let sections = build(&entries, &[], &HashSet::new(), "here");
+        assert_eq!(
+            shape(&sections),
+            [
+                "1 Developer/",
+                "  live 0",
+                "  live 1",
+                "  live 2",
+                "2 Research/",
+                "  live 3",
+                "3 ~/",
+                "  live 4",
+                "4 tmp/",
+                "  live 5",
+                "+",
+            ]
+        );
+        // The folder is the directory, so folding it folds all three.
+        assert_eq!(sections[0].folders[0].cwd, "/Users/sam/Developer");
+    }
+
+    #[test]
+    fn a_home_no_one_reported_is_guessed_from_the_path() {
+        // An older warren over there says no home; the paths still do.
+        let entries = vec![
+            Entry { index: 0, host: Some("smq"), cwd: "/Users/critter/Developer/warren", home: "" },
+            Entry { index: 1, host: Some("smq"), cwd: "/home/critter/Games/spork", home: "" },
+            // Nothing to guess from: the directory is its own folder.
+            Entry { index: 2, host: Some("smq"), cwd: "/opt/pmk/env", home: "" },
+        ];
+        let hosts = [HostView { dest: "smq", label: "smq", home: "", status: None, ghosts: &[] }];
+        let sections = build(&entries, &hosts, &HashSet::new(), "here");
+        assert_eq!(
+            shape(&sections),
+            ["[smq]", "1 Developer/", "  live 0", "2 Games/", "  live 1", "3 env/", "  live 2", "+"]
+        );
+    }
+
+    /// The same place on two machines is one place said twice, and the
+    /// heading already says which is which — but two different `src/`
+    /// still have to be told apart.
+    #[test]
+    fn the_same_folder_on_two_machines_is_not_two_folders() {
+        let entries = vec![
+            Entry { index: 0, host: None, cwd: "/Users/sam/Developer/warren", home: "/Users/sam" },
+            Entry {
+                index: 1,
+                host: Some("smq"),
+                cwd: "/Users/critter/Developer/warren",
+                home: "/Users/critter",
+            },
+        ];
+        let hosts =
+            [HostView { dest: "smq", label: "smq", home: "/Users/critter", status: None, ghosts: &[] }];
+        let mut sections = build(&entries, &hosts, &HashSet::new(), "here");
+        disambiguate(&mut sections);
+        assert_eq!(
+            shape(&sections),
+            ["[here]", "1 Developer/", "  live 0", "[smq]", "2 Developer/", "  live 1", "+"]
+        );
+    }
+
     #[test]
     fn folding_hides_agents_and_a_quiet_machine_disappears() {
-        let hosts = [HostView { dest: "smq", label: "smq", status: None, ghosts: &[] }];
-        let entries = vec![Entry { index: 0, host: None, cwd: "/w/a" }];
+        let hosts = [HostView { dest: "smq", label: "smq", home: "", status: None, ghosts: &[] }];
+        let entries = vec![Entry { index: 0, host: None, cwd: "/w/a", home: "" }];
         let collapsed: HashSet<String> = ["/w/a".to_string()].into_iter().collect();
         let sections = build(&entries, &hosts, &collapsed, "here");
         // smq is answering and has nothing running: no heading for it.

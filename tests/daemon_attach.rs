@@ -1192,3 +1192,75 @@ fn the_form_creates_an_agent_on_another_machine() {
     let there = std::fs::read_dir(far.dir.join("run")).unwrap().flatten().count();
     assert_eq!(there, 2, "spork and the new one, over there");
 }
+
+/// The new-agent form is as clickable as the sidebar: a chip picks its
+/// option, a field row takes the cursor, and neither needs the keyboard to
+/// have found it first.
+#[test]
+fn the_new_agent_form_answers_the_mouse() {
+    let far = TestHome::new("mousefar");
+    let near = TestHome::new("mousenear");
+    let outer = TestHome::new("mouseout");
+
+    new_agent_in(&far, "spork", &far.dir.join("Games"), "sleep 300");
+    new_agent_in(&near, "svm", &near.dir.join("Research"), "sleep 300");
+    std::fs::write(near.dir.join("hosts"), format!("smq  {BIN}\n")).unwrap();
+
+    let shim = fake_ssh(&near, &far);
+    let dash_cmd =
+        format!("WARREN_HOME={} WARREN_SSH={} {} up", near.dir.display(), shim.display(), BIN);
+    new_agent(&outer, "dash", &dash_cmd);
+    let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 24);
+
+    let grid = std::cell::RefCell::new(Vec::<String>::new());
+    apply_frame(&grid, &snap);
+    let up = viewer.await_frame(20_000, |m| {
+        apply_frame(&grid, m);
+        sidebar_of(&grid).iter().any(|r| r.contains("spork"))
+    });
+    assert!(up.is_some(), "both machines are up: {:?}", sidebar_of(&grid));
+
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x00n")));
+    let form = viewer.await_frame(10_000, |m| {
+        apply_frame(&grid, m);
+        grid.borrow().iter().any(|r| r.contains("[ smq ]"))
+    });
+    assert!(form.is_some(), "the machine chips are drawn: {:?}", grid.borrow().clone());
+
+    // Click the far machine's chip, wherever the form happened to draw it.
+    let (row, col) = find_in_grid(&grid, "[ smq ]").expect("the smq chip is on screen");
+    click(&mut viewer, row + 1, col + 2); // inside the chip, 1-based
+    let picked = viewer.await_frame(10_000, |m| {
+        apply_frame(&grid, m);
+        grid.borrow().iter().any(|r| r.contains("new claude agent on smq"))
+    });
+    assert!(picked.is_some(), "clicking a chip picks it: {:?}", grid.borrow().clone());
+
+    // Click a text field: the cursor goes there, with no tabbing to reach it.
+    let (row, _) = find_in_grid(&grid, "Sys prompt").expect("the field is on screen");
+    click(&mut viewer, row + 1, 30);
+    let moved = viewer.await_frame(10_000, |m| {
+        apply_frame(&grid, m);
+        grid.borrow()
+            .get(row)
+            .map(|r| r.contains("Sys prompt") && r.trim_end().ends_with('\u{2588}'))
+            .unwrap_or(false)
+    });
+    assert!(moved.is_some(), "clicking a field focuses it: {:?}", grid.borrow().get(row));
+}
+
+/// Where a string sits on the dashboard's screen, 0-based.
+fn find_in_grid(grid: &std::cell::RefCell<Vec<String>>, needle: &str) -> Option<(usize, usize)> {
+    grid.borrow()
+        .iter()
+        .enumerate()
+        .find_map(|(r, line)| line.find(needle).map(|c| (r, line[..c].chars().count())))
+}
+
+/// One left-button click, as a terminal reports it: SGR, 1-based.
+fn click(viewer: &mut Viewer, row: usize, col: usize) {
+    let press = format!("\x1b[<0;{col};{row}M");
+    let release = format!("\x1b[<0;{col};{row}m");
+    viewer.send(&ToDaemon::Input(proto::b64_encode(press.as_bytes())));
+    viewer.send(&ToDaemon::Input(proto::b64_encode(release.as_bytes())));
+}

@@ -388,10 +388,13 @@ fn handle_mouse(dash: &mut Dash, ev: MouseReport) {
         return;
     }
 
-    // Over a form: palette swatch clicks.
+    // Over a form: fields, chips, sessions and swatches are all clickable,
+    // and the wheel scrolls the one list a form has.
     if dash.editform.is_some() || dash.on_newform() {
-        if ev.press && !motion && !wheel && button == 0 {
-            forms::palette_click(dash, ev.row, ev.col);
+        if wheel && ev.press {
+            forms::form_wheel(dash, ev.code & 1 == 1);
+        } else if ev.press && !motion && !wheel && button == 0 {
+            forms::form_click(dash, ev.row, ev.col);
         }
         return;
     }

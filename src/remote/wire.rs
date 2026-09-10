@@ -23,11 +23,20 @@ const PIPE_CAP: usize = 4 * 1024 * 1024;
 const ROSTER_TICK: Duration = Duration::from_millis(750);
 
 /// `warren __roster` — one line per live agent, reprinted whenever the set
-/// changes, until stdout closes. The first line names the protocol build, so
-/// the near side can say "that machine runs an older warren" instead of
-/// discovering it as a corrupt frame later.
+/// changes, until stdout closes. The first line names the protocol build and
+/// this machine's home, so the near side can say "that machine runs an older
+/// warren" instead of discovering it as a corrupt frame later, and can read
+/// our paths the way we do.
 pub fn cmd_roster() -> Result<()> {
-    println!("warren {} {}", env!("CARGO_PKG_VERSION"), crate::proto::WIRE_VERSION);
+    // Third field is this machine's home: the near side groups our agents by
+    // what is directly inside it, and only we know where it is. An older
+    // near side reads the whole line as a version and is none the wiser.
+    println!(
+        "warren {} {} {}",
+        env!("CARGO_PKG_VERSION"),
+        crate::proto::WIRE_VERSION,
+        std::env::var("HOME").unwrap_or_default()
+    );
     flush()?;
 
     // `None` until the first block goes out: a machine with no agents has a

@@ -62,6 +62,10 @@ pub struct Host {
     pub ghosts: Vec<Ghost>,
     /// What the far side says it runs, once it has said so.
     pub version: Option<String>,
+    /// That machine's home directory, which its roster reports so paths from
+    /// it can be read the way it reads them. A warren too old to say leaves
+    /// this None and the sidebar guesses from the paths themselves.
+    pub home: Option<String>,
 
     watcher: Option<Child>,
     /// Poll key of the watcher's stdout, while one is registered.
@@ -84,6 +88,7 @@ impl Host {
             roster: Vec::new(),
             ghosts: Vec::new(),
             version: None,
+            home: None,
             watcher: None,
             key: None,
             buf: String::new(),
@@ -381,7 +386,12 @@ impl Hosts {
             let line: String = host.buf.drain(..=nl).collect();
             let line = line.trim_end().to_string();
             if let Some(rest) = line.strip_prefix("warren ") {
-                host.version = Some(rest.to_string());
+                // "<version> <wire>", and since this warren, " <home>".
+                let mut fields = rest.splitn(3, ' ');
+                let vers: String =
+                    [fields.next().unwrap_or(""), fields.next().unwrap_or("")].join(" ");
+                host.version = Some(vers.trim().to_string());
+                host.home = fields.next().map(str::to_string).filter(|h| !h.is_empty());
                 // Answering at all is enough to stop saying "connecting…",
                 // but only when there is nothing on screen to contradict:
                 // with rows already known, the block that follows owns them,

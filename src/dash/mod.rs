@@ -73,10 +73,15 @@ pub struct Dash {
     pub collapsed: HashSet<String>,
     /// Other machines whose agents share this sidebar.
     pub hosts: crate::remote::Hosts,
+    /// This machine's home directory, read once: folders are the things
+    /// directly inside it, and working that out happens on every frame.
+    pub here_home: String,
     /// What to call this machine once there is another one to tell it from.
     pub here: String,
     /// 0-based (row, col, box_w, box_h) of the color grid, when on screen.
     pub palette_geom: Option<(u16, u16, u16, u16)>,
+    /// Where the new-agent form's fields last landed, for the mouse.
+    pub form_geom: forms::FormGeom,
     /// Dashboard start, the clock the sleeping-sheep animation runs on.
     pub started: Instant,
     /// Animation frame the sleep badge was last drawn at.
@@ -156,6 +161,7 @@ impl Dash {
                 index,
                 host: a.host.as_deref(),
                 cwd: a.meta.cwd.as_str(),
+                home: self.home_for(a.host.as_deref()),
             })
             .collect();
         let hosts: Vec<tree::HostView> = self
@@ -165,6 +171,7 @@ impl Dash {
             .map(|h| tree::HostView {
                 dest: &h.dest,
                 label: &h.label,
+                home: h.home.as_deref().unwrap_or(""),
                 status: match &h.state {
                     crate::remote::HostState::Live => None,
                     crate::remote::HostState::Connecting => Some("connecting…".to_string()),
@@ -178,9 +185,32 @@ impl Dash {
         sections
     }
 
+    /// The home directory `cwd` should be read against: ours for an agent
+    /// here, and for one over there whatever that machine reported. A
+    /// machine that reported none leaves this empty and the sidebar guesses
+    /// from the path itself.
+    pub fn home_for(&self, host: Option<&str>) -> &str {
+        match host {
+            None => &self.here_home,
+            Some(dest) => self.hosts.get(dest).and_then(|h| h.home.as_deref()).unwrap_or(""),
+        }
+    }
+
+    /// The folder row an agent sits under — what the collapse set is keyed
+    /// by, and what sorting groups on.
+    pub fn folder_of(&self, idx: usize) -> &str {
+        match self.agents.get(idx) {
+            Some(a) => tree::folder_key(&a.meta.cwd, self.home_for(a.host.as_deref())),
+            None => "",
+        }
+    }
+
     /// Is this agent's row on screen (its folder open, its machine answering)?
     fn shown(&self, idx: usize) -> bool {
-        self.agents.get(idx).map(|a| !self.collapsed.contains(&a.meta.cwd)).unwrap_or(true)
+        if idx >= self.agents.len() {
+            return true;
+        }
+        !self.collapsed.contains(self.folder_of(idx))
     }
 
     /// Fold a folder away, or open it. Its agents keep running either way.
@@ -207,9 +237,9 @@ impl Dash {
         match tree::locate(&sections, folder as usize, agent as usize) {
             Ok(index) => {
                 // Jumping into a folded folder opens it — you asked to go there.
-                let cwd = self.agents[index].meta.cwd.clone();
+                let folder = self.folder_of(index).to_string();
                 drop(sections);
-                if self.collapsed.remove(&cwd) {
+                if self.collapsed.remove(&folder) {
                     self.sidebar_dirty = true;
                 }
                 self.set_focus(index);
@@ -419,7 +449,9 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
         collapsed: HashSet::new(),
         hosts: crate::remote::Hosts::default(),
         here: local_hostname(),
+        here_home: std::env::var("HOME").unwrap_or_default(),
         palette_geom: None,
+        form_geom: forms::FormGeom::default(),
         started: Instant::now(),
         sheep_frame: u64::MAX,
         cols,
@@ -794,43 +826,78 @@ fn sort_agents(dash: &mut Dash) {
     }
     // A folder ranks by its earliest agent, so swapping two agents inside one
     // can never reshuffle the folders around it. This runs every frame, so
-    // the already-sorted path (nearly all of them) allocates nothing.
+    // the already-sorted path (nearly all of them) allocates nothing — which
+    // is why a folder is a slice of the directory it groups, not a new string.
+    fn folder_of<'a>(a: &'a AgentConn, homes: &HashMap<Option<&str>, &str>) -> &'a str {
+        let home = homes.get(&a.host.as_deref()).copied().unwrap_or("");
+        tree::folder_key(&a.meta.cwd, home)
+    }
+    fn machine_of(agent: &AgentConn, hosts: &[String]) -> usize {
+        // This machine first, then the others in the order the file lists.
+        match &agent.host {
+            None => 0,
+            Some(dest) => hosts.iter().position(|h| h == dest).map(|i| i + 1).unwrap_or(usize::MAX),
+        }
+    }
     fn order<'a>(
         agent: &'a AgentConn,
         rank: &HashMap<(Option<&str>, &str), (u8, u64)>,
         hosts: &[String],
+        homes: &HashMap<Option<&str>, &str>,
     ) -> (usize, (u8, u64), &'a str, u8, u64) {
-        let key = (agent.host.as_deref(), agent.meta.cwd.as_str());
+        let key = (agent.host.as_deref(), folder_of(agent, homes));
         let folder = rank.get(&key).copied().unwrap_or((u8::MAX, u64::MAX));
-        // This machine first, then the others in the order the file lists.
-        let machine = match &agent.host {
-            None => 0,
-            Some(dest) => hosts.iter().position(|h| h == dest).map(|i| i + 1).unwrap_or(usize::MAX),
-        };
-        (machine, folder, agent.meta.cwd.as_str(), agent.meta.slot, agent.meta.created)
+        // Within a folder, one directory's agents still sit together.
+        (
+            machine_of(agent, hosts),
+            folder,
+            agent.meta.cwd.as_str(),
+            agent.meta.slot,
+            agent.meta.created,
+        )
     }
     let hosts: Vec<String> = dash.hosts.hosts.iter().map(|h| h.dest.clone()).collect();
-    let mut rank: HashMap<(Option<&str>, &str), (u8, u64)> = HashMap::new();
+    {
+        let homes: HashMap<Option<&str>, &str> = dash
+            .agents
+            .iter()
+            .map(|a| (a.host.as_deref(), dash.home_for(a.host.as_deref())))
+            .collect();
+        let mut rank: HashMap<(Option<&str>, &str), (u8, u64)> = HashMap::new();
+        for agent in &dash.agents {
+            let key = (agent.meta.slot, agent.meta.created);
+            rank.entry((agent.host.as_deref(), folder_of(agent, &homes)))
+                .and_modify(|r| *r = (*r).min(key))
+                .or_insert(key);
+        }
+        if dash.agents.windows(2).all(|w| {
+            order(&w[0], &rank, &hosts, &homes) <= order(&w[1], &rank, &hosts, &homes)
+        }) {
+            return;
+        }
+    }
+
+    // Owned keys from here: the sort has to outlive the agents' current home.
+    let homes: HashMap<Option<String>, String> = dash
+        .agents
+        .iter()
+        .map(|a| (a.host.clone(), dash.home_for(a.host.as_deref()).to_string()))
+        .collect();
+    let folder_owned = |a: &AgentConn| -> String {
+        let home = homes.get(&a.host).map(String::as_str).unwrap_or("");
+        tree::folder_key(&a.meta.cwd, home).to_string()
+    };
+    let mut rank: HashMap<(Option<String>, String), (u8, u64)> = HashMap::new();
     for agent in &dash.agents {
         let key = (agent.meta.slot, agent.meta.created);
-        rank.entry((agent.host.as_deref(), agent.meta.cwd.as_str()))
+        rank.entry((agent.host.clone(), folder_owned(agent)))
             .and_modify(|r| *r = (*r).min(key))
             .or_insert(key);
     }
-    if dash.agents.windows(2).all(|w| order(&w[0], &rank, &hosts) <= order(&w[1], &rank, &hosts)) {
-        return;
-    }
-    // Owned keys from here: the sort has to outlive the agents' current home.
-    let rank: HashMap<(Option<String>, String), (u8, u64)> =
-        rank.into_iter().map(|((h, c), v)| ((h.map(String::from), c.to_string()), v)).collect();
     let owned = |a: &AgentConn| {
-        let key = (a.host.clone(), a.meta.cwd.clone());
-        let folder = rank.get(&key).copied().unwrap_or((u8::MAX, u64::MAX));
-        let machine = match &a.host {
-            None => 0,
-            Some(dest) => hosts.iter().position(|h| h == dest).map(|i| i + 1).unwrap_or(usize::MAX),
-        };
-        (machine, folder, a.meta.cwd.clone(), a.meta.slot, a.meta.created)
+        let folder =
+            rank.get(&(a.host.clone(), folder_owned(a))).copied().unwrap_or((u8::MAX, u64::MAX));
+        (machine_of(a, &hosts), folder, a.meta.cwd.clone(), a.meta.slot, a.meta.created)
     };
     let focused_name = dash.focused().map(|a| a.meta.name.clone());
     let mut zipped: Vec<(AgentConn, usize)> =

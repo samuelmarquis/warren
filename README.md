@@ -26,9 +26,10 @@ everything outlives the connection it was started in.
    ↑ agents, by directory           ↑ the focused agent's live TUI
 ```
 
-- **Grouped by working directory.** One folder per directory, named by that
-  directory; `^Space 1 2` is folder one, agent two, and clicking a folder
-  folds it away.
+- **Grouped by what's inside home.** One folder per thing directly under
+  `~` — every checkout in `~/Developer` is *one* row, not one row each;
+  `^Space 1 2` is folder one, agent two, and clicking a folder folds it
+  away.
 - **One row per agent**, state pushed by Claude Code's own lifecycle hooks —
   no polling. Bold = ready for you, plain = working, `!` = blocked on a
   permission prompt, `*` = finished while you were looking elsewhere,
@@ -137,7 +138,10 @@ color-coded (CLAUDE orange, NORMAL green, EDIT purple):
 `Ctrl-\` detaches from anywhere. Mouse: click sidebar rows to focus, click a
 folder header to fold that directory away, wheel over the sidebar cycles
 agents, clicks and wheel over the pane go to the agent (Claude's fullscreen
-TUI handles its own scrolling), palette swatches are clickable.
+TUI handles its own scrolling). On a form, everything is clickable — a chip
+picks its option, a field row takes the cursor, a session in the resume
+picker selects it, the wheel scrolls that list, and palette swatches have
+always been clickable.
 
 The **new-agent form** (the `+` tab): pick the machine (once there is more
 than one), the harness (`claude` / `omp`), then `new` / `resume` /
@@ -176,11 +180,21 @@ and those four answers.
 
 ### Folders
 
-The sidebar groups agents by working directory, and a folder *is* that
-directory — labelled by its own name, never by the path that got you there.
-An agent in `~/Developer/Phylogen` sits under `Phylogen/`; two folders that
-would read the same take one parent component (`phylo/src/`, `warren/src/`)
-and no more.
+A folder is the thing *directly inside home* that an agent's working
+directory is under, labelled by its own name and never by the path that got
+you there. Agents in `~/Developer/Phylogen`, `~/Developer/warren` and
+`~/Developer/plugins/dsp/src` all sit under one `Developer/`, because that
+is how the work is actually filed; `~` itself is a folder, and a directory
+somewhere else on the machine (`/opt/pmk/env`) is still just itself. Two
+folders that would read the same take one parent component (`phylo/src/`,
+`warren/src/`) and no more — unless they are the same place on different
+machines, since `~/Developer` is `~/Developer` whoever's home it is and the
+heading above the row already says which machine you are looking at.
+
+Home is per machine: this one's is known, and another's comes over on its
+roster line. A machine running a warren too old to report one has it guessed
+from its own paths (`/Users/…`, `/home/…`), which is right often enough that
+nothing looks wrong until it is updated.
 
 Navigation is two digits: `^Space 1 2` is folder one, agent two. The first
 digit arms a folder — the status bar names it and how many agents it holds —
