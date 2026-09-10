@@ -5,3 +5,6 @@
 
 # Local feedback scratchpad.
 /warren-v1-notes.md
+
+# nix build output (a gcroot symlink, not source).
+/result
