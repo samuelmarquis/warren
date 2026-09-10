@@ -25,6 +25,10 @@ pub enum Outcome {
 
 const CTRL_SPACE: u8 = 0x00;
 const CTRL_BACKSLASH: u8 = 0x1c;
+/// Sleep, from either mode. Never forwarded: a terminal's own ^Z is SUSP,
+/// and a harness stopped by its tty is one warren cannot wake — the agent
+/// would still be there, with a process that answers nothing.
+const CTRL_Z: u8 = 0x1a;
 const ESC: u8 = 0x1b;
 
 pub fn handle_bytes(dash: &mut Dash, bytes: &[u8]) -> Outcome {
@@ -56,6 +60,7 @@ pub fn handle_bytes(dash: &mut Dash, bytes: &[u8]) -> Outcome {
                 for (p, &b) in bytes[i..].iter().enumerate() {
                     if b == CTRL_SPACE
                         || b == CTRL_BACKSLASH
+                        || b == CTRL_Z
                         || (b == ESC && bytes[i + p..].starts_with(b"\x1b[<"))
                     {
                         stop = i + p;
@@ -63,8 +68,9 @@ pub fn handle_bytes(dash: &mut Dash, bytes: &[u8]) -> Outcome {
                     }
                 }
                 if stop > i {
-                    // Real keys for the agent (^Space and ^\ are warren's,
-                    // and must not wake a tab you were only passing through).
+                    // Real keys for the agent (^Space, ^\ and ^Z are
+                    // warren's, and must not wake a tab you were only
+                    // passing through).
                     dash.wake_on_input();
                     dash.send_input(&bytes[i..stop]);
                 }
@@ -74,6 +80,7 @@ pub fn handle_bytes(dash: &mut Dash, bytes: &[u8]) -> Outcome {
                 match bytes[stop] {
                     CTRL_SPACE => dash.enter_normal(),
                     CTRL_BACKSLASH => return Outcome::Quit,
+                    CTRL_Z => dash.toggle_sleep(),
                     ESC => {
                         i = stop; // mouse report; reparsed at loop top
                         continue;
@@ -135,7 +142,7 @@ fn normal_key(dash: &mut Dash, bytes: &[u8]) -> (usize, Option<Outcome>) {
         b'(' => dash.swap_with_row(9),
         b')' => dash.swap_with_row(10),
         b'n' => dash.open_new_form(),
-        b'z' => dash.toggle_sleep(),
+        b'z' | CTRL_Z => dash.toggle_sleep(),
         b'r' => {
             if let Some(agent) = dash.focused() {
                 dash.cmdline = agent.meta.display.clone();

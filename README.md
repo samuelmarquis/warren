@@ -135,7 +135,9 @@ color-coded (CLAUDE orange, NORMAL green, EDIT purple):
 | `x` | close agent (y/n confirm) |
 | `:` | command line — `:q` detach · `:q!` kill all · `:color #hex\|index` |
 
-`Ctrl-\` detaches from anywhere. Mouse: click sidebar rows to focus, click a
+`Ctrl-\` detaches from anywhere, and `Ctrl-Z` sleeps the focused agent from
+anywhere — it is never forwarded, because a terminal's own `^Z` is SUSP and
+a harness stopped by its tty is one warren cannot wake. Mouse: click sidebar rows to focus, click a
 folder header to fold that directory away, wheel over the sidebar cycles
 agents, clicks and wheel over the pane go to the agent (Claude's fullscreen
 TUI handles its own scrolling). On a form, everything is clickable — a chip
@@ -281,13 +283,16 @@ local-only; the dashboard is what spans machines.
 ### Sleep mode
 
 A colony costs what its members cost, and an idle Claude Code still holds
-its several hundred megabytes. **Ctrl-Space `z`** stops the focused agent's
-claude process — and its whole process group, so tool children and MCP
+its several hundred megabytes. **Ctrl-Space `z`**, or **Ctrl-Z** without
+leaving CLAUDE mode, stops the focused agent's claude process — and its whole process group, so tool children and MCP
 servers go too — while keeping the agent itself: the daemon lives on, so the
 tab keeps its row, name, color, working directory and the last screen claude
-painted, dimmed under a sleeping badge. `z` again (or just typing at it)
+painted, dimmed under a sleeping badge. `z` again (or `Ctrl-Z`, or just typing at it)
 respawns `claude --resume <session-id>` in the same burrow, and the
-conversation carries on. Keys typed at a sleeping agent are buffered and
+conversation carries on. `^Z` is deliberately taken: sent to a harness it
+would be the tty's SUSP, which stops the process without telling warren —
+the tab would be neither awake nor resumable, and nothing in the dashboard
+could bring it back. Keys typed at a sleeping agent are buffered and
 land in the resumed prompt.
 
 The session id comes from the agent's own lifecycle hooks: Claude passes one

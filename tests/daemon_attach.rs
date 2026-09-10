@@ -1264,3 +1264,63 @@ fn click(viewer: &mut Viewer, row: usize, col: usize) {
     viewer.send(&ToDaemon::Input(proto::b64_encode(press.as_bytes())));
     viewer.send(&ToDaemon::Input(proto::b64_encode(release.as_bytes())));
 }
+
+/// ^Z is warren's, in either mode. Typed at an agent it would be the tty's
+/// own SUSP — the harness stops, the daemon is still holding a process that
+/// answers nothing, and the tab is neither awake nor resumable. Sleeping is
+/// what someone reaching for ^Z wants anyway, and it can be woken.
+#[test]
+fn ctrl_z_sleeps_the_agent_instead_of_suspending_it() {
+    let home = TestHome::new("ctrlz");
+    // Announces its pid, then sits there like an idle harness.
+    new_agent_in(&home, "napper", &home.dir.join("Burrow"), "printf 'awake as %s\\n' $$; sleep 300");
+
+    // Sleep needs a session to resume, which is what the hooks report.
+    let mut hook = Command::new(BIN)
+        .env("WARREN_SOCK", home.sock("napper"))
+        .args(["hook", "waiting"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin.take().unwrap().write_all(br#"{"session_id":"deadbeef"}"#).unwrap();
+    assert!(hook.wait().unwrap().success(), "the hook must exit 0");
+
+    let outer = TestHome::new("ctrlzout");
+    let dash_cmd = format!("WARREN_HOME={} {} up", home.dir.display(), BIN);
+    new_agent(&outer, "dash", &dash_cmd);
+    let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 20);
+
+    let grid = std::cell::RefCell::new(Vec::<String>::new());
+    apply_frame(&grid, &snap);
+    let up = viewer.await_frame(15_000, |m| {
+        apply_frame(&grid, m);
+        grid.borrow().iter().any(|r| r.contains("awake as"))
+    });
+    assert!(up.is_some(), "the agent is up and painting: {:?}", grid.borrow().clone());
+    let text: String = grid.borrow().concat();
+    let pid: String = text
+        .split("awake as ")
+        .nth(1)
+        .expect("pid on screen")
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    assert!(pid_alive(&pid), "the agent's process is running");
+
+    // CLAUDE mode, where every other key goes straight to the agent.
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x1a")));
+    let slept = viewer.await_frame(15_000, |m| {
+        apply_frame(&grid, m);
+        sidebar_of(&grid).iter().any(|r| r.contains("napper z"))
+    });
+    assert!(slept.is_some(), "the row says it is asleep: {:?}", sidebar_of(&grid));
+    assert!(!pid_alive(&pid), "the process is gone, not stopped");
+
+    // And it wakes the same way, from NORMAL this time.
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x00\x1a")));
+    let woke = viewer.await_frame(15_000, |m| {
+        apply_frame(&grid, m);
+        !sidebar_of(&grid).iter().any(|r| r.contains("napper z"))
+    });
+    assert!(woke.is_some(), "^Z woke it again: {:?}", sidebar_of(&grid));
+}
