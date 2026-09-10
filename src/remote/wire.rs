@@ -30,7 +30,10 @@ pub fn cmd_roster() -> Result<()> {
     println!("warren {} {}", env!("CARGO_PKG_VERSION"), crate::proto::WIRE_VERSION);
     flush()?;
 
-    let mut last: Vec<String> = Vec::new();
+    // `None` until the first block goes out: a machine with no agents has a
+    // roster too, and saying nothing would be indistinguishable from a
+    // machine that never answered.
+    let mut last: Option<Vec<String>> = None;
     loop {
         let mut names: Vec<String> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(crate::paths::run_dir()) {
@@ -50,7 +53,7 @@ pub fn cmd_roster() -> Result<()> {
             }
         }
         names.sort();
-        if names != last {
+        if last.as_ref() != Some(&names) {
             // One roster per block, ended by a blank line: a reader that
             // arrives mid-write still gets whole lists.
             for name in &names {
@@ -58,7 +61,7 @@ pub fn cmd_roster() -> Result<()> {
             }
             println!();
             flush()?;
-            last = names;
+            last = Some(names);
         }
         std::thread::sleep(ROSTER_TICK);
     }

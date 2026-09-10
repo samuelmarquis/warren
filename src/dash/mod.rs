@@ -62,7 +62,12 @@ pub struct Dash {
     pub newform: forms::NewForm,
     pub editform: Option<forms::EditForm>,
     /// Agent name to focus once discovery sees its socket (form submission).
-    pub pending_focus: Option<String>,
+    /// The agent the form just asked for — (machine, name) — to focus the
+    /// moment it shows up. A name alone would be ambiguous now that two
+    /// machines can each have one.
+    pub pending_focus: Option<(Option<String>, String)>,
+    /// A `warren new` running on another machine, waiting to be reaped.
+    pub spawn_job: Option<forms::Job>,
     /// Folders folded away, by working directory. Viewer-local, like every
     /// other thing the dashboard knows: fold state is not worth a protocol.
     pub collapsed: HashSet<String>,
@@ -381,6 +386,16 @@ pub fn run() -> Result<()> {
     result.map(|_| ())
 }
 
+/// The new-agent form offers the machines the hosts file names, and only
+/// grows the field once there is a second machine to mean anything.
+fn sync_form_machines(dash: &mut Dash) {
+    let dests: Vec<String> = dash.hosts.hosts.iter().map(|h| h.dest.clone()).collect();
+    if dash.newform.machines != dests {
+        dash.newform.sync_machines(&dests);
+        dash.form_dirty = true;
+    }
+}
+
 fn host_size() -> (u16, u16) {
     rustix::termios::tcgetwinsize(std::io::stdout())
         .map(|ws| (ws.ws_col.max(40), ws.ws_row.max(4)))
@@ -400,6 +415,7 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
         newform: forms::NewForm::reset(),
         editform: None,
         pending_focus: None,
+        spawn_job: None,
         collapsed: HashSet::new(),
         hosts: crate::remote::Hosts::default(),
         here: local_hostname(),
@@ -423,6 +439,7 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
 
     let mut next_key = KEY_FIRST_AGENT;
     dash.hosts.reload(&poller);
+    sync_form_machines(&mut dash);
     dash.hosts.dial(&poller, &mut next_key);
     discover_new(&mut dash, &poller, &mut next_key);
     // Initial focus: the first agent (discover_new's stay-on-form rule is for
@@ -575,6 +592,7 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
         }
 
         reap_agents(&mut dash, &poller);
+        forms::poll_jobs(&mut dash);
         update_busy_transitions(&mut dash);
         update_write_interest(&dash, &poller);
 
@@ -584,6 +602,7 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
             if dash.hosts.reload(&poller) {
                 dash.sidebar_dirty = true;
             }
+            sync_form_machines(&mut dash);
             let dialled = dash.hosts.dial(&poller, &mut next_key);
             discover_remote(&mut dash, &poller, &mut next_key);
             park_unreachable(&mut dash, &poller);
@@ -602,6 +621,36 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
     };
 
     Ok(outcome)
+}
+
+/// Focus an agent the new-agent form just asked for, whenever it turns up.
+/// A local spawn is often attached before the far side of this call, while a
+/// remote one is still a row its machine has not reported yet — so this both
+/// focuses what is here and remembers what is not.
+pub fn focus_when_it_arrives(dash: &mut Dash, host: Option<String>, name: String) {
+    let here = dash.agents.iter().position(|a| a.ident() == (host.as_deref(), name.as_str()));
+    match here {
+        Some(idx) => {
+            dash.pending_focus = None;
+            dash.focus = idx;
+            dash.agents[idx].full_dirty = true;
+            dash.enter_insert();
+        }
+        None => dash.pending_focus = Some((host, name)),
+    }
+}
+
+impl Dash {
+    /// Was this agent the one the form was waiting for? Clears the wait.
+    fn claim_pending(&mut self, host: Option<&str>, name: &str) -> bool {
+        match &self.pending_focus {
+            Some((h, n)) if h.as_deref() == host && n == name => {
+                self.pending_focus = None;
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Connect any run-dir socket we aren't already attached to.
@@ -632,8 +681,7 @@ fn discover_new(dash: &mut Dash, poller: &Poller, next_key: &mut usize) {
                 let was_on_form = dash.on_newform();
                 dash.agents.push(agent);
                 dash.keys.push(key);
-                if dash.pending_focus.as_deref() == Some(name.as_str()) {
-                    dash.pending_focus = None;
+                if dash.claim_pending(None, &name) {
                     dash.focus = dash.agents.len() - 1;
                     dash.agents.last_mut().unwrap().full_dirty = true;
                     dash.enter_insert();
@@ -689,7 +737,11 @@ fn discover_remote(dash: &mut Dash, poller: &Poller, next_key: &mut usize) {
         let was_on_form = dash.on_newform();
         dash.agents.push(agent);
         dash.keys.push(key);
-        if was_on_form {
+        if dash.claim_pending(Some(&dest), &name) {
+            dash.focus = dash.agents.len() - 1;
+            dash.agents.last_mut().unwrap().full_dirty = true;
+            dash.enter_insert();
+        } else if was_on_form {
             dash.focus = dash.agents.len(); // stay on the + tab
         }
         dash.sidebar_dirty = true;

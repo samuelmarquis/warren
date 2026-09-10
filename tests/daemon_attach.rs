@@ -159,6 +159,52 @@ fn new_agent(home: &TestHome, name: &str, agent_cmd: &str) {
     );
 }
 
+/// ssh, for the purposes of a test: drop the destination and run the rest
+/// here against the far machine's home. Everything but the network.
+fn fake_ssh(near: &TestHome, far: &TestHome) -> PathBuf {
+    let shim = near.dir.join("fake-ssh");
+    std::fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\nshift\nexec env WARREN_HOME={} WARREN_AGENT_CMD='sleep 300' \"$@\"\n",
+            far.dir.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    shim
+}
+
+/// Keep a screen up to date from snapshots and damage, the way a terminal
+/// would, so a test can read what the dashboard is showing.
+fn apply_frame(grid: &std::cell::RefCell<Vec<String>>, m: &ToClient) {
+    let mut g = grid.borrow_mut();
+    match m {
+        ToClient::Snapshot { screen, .. } => {
+            *g = screen.iter().map(|l| l.0.iter().map(|s| s.text.as_str()).collect()).collect();
+        }
+        ToClient::Damage { lines, .. } => {
+            for (row, line) in lines {
+                let r = *row as usize;
+                if g.len() <= r {
+                    g.resize(r + 1, String::new());
+                }
+                g[r] = line.0.iter().map(|s| s.text.as_str()).collect();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The sidebar column only, trimmed.
+fn sidebar_of(grid: &std::cell::RefCell<Vec<String>>) -> Vec<String> {
+    grid.borrow()
+        .iter()
+        .map(|r| r.chars().take(23).collect::<String>().trim_end().to_string())
+        .collect()
+}
+
 // --------------------------------------------------------------------- tests
 
 #[test]
@@ -1024,4 +1070,125 @@ fn dashboard_paints_triggered_burst_without_extra_keys() {
     eprintln!("burst rendered by the dashboard in {ms}ms");
     assert!(drawn.is_some(), "dashboard never painted the burst without another key");
     assert!(ms < 2000, "dashboard took {ms}ms to paint an input-triggered burst");
+}
+
+/// A machine with nothing running on it is still a machine that answered.
+/// The roster reports an empty list as a list, so the sidebar stops saying
+/// "connecting…" about a machine that is connected — which is what it would
+/// say if the ssh had never landed at all. A quiet machine then keeps no
+/// heading, which is the rule for any machine with nothing on it.
+#[test]
+fn a_machine_with_no_agents_still_says_it_is_there() {
+    let far = TestHome::new("emptyfar");
+    let near = TestHome::new("emptynear");
+    let outer = TestHome::new("emptyout");
+
+    // Nothing over there at all; one agent here so the sidebar has a shape.
+    new_agent_in(&near, "svm", &near.dir.join("Research"), "sleep 300");
+    std::fs::create_dir_all(far.dir.join("run")).unwrap();
+    std::fs::write(near.dir.join("hosts"), format!("smq  {BIN}\n")).unwrap();
+
+    let shim = fake_ssh(&near, &far);
+    let dash_cmd =
+        format!("WARREN_HOME={} WARREN_SSH={} {} up", near.dir.display(), shim.display(), BIN);
+    new_agent(&outer, "dash", &dash_cmd);
+    let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 22);
+
+    let grid = std::cell::RefCell::new(Vec::<String>::new());
+    apply_frame(&grid, &snap);
+    // Give it well past a roster tick to say "connecting…" if it were going
+    // to: the sidebar is up, and what matters is what it settles on.
+    let settled = viewer.await_frame(20_000, |m| {
+        apply_frame(&grid, m);
+        let rows = sidebar_of(&grid);
+        rows.iter().any(|r| r.contains("Research/")) && !rows.iter().any(|r| r.contains("smq"))
+    });
+    assert!(settled.is_some(), "no word about connecting: {:?}", sidebar_of(&grid));
+
+    // And it stays that way — the roster is current, not merely unheard.
+    std::thread::sleep(Duration::from_millis(2_500));
+    let _ = viewer.await_frame(500, |m| {
+        apply_frame(&grid, m);
+        false
+    });
+    let rows = sidebar_of(&grid);
+    assert!(
+        !rows.iter().any(|r| r.contains("connecting") || r.contains("reconnecting")),
+        "an answering machine says nothing about connecting: {rows:?}"
+    );
+}
+
+/// The new-agent form's first field is the machine, and picking one sends
+/// the whole form there: `warren new` runs on that machine, which names the
+/// agent and gives it a slot, and the row arrives in its next roster. The
+/// near machine gains nothing at all.
+#[test]
+fn the_form_creates_an_agent_on_another_machine() {
+    let far = TestHome::new("mkfar");
+    let near = TestHome::new("mknear");
+    let outer = TestHome::new("mkout");
+
+    new_agent_in(&far, "spork", &far.dir.join("Games"), "sleep 300");
+    new_agent_in(&near, "svm", &near.dir.join("Research"), "sleep 300");
+    let burrow = far.dir.join("Burrow");
+    std::fs::create_dir_all(&burrow).unwrap();
+    std::fs::write(near.dir.join("hosts"), format!("smq  {BIN}\n")).unwrap();
+
+    let shim = fake_ssh(&near, &far);
+    let dash_cmd =
+        format!("WARREN_HOME={} WARREN_SSH={} {} up", near.dir.display(), shim.display(), BIN);
+    new_agent(&outer, "dash", &dash_cmd);
+    let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 22);
+
+    let grid = std::cell::RefCell::new(Vec::<String>::new());
+    apply_frame(&grid, &snap);
+    let up = viewer.await_frame(20_000, |m| {
+        apply_frame(&grid, m);
+        sidebar_of(&grid).iter().any(|r| r.contains("spork"))
+    });
+    assert!(up.is_some(), "both machines are up: {:?}", sidebar_of(&grid));
+
+    // ^Space n opens the form; Machine leads it, and `l` moves off "here".
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x00n")));
+    let form = viewer.await_frame(10_000, |m| {
+        apply_frame(&grid, m);
+        grid.borrow().iter().any(|r| r.contains("Machine"))
+    });
+    assert!(form.is_some(), "the form offers a machine: {:?}", grid.borrow().clone());
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"l")));
+    let picked = viewer.await_frame(10_000, |m| {
+        apply_frame(&grid, m);
+        grid.borrow().iter().any(|r| r.contains("new claude agent on smq"))
+    });
+    assert!(picked.is_some(), "the form says where it will run: {:?}", grid.borrow().clone());
+
+    // Tab to Title, name it, Tab to Root dir, clear the `~` the machine
+    // switch left there, and give it one over on the far side.
+    let mut keys: Vec<u8> = b"\t\t\tremote-made\t".to_vec();
+    keys.extend([0x7f; 4]); // backspace out "~"
+    keys.extend(burrow.to_str().unwrap().as_bytes());
+    keys.push(b'\r');
+    viewer.send(&ToDaemon::Input(proto::b64_encode(&keys)));
+
+    let made = viewer.await_frame(25_000, |m| {
+        apply_frame(&grid, m);
+        sidebar_of(&grid).iter().any(|r| r.contains("remote-made"))
+    });
+    assert!(made.is_some(), "the agent arrived from over there: {:?}", sidebar_of(&grid));
+
+    let rows = sidebar_of(&grid);
+    let smq = rows.iter().position(|r| r.trim() == "smq").expect("a heading for the far machine");
+    let made_at = rows.iter().position(|r| r.contains("remote-made")).unwrap();
+    assert!(made_at > smq, "it belongs to the far machine: {rows:?}");
+    assert!(rows.iter().any(|r| r.contains("Burrow/")), "in the directory asked for: {rows:?}");
+
+    // And it really is over there: this machine's run dir never saw it.
+    let here: Vec<String> = std::fs::read_dir(near.dir.join("run"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(here, vec!["svm.sock".to_string()], "nothing was created here: {here:?}");
+    let there = std::fs::read_dir(far.dir.join("run")).unwrap().flatten().count();
+    assert_eq!(there, 2, "spork and the new one, over there");
 }

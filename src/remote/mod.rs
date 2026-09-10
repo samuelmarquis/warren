@@ -110,10 +110,17 @@ impl Host {
             if !custom.is_empty() {
                 let mut parts = custom.split_whitespace();
                 let mut cmd = Command::new(parts.next().unwrap_or("ssh"));
+                // The stand-in execs the command itself, so its arguments
+                // arrive as written — quoting them would be quoting twice.
                 cmd.args(parts).arg(&self.dest).arg(&self.remote_bin).args(args);
                 return cmd;
             }
         }
+        // Real ssh joins its command with spaces and the far side's shell
+        // splits it again, so anything that could hold one — a title, a
+        // system prompt — has to survive the round trip quoted. The binary
+        // itself is left alone: a hosts file may well write it with a ~.
+        let quoted: Vec<String> = args.iter().map(|a| shell_quote(a)).collect();
         let mut cmd = Command::new("ssh");
         cmd.arg("-T")
             .args(["-o", "BatchMode=yes"])
@@ -125,8 +132,60 @@ impl Host {
             .args(["-o", "ServerAliveCountMax=3"])
             .arg(&self.dest)
             .arg(&self.remote_bin)
-            .args(args);
+            .args(&quoted);
         cmd
+    }
+
+    /// `ssh … warren new …` on that machine: the far side picks the name and
+    /// the slot against its own agents, exactly as it would for someone
+    /// typing the command over there. Nothing is waited on here — the child
+    /// is reaped later, and the agent arrives the way every other one does,
+    /// in that machine's next roster.
+    pub fn spawn_agent(&self, spec: &crate::cli::NewAgent) -> Result<Child> {
+        let mut args: Vec<String> = vec![
+            "new".into(),
+            spec.base.to_string(),
+            spec.dir.to_string(),
+            spec.color.to_string(),
+            spec.mode.to_string(),
+        ];
+        // Positional, and the far side reads them in this order; the flags
+        // may follow in any.
+        if let Some(sid) = spec.sid {
+            args.push(sid.to_string());
+        }
+        args.push(format!("--kind={}", spec.kind.as_str()));
+        if let Some(sys) = spec.sys {
+            args.push(format!("--sys={sys}"));
+        }
+        if let Some(extra) = spec.extra {
+            args.push(format!("--extra={extra}"));
+        }
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let child = self
+            .ssh(&refs)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        Ok(child)
+    }
+
+    /// `ssh … warren sessions KIND` — the resume picker, one machine away.
+    /// The output is the same tab-separated list the command has always
+    /// printed, so this asks nothing of the far side that it could not
+    /// already do.
+    pub fn sessions(&self, kind: crate::kind::Kind) -> Result<Child> {
+        let child = self
+            .ssh(&["sessions", kind.as_str()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        if let Some(out) = child.stdout.as_ref() {
+            set_nonblocking(out)?;
+        }
+        Ok(child)
     }
 
     /// Start `warren __pipe NAME` over there, with a socketpair for stdio:
@@ -323,6 +382,19 @@ impl Hosts {
             let line = line.trim_end().to_string();
             if let Some(rest) = line.strip_prefix("warren ") {
                 host.version = Some(rest.to_string());
+                // Answering at all is enough to stop saying "connecting…",
+                // but only when there is nothing on screen to contradict:
+                // with rows already known, the block that follows owns them,
+                // and promoting early would show a stale roster beside its
+                // own ghosts for a tick. An older warren over there never
+                // reports an empty roster, so this is also what keeps a
+                // machine with no agents from looking unreachable forever.
+                if host.state != HostState::Live && host.roster.is_empty() && host.ghosts.is_empty()
+                {
+                    host.state = HostState::Live;
+                    host.backoff = RETRY_MIN;
+                    changed = true;
+                }
                 continue;
             }
             if line.is_empty() {
@@ -412,7 +484,14 @@ fn control_path() -> PathBuf {
     dir.join("%C")
 }
 
-fn set_nonblocking(fd: &impl AsFd) -> Result<()> {
+/// One argument, safe for a shell that will split on whitespace. Single
+/// quotes take everything literally, and the only thing they cannot hold is
+/// a single quote — which leaves and comes back escaped.
+fn shell_quote(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', r"'\''"))
+}
+
+pub(crate) fn set_nonblocking(fd: &impl AsFd) -> Result<()> {
     let flags = rustix::fs::fcntl_getfl(fd.as_fd())?;
     rustix::fs::fcntl_setfl(fd.as_fd(), flags | rustix::fs::OFlags::NONBLOCK)?;
     Ok(())
@@ -421,6 +500,18 @@ fn set_nonblocking(fd: &impl AsFd) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_argument_survives_the_far_side_s_shell() {
+        // ssh hands the far side a string, not an argv: a title with a space
+        // in it has to come back as one argument.
+        assert_eq!(shell_quote("__pipe"), "'__pipe'");
+        assert_eq!(shell_quote("--sys=be terse"), "'--sys=be terse'");
+        assert_eq!(shell_quote("~/Developer/warren"), "'~/Developer/warren'");
+        // The one character single quotes cannot hold, leaving and coming
+        // back: don't  ->  'don'\''t'
+        assert_eq!(shell_quote("don't"), r"'don'\''t'");
+    }
 
     #[test]
     fn hosts_file_columns_and_comments() {

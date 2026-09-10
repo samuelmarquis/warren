@@ -6,6 +6,9 @@
 //! always leave without creating anything.
 
 use std::fmt::Write;
+use std::io::Read;
+use std::process::Child;
+use std::time::{Duration, Instant};
 
 use crate::kind::Kind;
 use crate::proto::ToDaemon;
@@ -13,10 +16,13 @@ use crate::sessions::Session;
 use crate::spans;
 
 use super::render::SIDEBAR_WIDTH;
-use super::{Dash, Mode};
+use super::{Dash, Mode, focus_when_it_arrives};
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum NField {
+    /// Which machine this agent will run on. Absent unless there is more
+    /// than one to choose between.
+    Machine,
     Kind,
     Mode,
     Title,
@@ -34,7 +40,40 @@ pub const MODE_CONTINUE: u8 = 2;
 /// The harnesses the form offers, in the order it cycles them.
 pub const KINDS: [Kind; 2] = [Kind::Claude, Kind::Omp];
 
+/// A machine one hop away, answering a question the form asked it. Both
+/// kinds of job are polled, never waited on: the dashboard does not block on
+/// a peer, and the far side of an ssh is a peer like any other.
+pub struct Job {
+    pub child: Child,
+    pub dest: String,
+    pub buf: String,
+    pub started: Instant,
+}
+
+impl Job {
+    fn new(child: Child, dest: String) -> Job {
+        Job { child, dest, buf: String::new(), started: Instant::now() }
+    }
+
+    /// Long enough that a slow machine still answers, short enough that a
+    /// wedged one gives the field back.
+    fn expired(&self) -> bool {
+        self.started.elapsed() > Duration::from_secs(20)
+    }
+
+    fn kill(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 pub struct NewForm {
+    /// 0 is this machine; 1.. index `machines`. Kept in sync with the hosts
+    /// file by destination, not by position, so editing that file cannot
+    /// silently retarget a form someone is in the middle of filling in.
+    pub machine: usize,
+    /// ssh destinations, in the order the hosts file lists them.
+    pub machines: Vec<String>,
     /// Index into KINDS. Which harness this agent will run — the only thing
     /// on this form the sidebar will never show.
     pub kind: usize,
@@ -43,6 +82,8 @@ pub struct NewForm {
     pub title: String,
     pub root: String,
     pub sessions: Option<Vec<Session>>,
+    /// The resume picker's list being fetched from another machine.
+    pub sess_job: Option<Job>,
     pub sess_sel: usize,
     /// `--system-prompt` value; empty = omit the flag.
     pub sys: String,
@@ -54,12 +95,15 @@ pub struct NewForm {
 impl NewForm {
     pub fn reset() -> NewForm {
         NewForm {
+            machine: 0,
+            machines: Vec::new(),
             kind: 0,
             mode: MODE_NEW,
             field: 0,
             title: String::new(),
             root: std::env::var("HOME").unwrap_or_else(|_| "/".into()),
             sessions: None,
+            sess_job: None,
             sess_sel: 0,
             sys: String::new(),
             extra: String::new(),
@@ -67,9 +111,11 @@ impl NewForm {
         }
     }
 
+    /// Machine leads, when there is one to pick: it decides what every field
+    /// under it means. With no hosts configured the form is what it was.
     pub fn fields(&self) -> &'static [NField] {
-        match self.mode {
-            MODE_RESUME => &[
+        match (self.machines.is_empty(), self.mode) {
+            (true, MODE_RESUME) => &[
                 NField::Kind,
                 NField::Mode,
                 NField::List,
@@ -77,7 +123,16 @@ impl NewForm {
                 NField::Extra,
                 NField::Color,
             ],
-            MODE_CONTINUE => &[
+            (false, MODE_RESUME) => &[
+                NField::Machine,
+                NField::Kind,
+                NField::Mode,
+                NField::List,
+                NField::Sys,
+                NField::Extra,
+                NField::Color,
+            ],
+            (true, MODE_CONTINUE) => &[
                 NField::Kind,
                 NField::Mode,
                 NField::Root,
@@ -85,7 +140,26 @@ impl NewForm {
                 NField::Extra,
                 NField::Color,
             ],
-            _ => &[
+            (false, MODE_CONTINUE) => &[
+                NField::Machine,
+                NField::Kind,
+                NField::Mode,
+                NField::Root,
+                NField::Sys,
+                NField::Extra,
+                NField::Color,
+            ],
+            (true, _) => &[
+                NField::Kind,
+                NField::Mode,
+                NField::Title,
+                NField::Root,
+                NField::Sys,
+                NField::Extra,
+                NField::Color,
+            ],
+            (false, _) => &[
+                NField::Machine,
                 NField::Kind,
                 NField::Mode,
                 NField::Title,
@@ -97,6 +171,56 @@ impl NewForm {
         }
     }
 
+    /// Where this agent will run: None is here, Some is an ssh destination.
+    pub fn dest(&self) -> Option<&str> {
+        match self.machine {
+            0 => None,
+            i => self.machines.get(i - 1).map(String::as_str),
+        }
+    }
+
+    /// Take the hosts file's list, keeping the selection by name. A machine
+    /// that left the file falls back to here rather than to whichever host
+    /// happens to hold its old index.
+    pub fn sync_machines(&mut self, dests: &[String]) {
+        if self.machines == dests {
+            return;
+        }
+        let chosen = self.dest().map(str::to_string);
+        self.machines = dests.to_vec();
+        self.machine = match chosen {
+            Some(dest) => {
+                self.machines.iter().position(|d| *d == dest).map(|i| i + 1).unwrap_or(0)
+            }
+            None => 0,
+        };
+    }
+
+    /// The chips the Machine row offers: here, then the hosts file's order.
+    fn machine_labels(&self) -> Vec<&str> {
+        let mut labels = vec!["here"];
+        labels.extend(self.machines.iter().map(|d| {
+            // The sidebar's name for a machine is the destination without a
+            // user@; the form says the same thing it does.
+            d.rsplit('@').next().unwrap_or(d)
+        }));
+        labels
+    }
+
+    /// Root dir means one thing here and another there, and the default is
+    /// the only part warren owns: an untouched `$HOME` follows the machine.
+    fn follow_machine(&mut self) {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+        match self.machine {
+            0 if self.root == "~" => self.root = home,
+            0 => {}
+            // `~` is left for the far side's own expand_dir to resolve; this
+            // machine has no business guessing another one's home.
+            _ if self.root == home => self.root = "~".into(),
+            _ => {}
+        }
+    }
+
     pub fn agent_kind(&self) -> Kind {
         KINDS[self.kind.min(KINDS.len() - 1)]
     }
@@ -105,13 +229,151 @@ impl NewForm {
         self.fields()[self.field.min(self.fields().len() - 1)]
     }
 
-    /// The resume picker lists the selected harness's sessions; switching
-    /// harness drops the cached list so the next look re-scans.
-    fn ensure_sessions(&mut self) {
-        if self.sessions.is_none() {
-            self.sessions = Some(self.agent_kind().sessions());
-            self.sess_sel = 0;
+    /// Drop the cached list: a different harness, or a different machine,
+    /// has different sessions.
+    fn forget_sessions(&mut self) {
+        self.sessions = None;
+        self.sess_sel = 0;
+        if let Some(mut job) = self.sess_job.take() {
+            job.kill();
         }
+    }
+}
+
+/// Fill the resume picker for whatever machine is selected. Here that is a
+/// directory scan and is done by the time it returns; anywhere else it is an
+/// `ssh … warren sessions`, started now and collected in `poll_jobs`.
+fn ensure_sessions(dash: &mut Dash) {
+    let form = &mut dash.newform;
+    if form.sessions.is_some() || form.sess_job.is_some() {
+        return;
+    }
+    let kind = form.agent_kind();
+    let Some(dest) = form.dest().map(str::to_string) else {
+        form.sessions = Some(kind.sessions());
+        form.sess_sel = 0;
+        return;
+    };
+    let Some(host) = dash.hosts.get(&dest) else {
+        dash.newform.sessions = Some(Vec::new());
+        return;
+    };
+    if !host.reachable() {
+        dash.newform.sessions = Some(Vec::new());
+        dash.flash = Some(format!("{} is not answering", host.label));
+        dash.status_dirty = true;
+        return;
+    }
+    match host.sessions(kind) {
+        Ok(child) => dash.newform.sess_job = Some(Job::new(child, dest)),
+        Err(e) => {
+            dash.newform.sessions = Some(Vec::new());
+            dash.flash = Some(format!("sessions on {dest}: {e}"));
+            dash.status_dirty = true;
+        }
+    }
+}
+
+/// One tab-separated line of `warren sessions`: id, mtime, cwd, title.
+fn parse_sessions(out: &str) -> Vec<Session> {
+    out.lines()
+        .filter_map(|line| {
+            let mut cols = line.split('\t');
+            let id = cols.next()?;
+            let mtime = cols.next()?;
+            let cwd = cols.next()?;
+            let title = cols.next().unwrap_or("");
+            if id.is_empty() {
+                return None;
+            }
+            Some(Session {
+                id: id.to_string(),
+                mtime: mtime.parse::<f64>().unwrap_or(0.0),
+                cwd: cwd.to_string(),
+                title: title.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Collect anything a machine owes us: the resume picker's list, and the
+/// result of a `warren new` sent one hop away. Called every turn of the poll
+/// loop, and never blocks.
+pub fn poll_jobs(dash: &mut Dash) {
+    poll_session_job(dash);
+    poll_spawn_job(dash);
+}
+
+fn poll_session_job(dash: &mut Dash) {
+    let Some(job) = dash.newform.sess_job.as_mut() else { return };
+    if job.expired() {
+        let dest = job.dest.clone();
+        job.kill();
+        dash.newform.sess_job = None;
+        dash.newform.sessions = Some(Vec::new());
+        dash.flash = Some(format!("{dest} did not answer with its sessions"));
+        dash.status_dirty = true;
+        dash.form_dirty = true;
+        return;
+    }
+    // Drain rather than wait for exit: a machine with a few hundred sessions
+    // fills the pipe, and a child blocked on a full pipe never exits.
+    let mut buf = [0u8; 8192];
+    let done = loop {
+        let Some(out) = job.child.stdout.as_mut() else { break true };
+        match out.read(&mut buf) {
+            Ok(0) => break true,
+            Ok(n) => job.buf.push_str(&String::from_utf8_lossy(&buf[..n])),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break false,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break true,
+        }
+    };
+    if !done {
+        return;
+    }
+    let mut job = dash.newform.sess_job.take().expect("just had one");
+    let _ = job.child.wait();
+    dash.newform.sessions = Some(parse_sessions(&job.buf));
+    dash.newform.sess_sel = 0;
+    dash.form_dirty = true;
+}
+
+fn poll_spawn_job(dash: &mut Dash) {
+    let Some(job) = dash.spawn_job.as_mut() else { return };
+    if job.expired() {
+        let dest = job.dest.clone();
+        job.kill();
+        dash.spawn_job = None;
+        dash.flash = Some(format!("{dest} did not answer"));
+        dash.status_dirty = true;
+        return;
+    }
+    match job.child.try_wait() {
+        Ok(Some(_)) => {}
+        Ok(None) => return,
+        Err(_) => {
+            dash.spawn_job = None;
+            return;
+        }
+    }
+    // One line of stdout, or a short complaint on stderr; nothing that can
+    // fill a pipe, so taking it in one go is safe here.
+    let job = dash.spawn_job.take().expect("just had one");
+    let dest = job.dest.clone();
+    let Ok(out) = job.child.wait_with_output() else { return };
+    if out.status.success() {
+        // "warren: created agent 'NAME'" — the far side had the last word on
+        // the name, and that is the one to focus when its row shows up.
+        let said = String::from_utf8_lossy(&out.stdout);
+        if let Some(name) = said.split('\'').nth(1) {
+            focus_when_it_arrives(dash, Some(dest), name.to_string());
+        }
+    } else {
+        let why = String::from_utf8_lossy(&out.stderr);
+        let why = why.lines().last().unwrap_or("could not create it").trim();
+        dash.flash = Some(format!("{dest}: {why}"));
+        dash.status_dirty = true;
     }
 }
 
@@ -129,6 +391,10 @@ pub fn new_key(dash: &mut Dash, bytes: &[u8]) -> usize {
     let (key, consumed) = decode_key(bytes);
     let form = &mut dash.newform;
     let nfields = form.fields().len();
+    // Filling the picker can mean asking another machine, which needs the
+    // whole dashboard, not just the form — so it happens once the key is
+    // handled and this borrow is done with.
+    let mut want_sessions = false;
     match key {
         Key::Tab => form.field = (form.field + 1) % nfields,
         Key::ShiftTab => form.field = (form.field + nfields - 1) % nfields,
@@ -154,6 +420,21 @@ pub fn new_key(dash: &mut Dash, bytes: &[u8]) -> usize {
             _ => submit_new(dash),
         },
         key => match form.active() {
+            NField::Machine => {
+                let choices = form.machines.len() + 1;
+                let step = match key {
+                    Key::Char(b'l') | Key::Right | Key::Char(b' ') => 1,
+                    Key::Char(b'h') | Key::Left => choices - 1,
+                    _ => 0,
+                };
+                if step != 0 {
+                    form.machine = (form.machine + step) % choices;
+                    form.follow_machine();
+                    form.forget_sessions(); // another machine, other sessions
+                    want_sessions = form.mode == MODE_RESUME;
+                    form.field = 0;
+                }
+            }
             NField::Kind => {
                 let step = match key {
                     Key::Char(b'l') | Key::Right | Key::Char(b' ') => 1,
@@ -162,7 +443,8 @@ pub fn new_key(dash: &mut Dash, bytes: &[u8]) -> usize {
                 };
                 if step != 0 {
                     form.kind = (form.kind + step) % KINDS.len();
-                    form.sessions = None; // a different harness, different sessions
+                    form.forget_sessions(); // a different harness, different sessions
+                    want_sessions = form.mode == MODE_RESUME;
                     form.field = 0;
                 }
             }
@@ -174,16 +456,14 @@ pub fn new_key(dash: &mut Dash, bytes: &[u8]) -> usize {
                     form.mode = (form.mode + 2) % 3;
                     form.field = 0;
                 }
-                if form.mode == MODE_RESUME {
-                    form.ensure_sessions();
-                }
+                want_sessions = form.mode == MODE_RESUME;
             }
             NField::Title => line_edit(&mut form.title, key),
             NField::Root => line_edit(&mut form.root, key),
             NField::Sys => line_edit(&mut form.sys, key),
             NField::Extra => line_edit(&mut form.extra, key),
             NField::List => {
-                form.ensure_sessions();
+                want_sessions = true;
                 let len = form.sessions.as_ref().map(Vec::len).unwrap_or(0);
                 match key {
                     Key::Char(b'j') | Key::Down => {
@@ -196,16 +476,23 @@ pub fn new_key(dash: &mut Dash, bytes: &[u8]) -> usize {
             NField::Color => palette_key(&mut form.color, key),
         },
     }
+    if want_sessions {
+        ensure_sessions(dash);
+    }
     consumed
 }
 
 fn submit_new(dash: &mut Dash) {
+    if dash.newform.mode == MODE_RESUME {
+        ensure_sessions(dash);
+    }
     let form = &mut dash.newform;
     let (mode_str, sid, dir, fallback_name) = match form.mode {
         MODE_RESUME => {
-            form.ensure_sessions();
             let Some(sess) = form.sessions.as_ref().and_then(|s| s.get(form.sess_sel)) else {
-                dash.flash = Some("no session selected".into());
+                let waiting = form.sess_job.is_some();
+                dash.flash =
+                    Some(if waiting { "still asking…" } else { "no session selected" }.into());
                 dash.status_dirty = true;
                 return;
             };
@@ -221,29 +508,73 @@ fn submit_new(dash: &mut Dash) {
         dash.status_dirty = true;
         return;
     }
-    let dir = crate::cli::expand_dir(Some(&dir));
+    let dest = form.dest().map(str::to_string);
+    // A path means whatever it means on the machine that will open it: only
+    // this one's is ours to expand.
+    let dir = match dest {
+        None => crate::cli::expand_dir(Some(&dir)),
+        Some(_) => dir,
+    };
     let color = form.color.min(255) as u8;
-    let live: Vec<(String, u8)> =
-        dash.agents.iter().map(|a| (a.meta.name.clone(), a.meta.slot)).collect();
+    let kind = form.agent_kind();
     let sys = form.sys.trim().to_string();
     let extra = form.extra.trim().to_string();
-    match crate::cli::launch_agent(
-        &crate::cli::NewAgent {
-            base: &base,
-            dir: &dir,
-            color,
-            kind: form.agent_kind(),
-            mode: mode_str,
-            sid: sid.as_deref(),
-            sys: (!sys.is_empty()).then_some(sys.as_str()),
-            extra: (!extra.is_empty()).then_some(extra.as_str()),
-        },
-        &live,
-    ) {
-        Ok(name) => {
-            dash.flash = Some(format!("creating agent '{name}'…"));
-            dash.pending_focus = Some(name);
+    let spec = crate::cli::NewAgent {
+        base: &base,
+        dir: &dir,
+        color,
+        kind,
+        mode: mode_str,
+        sid: sid.as_deref(),
+        sys: (!sys.is_empty()).then_some(sys.as_str()),
+        extra: (!extra.is_empty()).then_some(extra.as_str()),
+    };
+
+    let outcome = match &dest {
+        // Here: spawn the daemon ourselves, against the names and slots this
+        // machine is already using.
+        None => {
+            let live: Vec<(String, u8)> = dash
+                .agents
+                .iter()
+                .filter(|a| a.ident().0.is_none())
+                .map(|a| (a.meta.name.clone(), a.meta.slot))
+                .collect();
+            crate::cli::launch_agent(&spec, &live).map(|name| {
+                focus_when_it_arrives(dash, None, name.clone());
+                format!("creating agent '{name}'…")
+            })
+        }
+        // There: `warren new` over that machine's ssh connection, which picks
+        // the name and the slot against its own agents. The row arrives in
+        // its next roster like any other.
+        Some(dest) => {
+            let started = match dash.hosts.get(dest) {
+                None => Err(anyhow::anyhow!("{dest} is not in the hosts file")),
+                Some(host) if !host.reachable() => {
+                    Err(anyhow::anyhow!("{} is not answering", host.label))
+                }
+                Some(host) => host.spawn_agent(&spec).map(|child| (child, host.label.clone())),
+            };
+            started.map(|(child, label)| {
+                dash.spawn_job = Some(Job::new(child, dest.clone()));
+                format!("creating agent '{base}' on {label}…")
+            })
+        }
+    };
+
+    match outcome {
+        Ok(said) => {
+            dash.flash = Some(said);
+            // Keep the machine: a colony over there is usually built more
+            // than one agent at a time. Anything the old form still had in
+            // flight goes first, so no ssh is dropped without being reaped.
+            dash.newform.forget_sessions();
+            let (machine, machines) = (dash.newform.machine, dash.newform.machines.clone());
             dash.newform = NewForm::reset();
+            dash.newform.machine = machine;
+            dash.newform.machines = machines;
+            dash.newform.follow_machine();
         }
         Err(e) => dash.flash = Some(format!("create failed: {e}")),
     }
@@ -254,6 +585,9 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
     let x0 = SIDEBAR_WIDTH + 1;
     let pane_w = dash.cols.saturating_sub(SIDEBAR_WIDTH) as usize;
     let pane_h = dash.rows.saturating_sub(1);
+    if dash.newform.mode == MODE_RESUME {
+        ensure_sessions(dash);
+    }
     let form = &mut dash.newform;
     let active = form.fields()[form.field.min(form.fields().len() - 1)];
     let insert = dash.mode == Mode::Insert;
@@ -261,31 +595,41 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
     for row in 0..pane_h {
         let _ = write!(out, "\x1b[{};{}H\x1b[0m\x1b[K", row + 1, x0);
     }
+    let where_ = match form.dest() {
+        Some(dest) => format!(" on {}", dest.rsplit('@').next().unwrap_or(dest)),
+        None => String::new(),
+    };
     let _ = write!(
         out,
-        "\x1b[2;{}H\x1b[1m+ new {} agent\x1b[0m",
+        "\x1b[2;{}H\x1b[1m+ new {} agent{where_}\x1b[0m",
         x0 + 2,
         form.agent_kind().as_str()
     );
 
+    // Where it runs decides what everything under it means, so it leads.
+    let mut row = 4u16;
+    if !form.machines.is_empty() {
+        let machines = form.machine_labels();
+        draw_choice(out, row, x0, "Machine", &machines, form.machine, active == NField::Machine);
+        row += 2;
+    }
     // Which harness, then how to start it.
     let kinds: Vec<&str> = KINDS.iter().map(|k| k.as_str()).collect();
-    draw_choice(out, 4, x0, "Agent", &kinds, form.kind, active == NField::Kind);
+    draw_choice(out, row, x0, "Agent", &kinds, form.kind, active == NField::Kind);
+    row += 2;
     draw_choice(
         out,
-        6,
+        row,
         x0,
         "Mode",
         &["new", "resume", "continue"],
         form.mode as usize,
         active == NField::Mode,
     );
+    row += 2;
 
-    #[allow(unused_assignments)]
-    let mut row = 8u16;
     match form.mode {
         MODE_RESUME => {
-            form.ensure_sessions();
             let sessions = form.sessions.as_deref().unwrap_or(&[]);
             let _ = write!(
                 out,
@@ -314,7 +658,11 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
                 let _ = write!(out, "\x1b[{};{}H\x1b[2m… {more} more\x1b[0m", row, x0 + 4);
             }
             if sessions.is_empty() {
-                let _ = write!(out, "\x1b[{};{}H\x1b[2m(no sessions found)\x1b[0m", row, x0 + 4);
+                let waiting = match form.sess_job.as_ref() {
+                    Some(job) => format!("(asking {}…)", job.dest),
+                    None => "(no sessions found)".to_string(),
+                };
+                let _ = write!(out, "\x1b[{};{}H\x1b[2m{waiting}\x1b[0m", row, x0 + 4);
             }
             row += 2;
         }
@@ -602,5 +950,72 @@ fn short_path(path: &str) -> String {
         format!("~{}", &path[home.len()..])
     } else {
         path.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sessions_come_back_as_the_far_side_printed_them() {
+        let out = "abc123\t1700000000\t/w/one\ta title\n\
+                   def456\t1700000001\t/w/two\t\n\
+                   \n\
+                   junk-without-columns\n";
+        let got = parse_sessions(out);
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0].id, "abc123");
+        assert_eq!(got[0].cwd, "/w/one");
+        assert_eq!(got[0].title, "a title");
+        // A session no one has titled is still a session.
+        assert_eq!(got[1].title, "");
+        assert_eq!(got[1].mtime as i64, 1_700_000_001);
+    }
+
+    #[test]
+    fn the_chosen_machine_follows_its_name_through_a_hosts_file_edit() {
+        let mut form = NewForm::reset();
+        form.sync_machines(&["smq".into(), "servo".into()]);
+        assert_eq!(form.fields()[0], NField::Machine, "the field appears with hosts to offer");
+        form.machine = 2;
+        assert_eq!(form.dest(), Some("servo"));
+
+        // A machine added above it must not retarget the form.
+        form.sync_machines(&["mini".into(), "smq".into(), "servo".into()]);
+        assert_eq!(form.dest(), Some("servo"));
+
+        // And one that leaves the file falls back to here, never to whoever
+        // inherited its position.
+        form.sync_machines(&["mini".into(), "smq".into()]);
+        assert_eq!(form.dest(), None);
+        assert_eq!(form.machine, 0);
+
+        // With no hosts at all the form is what it always was.
+        form.sync_machines(&[]);
+        assert_eq!(form.fields()[0], NField::Kind);
+    }
+
+    #[test]
+    fn an_untouched_root_dir_follows_the_machine() {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+        let mut form = NewForm::reset();
+        form.sync_machines(&["servo".into()]);
+        assert_eq!(form.root, home);
+
+        // Nobody here knows another machine's home, so `~` goes over as `~`.
+        form.machine = 1;
+        form.follow_machine();
+        assert_eq!(form.root, "~");
+
+        form.machine = 0;
+        form.follow_machine();
+        assert_eq!(form.root, home);
+
+        // A path someone typed is theirs, and stays put.
+        form.root = "/w/somewhere".into();
+        form.machine = 1;
+        form.follow_machine();
+        assert_eq!(form.root, "/w/somewhere");
     }
 }

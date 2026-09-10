@@ -46,7 +46,9 @@ everything outlives the connection it was started in.
   session on the machine, most recent first, with titles — pick one and it
   reopens in a fresh burrow. Per-agent system prompts and extra CLI args too.
 - **Agents on other machines** in the same sidebar as the ones here, grouped
-  under a heading per machine, over one ssh connection each.
+  under a heading per machine, over one ssh connection each — and the
+  new-agent form starts them there too, so nothing needs opening over there
+  first.
 - **One static Rust binary.** No tmux, no screen, no ncurses, no Python. The
   only file you would ever hand-edit is a list of machines.
 
@@ -137,11 +139,12 @@ folder header to fold that directory away, wheel over the sidebar cycles
 agents, clicks and wheel over the pane go to the agent (Claude's fullscreen
 TUI handles its own scrolling), palette swatches are clickable.
 
-The **new-agent form** (the `+` tab): pick the harness (`claude` / `omp`),
-then `new` / `resume` / `continue`, title, root dir, a session from that
-harness's resume picker, a system prompt (`--system-prompt`), extra CLI args,
-and a tab color. Tab/Shift+Tab cycle fields; NORMAL always navigates away —
-the form never traps you.
+The **new-agent form** (the `+` tab): pick the machine (once there is more
+than one), the harness (`claude` / `omp`), then `new` / `resume` /
+`continue`, title, root dir, a session from that harness's resume picker, a
+system prompt (`--system-prompt`), extra CLI args, and a tab color.
+Tab/Shift+Tab cycle fields; NORMAL always navigates away — the form never
+traps you.
 
 ### Two harnesses, one colony
 
@@ -247,6 +250,16 @@ it answers the rows go live again on their own. Nothing about a remote agent
 is stored on this machine: sleep, wake, rename, colour and close all work
 exactly as they do locally, because they are the same messages to the same
 daemon.
+
+Agents are made over there from the same form, which is why the machine
+comes first on it: everything under that field means whatever it means on
+the machine you picked. `warren new` runs on the far side, so that machine
+names the agent and gives it a slot against its own agents, its own harness
+starts it, and the row arrives here in its next roster like any other — the
+resume picker fills from its sessions, and a root dir left at its default
+travels as `~` rather than as a path only this machine has. Nothing has to
+be running over there first: agent daemons answer to no terminal, and a
+dashboard on that machine would only be a second viewer of the same ones.
 
 `warren ls`, `kill`, `sleep` and `wake` on the command line are still
 local-only; the dashboard is what spans machines.
