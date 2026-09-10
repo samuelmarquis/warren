@@ -8,7 +8,7 @@
 //!   warren sleep NAME      kill the agent's claude process, keeping the resumable tab
 //!   warren wake NAME       respawn it with --resume on the same conversation
 //!   warren attach NAME     raw single-agent viewer
-//!   warren sessions        all resumable Claude sessions (id<TAB>mtime<TAB>cwd<TAB>title)
+//!   warren sessions [claude|omp]  resumable sessions (id<TAB>mtime<TAB>cwd<TAB>title)
 //!   warren hook STATE      called by Claude Code hooks; reports state to the agent daemon
 //!   warren __daemon …      internal: the per-agent daemon process
 
@@ -16,6 +16,7 @@ mod cli;
 mod daemon;
 mod dash;
 mod hooks;
+mod kind;
 mod names;
 mod paths;
 mod proto;
@@ -28,13 +29,13 @@ const HELP: &str = "\
 warren - a Claude Code agent multiplexer
 
   warren                 open the dashboard, or rebuild the view if agents are running
-  warren new NAME [DIR] [COLOR 0-255] [new|resume|continue] [session-id]
+  warren new NAME [DIR] [COLOR 0-255] [new|resume|continue] [session-id] [--kind=claude|omp]
   warren ls              list agents and their status
   warren kill NAME       terminate an agent
   warren sleep NAME      stop the agent's claude process, keep the agent
   warren wake NAME       start it again on the same conversation
   warren attach NAME     view a single agent raw (no sidebar)
-  warren sessions        list resumable Claude sessions
+  warren sessions [KIND] list resumable sessions (claude, or omp)
   warren help            show this help
 
 Agents run as independent daemons: the dashboard (and your SSH connection)
@@ -54,7 +55,7 @@ fn main() {
         "sleep" => cli::cmd_power(rest, false),
         "wake" => cli::cmd_power(rest, true),
         "attach" => cli::cmd_attach(rest),
-        "sessions" => sessions::cmd_sessions(),
+        "sessions" => sessions::cmd_sessions(rest),
         "hook" => hooks::cmd_hook(rest),
         "__daemon" => daemon::DaemonArgs::parse(rest).and_then(daemon::run),
         "help" | "-h" | "--help" => {

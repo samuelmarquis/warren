@@ -18,6 +18,7 @@ mod term;
 
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
+use std::os::fd::AsFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -27,6 +28,7 @@ use alacritty_terminal::tty::{self, ChildEvent, EventedPty, EventedReadWrite, Op
 use anyhow::{Context, Result, bail};
 use polling::{Event as PollEvent, Events, PollMode, Poller};
 
+use crate::kind::Kind;
 use crate::proto::{
     self, AgentState, HookState, Meta, MouseKind, MouseProto, Power, ToClient, ToDaemon,
 };
@@ -55,6 +57,12 @@ const SLEEP_GRACE: Duration = Duration::from_secs(4);
 /// its own tab down.
 const WAKE_GRACE: Duration = Duration::from_secs(5);
 
+/// How often to look for the agent's session row, and for how long after a
+/// spawn to keep looking. OMP writes it at startup; a handful of cheap stats
+/// covers a slow one without ever becoming a poll loop.
+const SESSION_PROBE_EVERY: Duration = Duration::from_millis(300);
+const SESSION_PROBE_FOR: Duration = Duration::from_secs(20);
+
 /// Keystrokes buffered for a sleeping agent (typing at one wakes it, and the
 /// bytes land in the resumed prompt). Bounded: a stuck wake must not grow a
 /// queue forever.
@@ -64,6 +72,8 @@ pub struct DaemonArgs {
     pub name: String,
     pub slot: u8,
     pub color: u8,
+    /// Which harness this agent runs: claude or omp.
+    pub kind: Kind,
     pub mode: String,
     pub dir: String,
     pub sid: Option<String>,
@@ -77,14 +87,19 @@ impl DaemonArgs {
     pub fn parse(rest: &[String]) -> Result<Self> {
         let sys = rest.iter().find_map(|a| a.strip_prefix("--sys=")).map(String::from);
         let extra = rest.iter().find_map(|a| a.strip_prefix("--extra=")).map(String::from);
+        let kind = match rest.iter().find_map(|a| a.strip_prefix("--kind=")) {
+            Some(k) => Kind::parse(k).with_context(|| format!("unknown agent kind '{k}'"))?,
+            None => Kind::default(),
+        };
         let pos: Vec<&String> = rest.iter().filter(|a| !a.starts_with("--")).collect();
         if pos.len() < 5 {
-            bail!("usage: warren __daemon NAME SLOT COLOR MODE DIR [SESSION-ID] [--sys=…] [--extra=…]");
+            bail!("usage: warren __daemon NAME SLOT COLOR MODE DIR [SESSION-ID] [--kind=…] [--sys=…] [--extra=…]");
         }
         Ok(DaemonArgs {
             name: pos[0].clone(),
             slot: pos[1].parse().context("slot")?,
             color: pos[2].parse().context("color")?,
+            kind,
             mode: pos[3].clone(),
             dir: pos[4].clone(),
             sid: pos.get(5).map(|s| s.to_string()),
@@ -98,6 +113,7 @@ impl DaemonArgs {
 /// wake can spawn the identical agent a second time (same cwd, system prompt,
 /// extra args and env), differing only in `--resume <session-id>`.
 struct Spawn {
+    kind: Kind,
     dir: String,
     sys: Option<String>,
     extra: Option<String>,
@@ -109,21 +125,13 @@ struct Spawn {
 }
 
 impl Spawn {
-    /// The shell command line for one run of the agent.
+    /// The shell command line for one run of the agent. Both harnesses spell
+    /// the modes and `--system-prompt` alike; `Kind` owns what differs.
     fn command(&self, mode: &str, sid: Option<&str>) -> Result<String> {
         if let Some(custom) = &self.custom {
             return Ok(custom.clone());
         }
-        let hooks = crate::hooks::ensure_hooks_json()?;
-        let mut cmd = match mode {
-            "resume" => match sid {
-                Some(sid) => format!("claude --resume {sid}"),
-                // No id: claude's own picker, rather than a wrong guess.
-                None => "claude --resume".to_string(),
-            },
-            "continue" => "claude --continue".to_string(),
-            _ => "claude".to_string(),
-        };
+        let mut cmd = self.kind.base_command(mode, sid);
         if let Some(sys) = &self.sys {
             // Single-quote for the shell, escaping embedded quotes.
             let escaped = sys.replace('\'', r"'\''");
@@ -136,7 +144,10 @@ impl Spawn {
         // Re-passed on every spawn: a resumed session does NOT inherit the
         // --settings of the run that created it, so the lifecycle hooks (and
         // with them the sidebar states and the session id) must be rewired.
-        cmd.push_str(&format!(" --settings '{}'", hooks.display()));
+        if let Some(hooks) = self.kind.hooks_flag()? {
+            cmd.push(' ');
+            cmd.push_str(&hooks);
+        }
         Ok(cmd)
     }
 
@@ -169,6 +180,15 @@ struct Daemon {
     sleep_deadline: Option<Instant>,
     /// When the last wake spawned, to catch a resume that dies on arrival.
     woke_at: Option<Instant>,
+    /// Name of the current pty's slave tty ("ttys004"), which is how OMP keys
+    /// the row naming the session it is running.
+    tty: Option<String>,
+    /// Wall clock of the current spawn, to reject a row left by whoever had
+    /// this tty before us.
+    pty_started: SystemTime,
+    /// Next look for that row, while one is still expected.
+    probe_at: Option<Instant>,
+    probe_until: Instant,
     /// Whether the current sleep has already escalated past SIGTERM.
     sigkilled: bool,
     /// Set by Kill while asleep: no child exit will ever end the loop for us.
@@ -219,6 +239,7 @@ pub fn run(args: DaemonArgs) -> Result<()> {
     env.insert("WARREN_SOCK".into(), sock.display().to_string());
 
     let spawn = Spawn {
+        kind: args.kind,
         dir: args.dir.clone(),
         sys: args.sys.clone(),
         extra: args.extra.clone(),
@@ -230,6 +251,7 @@ pub fn run(args: DaemonArgs) -> Result<()> {
     // from the SessionStart hook a moment from now.
     let sid = args.sid.clone().filter(|_| args.mode == "resume");
     let mut pty = spawn.pty(&args.mode, args.sid.as_deref(), 80, 24)?;
+    let tty = slave_tty(&mut pty);
 
     let poller = Arc::new(Poller::new()?);
     unsafe {
@@ -238,6 +260,9 @@ pub fn run(args: DaemonArgs) -> Result<()> {
         poller.add_with_mode(&listener, PollEvent::readable(KEY_LISTENER), PollMode::Level)?;
     }
 
+    // Harnesses that name their session on the tty are looked up; the others
+    // report it themselves (claude, through its hooks).
+    let spawn_probe = spawn.kind.learns_session_from_tty() && spawn.custom.is_none();
     let created = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let mut daemon = Daemon {
         term: term::AgentTerm::new(80, 24, SCROLLBACK),
@@ -247,6 +272,10 @@ pub fn run(args: DaemonArgs) -> Result<()> {
         sid,
         sleep_deadline: None,
         woke_at: None,
+        tty,
+        pty_started: SystemTime::now(),
+        probe_at: spawn_probe.then(|| Instant::now()),
+        probe_until: Instant::now() + SESSION_PROBE_FOR,
         sigkilled: false,
         quit: None,
         killed: false,
@@ -324,7 +353,7 @@ impl Daemon {
             // Wake for whichever comes first: the damage timer, or a stop
             // signal that needs escalating.
             let mut timeout = flush_at.map(|at| at.saturating_duration_since(Instant::now()));
-            if let Some(at) = self.sleep_deadline {
+            for at in [self.sleep_deadline, self.probe_at].into_iter().flatten() {
                 let until = at.saturating_duration_since(Instant::now());
                 timeout = Some(timeout.map_or(until, |t: Duration| t.min(until)));
             }
@@ -388,6 +417,7 @@ impl Daemon {
             self.write_pty();
             self.update_pty_interest()?;
             self.escalate_sleep();
+            self.poll_session();
 
             // Damage coalescing: first dirtying event arms the timer; the
             // frame goes out when it expires.
@@ -532,6 +562,38 @@ impl Daemon {
         Ok(())
     }
 
+    /// Look for the session row this agent's harness leaves on its tty, while
+    /// one is still plausibly coming.
+    fn poll_session(&mut self) {
+        let Some(at) = self.probe_at else { return };
+        if Instant::now() < at {
+            return;
+        }
+        self.probe_session();
+        self.probe_at = (self.sid.is_none() && Instant::now() < self.probe_until)
+            .then(|| Instant::now() + SESSION_PROBE_EVERY);
+    }
+
+    /// Read that row now. OMP writes `<cwd>\n<session file>\n…` keyed by the
+    /// tty it is talking to, and the daemon owns that pty — so this is the
+    /// agent's own session, even with several agents in one directory.
+    /// Whatever it yields goes in `sid`, exactly where claude's hooks put
+    /// theirs, and means the same thing: what a wake will `--resume`.
+    fn probe_session(&mut self) {
+        let Some(tty) = self.tty.clone() else { return };
+        let cwd = self.meta.cwd.clone();
+        let Some(session) = self.spawn.kind.live_session(&tty, &cwd, self.pty_started) else {
+            return;
+        };
+        if self.sid.as_deref() == Some(session.as_str()) {
+            return;
+        }
+        self.logf(&format!("session: {session}"));
+        self.sid = Some(session);
+        let update = ToClient::StateChanged(self.state());
+        self.broadcast(&update);
+    }
+
     // ------------------------------------------------------------ sleep/wake
 
     /// Stop claude, keep the agent. SIGTERM the whole process group: claude
@@ -545,6 +607,8 @@ impl Daemon {
         if self.power.is_down() {
             return;
         }
+        // Last chance to notice the agent moved itself to another session.
+        self.probe_session();
         let Some(pty) = self.pty.as_ref() else { return };
         let pid = pty.child().id() as i32;
         unsafe { libc::kill(-pid, libc::SIGTERM) };
@@ -623,10 +687,17 @@ impl Daemon {
             return; // pty drops here: SIGHUP + reap, still asleep
         }
         self.logf(&format!("wake: {mode} {}", sid.as_deref().unwrap_or("(no session id)")));
+        self.tty = slave_tty(&mut pty);
         self.pty = Some(pty);
         self.pty_wants_write = false;
         self.power = Power::Waking;
         self.woke_at = Some(Instant::now());
+        // A new pty means a new tty, so the session row has to be found again.
+        self.pty_started = SystemTime::now();
+        if self.spawn.kind.learns_session_from_tty() && self.spawn.custom.is_none() {
+            self.probe_at = Some(Instant::now());
+            self.probe_until = Instant::now() + SESSION_PROBE_FOR;
+        }
         // Claude repaints from scratch; start it on a clean screen so no
         // frozen cells from the old process survive underneath.
         self.term = term::AgentTerm::new(cols, rows, SCROLLBACK);
@@ -1007,9 +1078,62 @@ impl Daemon {
     }
 }
 
+/// The pty's slave tty, by the short name a harness would key a file with
+/// ("ttys004", or "3" for a Linux "/dev/pts/3").
+fn slave_tty(pty: &mut tty::Pty) -> Option<String> {
+    let name = rustix::pty::ptsname(pty.reader().as_fd(), Vec::new()).ok()?;
+    let name = name.to_string_lossy().rsplit('/').next()?.to_string();
+    (!name.is_empty()).then_some(name)
+}
+
 fn send_to(conn: &mut Conn, msg: &ToClient) {
     if let Ok(encoded) = proto::encode_frame(msg) {
         conn.send(&encoded);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spawn_for(kind: Kind) -> Spawn {
+        Spawn {
+            kind,
+            dir: "/w".into(),
+            sys: None,
+            extra: None,
+            custom: None,
+            shell: "/bin/sh".into(),
+            env: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn the_command_line_one_run_gets() {
+        // OMP takes the same mode flags as claude and wants no hooks wiring.
+        let omp = spawn_for(Kind::Omp);
+        assert_eq!(omp.command("new", None).unwrap(), "omp");
+        assert_eq!(omp.command("continue", None).unwrap(), "omp --continue");
+        assert_eq!(omp.command("resume", Some("01a0-ab")).unwrap(), "omp --resume 01a0-ab");
+
+        let mut dressed = spawn_for(Kind::Omp);
+        dressed.sys = Some("be brief".into());
+        dressed.extra = Some("--model opus".into());
+        assert_eq!(
+            dressed.command("new", None).unwrap(),
+            "omp --system-prompt 'be brief' --model opus"
+        );
+
+        // A quote in the system prompt stays inside one shell word.
+        let mut quoted = spawn_for(Kind::Omp);
+        quoted.sys = Some("don't stop".into());
+        assert_eq!(quoted.command("new", None).unwrap(), r"omp --system-prompt 'don'\''t stop'");
+
+        // WARREN_AGENT_CMD wins verbatim, for tests and tooling — and a wake
+        // reruns exactly it, which is why such agents sleep without a session.
+        let mut custom = spawn_for(Kind::Claude);
+        custom.custom = Some("cat".into());
+        assert_eq!(custom.command("resume", Some("x")).unwrap(), "cat");
     }
 }
 

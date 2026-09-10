@@ -7,6 +7,7 @@
 
 use std::fmt::Write;
 
+use crate::kind::Kind;
 use crate::proto::ToDaemon;
 use crate::sessions::Session;
 use crate::spans;
@@ -16,6 +17,7 @@ use super::{Dash, Mode};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum NField {
+    Kind,
     Mode,
     Title,
     Root,
@@ -29,7 +31,13 @@ pub const MODE_NEW: u8 = 0;
 pub const MODE_RESUME: u8 = 1;
 pub const MODE_CONTINUE: u8 = 2;
 
+/// The harnesses the form offers, in the order it cycles them.
+pub const KINDS: [Kind; 2] = [Kind::Claude, Kind::Omp];
+
 pub struct NewForm {
+    /// Index into KINDS. Which harness this agent will run — the only thing
+    /// on this form the sidebar will never show.
+    pub kind: usize,
     pub mode: u8,
     pub field: usize,
     pub title: String,
@@ -46,6 +54,7 @@ pub struct NewForm {
 impl NewForm {
     pub fn reset() -> NewForm {
         NewForm {
+            kind: 0,
             mode: MODE_NEW,
             field: 0,
             title: String::new(),
@@ -60,13 +69,24 @@ impl NewForm {
 
     pub fn fields(&self) -> &'static [NField] {
         match self.mode {
-            MODE_RESUME => {
-                &[NField::Mode, NField::List, NField::Sys, NField::Extra, NField::Color]
-            }
-            MODE_CONTINUE => {
-                &[NField::Mode, NField::Root, NField::Sys, NField::Extra, NField::Color]
-            }
+            MODE_RESUME => &[
+                NField::Kind,
+                NField::Mode,
+                NField::List,
+                NField::Sys,
+                NField::Extra,
+                NField::Color,
+            ],
+            MODE_CONTINUE => &[
+                NField::Kind,
+                NField::Mode,
+                NField::Root,
+                NField::Sys,
+                NField::Extra,
+                NField::Color,
+            ],
             _ => &[
+                NField::Kind,
                 NField::Mode,
                 NField::Title,
                 NField::Root,
@@ -77,13 +97,20 @@ impl NewForm {
         }
     }
 
+    pub fn agent_kind(&self) -> Kind {
+        KINDS[self.kind.min(KINDS.len() - 1)]
+    }
+
     pub fn active(&self) -> NField {
         self.fields()[self.field.min(self.fields().len() - 1)]
     }
 
+    /// The resume picker lists the selected harness's sessions; switching
+    /// harness drops the cached list so the next look re-scans.
     fn ensure_sessions(&mut self) {
         if self.sessions.is_none() {
-            self.sessions = Some(crate::sessions::scan(&crate::paths::claude_projects()));
+            self.sessions = Some(self.agent_kind().sessions());
+            self.sess_sel = 0;
         }
     }
 }
@@ -127,6 +154,18 @@ pub fn new_key(dash: &mut Dash, bytes: &[u8]) -> usize {
             _ => submit_new(dash),
         },
         key => match form.active() {
+            NField::Kind => {
+                let step = match key {
+                    Key::Char(b'l') | Key::Right | Key::Char(b' ') => 1,
+                    Key::Char(b'h') | Key::Left => KINDS.len() - 1,
+                    _ => 0,
+                };
+                if step != 0 {
+                    form.kind = (form.kind + step) % KINDS.len();
+                    form.sessions = None; // a different harness, different sessions
+                    form.field = 0;
+                }
+            }
             NField::Mode => {
                 if matches!(key, Key::Char(b'l') | Key::Right) {
                     form.mode = (form.mode + 1) % 3;
@@ -189,13 +228,16 @@ fn submit_new(dash: &mut Dash) {
     let sys = form.sys.trim().to_string();
     let extra = form.extra.trim().to_string();
     match crate::cli::launch_agent(
-        &base,
-        &dir,
-        color,
-        mode_str,
-        sid.as_deref(),
-        (!sys.is_empty()).then_some(sys.as_str()),
-        (!extra.is_empty()).then_some(extra.as_str()),
+        &crate::cli::NewAgent {
+            base: &base,
+            dir: &dir,
+            color,
+            kind: form.agent_kind(),
+            mode: mode_str,
+            sid: sid.as_deref(),
+            sys: (!sys.is_empty()).then_some(sys.as_str()),
+            extra: (!extra.is_empty()).then_some(extra.as_str()),
+        },
         &live,
     ) {
         Ok(name) => {
@@ -219,21 +261,28 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
     for row in 0..pane_h {
         let _ = write!(out, "\x1b[{};{}H\x1b[0m\x1b[K", row + 1, x0);
     }
-    let _ = write!(out, "\x1b[2;{}H\x1b[1m+ new claude agent\x1b[0m", x0 + 2);
+    let _ = write!(
+        out,
+        "\x1b[2;{}H\x1b[1m+ new {} agent\x1b[0m",
+        x0 + 2,
+        form.agent_kind().as_str()
+    );
 
-    // Mode selector.
-    let _ = write!(out, "\x1b[4;{}H", x0 + 2);
-    let _ = write!(out, "{}Mode      \x1b[0m  ", field_label(active == NField::Mode));
-    for (i, label) in ["new", "resume", "continue"].iter().enumerate() {
-        if form.mode == i as u8 {
-            let _ = write!(out, "\x1b[7m[ {label} ]\x1b[0m ");
-        } else {
-            let _ = write!(out, "\x1b[2m[ {label} ]\x1b[0m ");
-        }
-    }
+    // Which harness, then how to start it.
+    let kinds: Vec<&str> = KINDS.iter().map(|k| k.as_str()).collect();
+    draw_choice(out, 4, x0, "Agent", &kinds, form.kind, active == NField::Kind);
+    draw_choice(
+        out,
+        6,
+        x0,
+        "Mode",
+        &["new", "resume", "continue"],
+        form.mode as usize,
+        active == NField::Mode,
+    );
 
     #[allow(unused_assignments)]
-    let mut row = 6u16;
+    let mut row = 8u16;
     match form.mode {
         MODE_RESUME => {
             form.ensure_sessions();
@@ -246,7 +295,11 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
                 field_label(active == NField::List)
             );
             row += 1;
-            let visible = (pane_h.saturating_sub(row + 4) as usize).max(3).min(12);
+            // What still has to fit below: the "… N more" line, then Sys,
+            // Extra and Color at two rows each.
+            const BELOW_LIST: usize = 1 + 2 + 2 + 2;
+            let visible =
+                (pane_h as usize).saturating_sub(row as usize + BELOW_LIST).clamp(1, 12);
             let first = form.sess_sel.saturating_sub(visible - 1);
             for (i, sess) in sessions.iter().enumerate().skip(first).take(visible) {
                 let marker = if i == form.sess_sel { ">" } else { " " };
@@ -266,21 +319,38 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
             row += 2;
         }
         MODE_CONTINUE => {
-            row = draw_text_field(out, row, x0, "Root dir", &form.root, active == NField::Root, insert);
+            row = draw_text_field(out, row, x0, pane_h, "Root dir", &form.root, active == NField::Root, insert);
         }
         _ => {
-            row = draw_text_field(out, row, x0, "Title", &form.title, active == NField::Title, insert);
-            row = draw_text_field(out, row, x0, "Root dir", &form.root, active == NField::Root, insert);
+            row = draw_text_field(out, row, x0, pane_h, "Title", &form.title, active == NField::Title, insert);
+            row = draw_text_field(out, row, x0, pane_h, "Root dir", &form.root, active == NField::Root, insert);
         }
     }
-    row = draw_text_field(out, row, x0, "Sys prompt", &form.sys, active == NField::Sys, insert);
-    row = draw_text_field(out, row, x0, "Extra args", &form.extra, active == NField::Extra, insert);
+    row = draw_text_field(out, row, x0, pane_h, "Sys prompt", &form.sys, active == NField::Sys, insert);
+    row = draw_text_field(out, row, x0, pane_h, "Extra args", &form.extra, active == NField::Extra, insert);
 
     dash.palette_geom =
         draw_color_field(out, row, x0, pane_w, pane_h, form.color, active == NField::Color);
 }
 
 // ----------------------------------------------------------------- edit form
+
+/// One row of `[ option ]` chips, the form's h/l selector.
+fn draw_choice(
+    out: &mut String,
+    row: u16,
+    x0: u16,
+    label: &str,
+    options: &[&str],
+    selected: usize,
+    active: bool,
+) {
+    let _ = write!(out, "\x1b[{row};{}H{}{label:<10}\x1b[0m  ", x0 + 2, field_label(active));
+    for (i, option) in options.iter().enumerate() {
+        let style = if i == selected { "\x1b[7m" } else { "\x1b[2m" };
+        let _ = write!(out, "{style}[ {option} ]\x1b[0m ");
+    }
+}
 
 pub fn edit_key(dash: &mut Dash, bytes: &[u8]) -> usize {
     dash.form_dirty = true;
@@ -330,7 +400,7 @@ pub fn draw_edit_form(dash: &mut Dash, out: &mut String) {
         let _ = write!(out, "\x1b[{};{}H\x1b[0m\x1b[K", row + 1, x0);
     }
     let _ = write!(out, "\x1b[2;{}H\x1b[1medit agent\x1b[0m", x0 + 2);
-    let row = draw_text_field(out, 4, x0, "Title", &form.title, form.field == 0, true);
+    let row = draw_text_field(out, 4, x0, pane_h, "Title", &form.title, form.field == 0, true);
     dash.palette_geom =
         draw_color_field(out, row, x0, pane_w, pane_h, form.color, form.field == 1);
 }
@@ -411,11 +481,17 @@ fn draw_text_field(
     out: &mut String,
     row: u16,
     x0: u16,
+    pane_h: u16,
     label: &str,
     value: &str,
     active: bool,
     insert: bool,
 ) -> u16 {
+    // The status bar owns the row below the pane: a form too tall for the
+    // window loses its last fields rather than painting over it.
+    if row > pane_h {
+        return row + 2;
+    }
     let cursor = if active && insert { "\u{2588}" } else { "" };
     let _ = write!(
         out,
@@ -463,6 +539,9 @@ fn draw_color_field(
     color: u16,
     active: bool,
 ) -> Option<(u16, u16, u16, u16)> {
+    if row > pane_h {
+        return None;
+    }
     let _ = write!(out, "\x1b[{};{}H{}Color     \x1b[0m  ", row, x0 + 2, field_label(active));
     if color == 0 {
         let _ = write!(out, "\x1b[2mnone\x1b[0m");

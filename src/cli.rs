@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
+use crate::kind::Kind;
 use crate::proto::{self, AgentState, FrameDecoder, HookState, Meta, Power, ToClient, ToDaemon};
 
 // ------------------------------------------------------------------ discovery
@@ -84,12 +85,16 @@ pub fn cmd_new(args: &[String]) -> Result<()> {
     // Flag-style options can appear anywhere; the rest are positional.
     let sys = args.iter().find_map(|a| a.strip_prefix("--sys="));
     let extra = args.iter().find_map(|a| a.strip_prefix("--extra="));
+    let kind = match args.iter().find_map(|a| a.strip_prefix("--kind=")) {
+        Some(k) => Kind::parse(k).with_context(|| format!("unknown agent kind '{k}'"))?,
+        None => Kind::default(),
+    };
     let pos: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
 
     let Some(raw) = pos.first() else {
         bail!(
             "usage: warren new NAME [DIR] [COLOR 0-255] [new|resume|continue] [session-id] \
-             [--sys=SYSTEM-PROMPT] [--extra=EXTRA-CLAUDE-ARGS]"
+             [--kind=claude|omp] [--sys=SYSTEM-PROMPT] [--extra=EXTRA-AGENT-ARGS]"
         );
     };
     let base = crate::names::sanitize(raw);
@@ -109,7 +114,19 @@ pub fn cmd_new(args: &[String]) -> Result<()> {
     // also garbage-collects stale sockets so dead names become reusable.
     let live: Vec<(String, u8)> =
         discover().into_iter().map(|a| (a.meta.name, a.meta.slot)).collect();
-    let name = launch_agent(&base, &dir, color, &mode, sid.as_deref(), sys, extra, &live)?;
+    let name = launch_agent(
+        &NewAgent {
+            base: &base,
+            dir: &dir,
+            color,
+            kind,
+            mode: &mode,
+            sid: sid.as_deref(),
+            sys,
+            extra,
+        },
+        &live,
+    )?;
 
     // Wait for the daemon's socket to come up so failures surface here.
     let sock = crate::paths::sock_path(&name);
@@ -124,38 +141,32 @@ pub fn cmd_new(args: &[String]) -> Result<()> {
     bail!("agent '{name}' did not come up (set WARREN_LOG=/tmp/warren.log and retry to debug)");
 }
 
+/// What to start, before a name and a slot are picked for it.
+pub struct NewAgent<'a> {
+    pub base: &'a str,
+    pub dir: &'a str,
+    pub color: u8,
+    /// Which harness: claude or omp.
+    pub kind: Kind,
+    pub mode: &'a str,
+    pub sid: Option<&'a str>,
+    pub sys: Option<&'a str>,
+    pub extra: Option<&'a str>,
+}
+
 /// Pick a unique name and free slot against `live` (name, slot) pairs and
 /// spawn the daemon. Shared by the CLI and the dashboard's new-agent form.
-#[allow(clippy::too_many_arguments)]
-pub fn launch_agent(
-    base: &str,
-    dir: &str,
-    color: u8,
-    mode: &str,
-    sid: Option<&str>,
-    sys: Option<&str>,
-    extra: Option<&str>,
-    live: &[(String, u8)],
-) -> Result<String> {
-    let name = crate::names::unique(base, live.iter().map(|(n, _)| n.as_str()));
+pub fn launch_agent(spec: &NewAgent, live: &[(String, u8)]) -> Result<String> {
+    let name = crate::names::unique(spec.base, live.iter().map(|(n, _)| n.as_str()));
     let slot = (1..=u8::MAX).find(|s| !live.iter().any(|(_, used)| used == s)).unwrap_or(0);
-    spawn_daemon(&name, slot, color, mode, dir, sid, sys, extra)?;
+    spawn_daemon(&name, slot, spec)?;
     Ok(name)
 }
 
 /// Spawn `warren __daemon` fully detached: new session, no stdio, no cwd tie.
 /// We exit immediately after, so it reparents to init (ppid 1).
-#[allow(clippy::too_many_arguments)]
-fn spawn_daemon(
-    name: &str,
-    slot: u8,
-    color: u8,
-    mode: &str,
-    dir: &str,
-    sid: Option<&str>,
-    sys: Option<&str>,
-    extra: Option<&str>,
-) -> Result<()> {
+fn spawn_daemon(name: &str, slot: u8, spec: &NewAgent) -> Result<()> {
+    let NewAgent { dir, color, kind, mode, sid, sys, extra, .. } = *spec;
     let exe = std::env::current_exe()?;
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("__daemon")
@@ -171,6 +182,7 @@ fn spawn_daemon(
     if let Some(sid) = sid {
         cmd.arg(sid);
     }
+    cmd.arg(format!("--kind={}", kind.as_str()));
     if let Some(sys) = sys {
         cmd.arg(format!("--sys={sys}"));
     }

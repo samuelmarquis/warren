@@ -1,4 +1,4 @@
-//! List Claude Code sessions across ALL projects, most-recent first.
+//! List a harness's resumable sessions across ALL projects, newest first.
 //!
 //! Reads ~/.claude/projects/*/*.jsonl directly (rather than relying on
 //! `claude --resume`'s cwd-scoped picker, whose behavior could change).
@@ -26,17 +26,123 @@ pub struct Session {
     pub title: String,
 }
 
-pub fn cmd_sessions() -> Result<()> {
-    let sessions = scan(&crate::paths::claude_projects());
+pub fn cmd_sessions(args: &[String]) -> Result<()> {
+    let kind = match args.first() {
+        Some(arg) => crate::kind::Kind::parse(arg)
+            .ok_or_else(|| anyhow::anyhow!("unknown agent kind '{arg}' (claude or omp)"))?,
+        None => crate::kind::Kind::default(),
+    };
+    let sessions = kind.sessions();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     for s in &sessions {
-        writeln!(out, "{}\t{}\t{}\t{}", s.id, s.mtime as i64, s.cwd, s.title)?;
+        // `warren sessions | head` closes the pipe on us; that is the reader
+        // being done, not an error worth a nonzero exit.
+        if let Err(e) = writeln!(out, "{}\t{}\t{}\t{}", s.id, s.mtime as i64, s.cwd, s.title) {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                return Ok(());
+            }
+            return Err(e.into());
+        }
     }
     Ok(())
 }
 
-pub fn scan(root: &Path) -> Vec<Session> {
+/// Order a scan's results the way the pickers want them: newest first, with
+/// the remaining fields breaking ties so the listing is stable.
+fn newest_first(rows: &mut [Session]) {
+    rows.sort_by(|a, b| {
+        b.mtime
+            .partial_cmp(&a.mtime)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.id.cmp(&a.id))
+            .then_with(|| b.cwd.cmp(&a.cwd))
+            .then_with(|| b.title.cmp(&a.title))
+    });
+}
+
+/// Squash whitespace and cap at 80 chars, as the pickers display them.
+fn tidy(label: &str) -> String {
+    label.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(80).collect()
+}
+
+/// OMP keeps one directory per project, each holding `<timestamp>_<uuid>.jsonl`.
+/// The `session` record carries the id, cwd and title; a padded `title` record
+/// sits at the head of the file and is rewritten in place as the title
+/// changes, so it wins when it is there. Both are near the top, so a scan
+/// stops as soon as it has them rather than reading whole transcripts.
+pub fn scan_omp(root: &Path) -> Vec<Session> {
+    let mut rows: Vec<Session> = Vec::new();
+    let Ok(projects) = std::fs::read_dir(root) else {
+        return rows;
+    };
+    for project in projects.flatten() {
+        let Ok(files) = std::fs::read_dir(project.path()) else { continue };
+        for file in files.flatten() {
+            let path = file.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Ok(meta) = file.metadata() else { continue };
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            let Ok(handle) = std::fs::File::open(&path) else { continue };
+            let mut reader = BufReader::new(handle);
+
+            let (mut id, mut cwd, mut title, mut pad_title) =
+                (String::new(), String::new(), String::new(), String::new());
+            let mut raw = Vec::new();
+            for _ in 0..64 {
+                raw.clear();
+                match reader.read_until(b'\n', &mut raw) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let ln = String::from_utf8_lossy(&raw);
+                if !(ln.contains("\"session\"") || ln.contains("\"title\"")) {
+                    continue;
+                }
+                let Ok(d) = serde_json::from_str::<Value>(&ln) else { continue };
+                match d.get("type").and_then(Value::as_str) {
+                    Some("session") => {
+                        id = d.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+                        cwd = d.get("cwd").and_then(Value::as_str).unwrap_or("").to_string();
+                        title = d.get("title").and_then(Value::as_str).unwrap_or("").to_string();
+                    }
+                    Some("title") => {
+                        pad_title =
+                            d.get("title").and_then(Value::as_str).unwrap_or("").trim().to_string();
+                    }
+                    _ => {}
+                }
+                if !id.is_empty() && !pad_title.is_empty() {
+                    break;
+                }
+            }
+            if id.is_empty() {
+                continue; // not an OMP session file we understand
+            }
+            let label = [pad_title, title]
+                .into_iter()
+                .find(|t| !t.is_empty())
+                .unwrap_or_else(|| "(untitled)".to_string());
+            rows.push(Session {
+                id,
+                mtime,
+                cwd: if cwd.is_empty() { "?".to_string() } else { cwd },
+                title: tidy(&label),
+            });
+        }
+    }
+    newest_first(&mut rows);
+    rows
+}
+
+pub fn scan_claude(root: &Path) -> Vec<Session> {
     let mut rows: Vec<Session> = Vec::new();
     let Ok(projects) = std::fs::read_dir(root) else {
         return rows;
@@ -65,14 +171,7 @@ pub fn scan(root: &Path) -> Vec<Session> {
         }
     }
     // Python sorts the (mtime, sid, cwd, label) tuple descending.
-    rows.sort_by(|a, b| {
-        b.mtime
-            .partial_cmp(&a.mtime)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.id.cmp(&a.id))
-            .then_with(|| b.cwd.cmp(&a.cwd))
-            .then_with(|| b.title.cmp(&a.title))
-    });
+    newest_first(&mut rows);
     rows
 }
 
@@ -153,13 +252,7 @@ fn read_session_file(path: &Path) -> Option<(String, String)> {
         "(untitled)".to_string()
     };
     // Collapse whitespace runs, cap at 80 chars (Python: " ".join(label.split())[:80]).
-    let label: String = label
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(80)
-        .collect();
+    let label = tidy(&label);
     let cwd = if cwd.is_empty() { "?".to_string() } else { cwd };
     Some((cwd, label))
 }
@@ -190,7 +283,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let s = scan(&root);
+        let s = scan_claude(&root);
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].id, "abc-123");
         assert_eq!(s[0].cwd, "/tmp/x");
@@ -209,7 +302,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let s = scan(&root);
+        let s = scan_claude(&root);
         assert_eq!(s[0].title, "do the thing");
         assert_eq!(s[0].cwd, "?");
         let _ = fs::remove_dir_all(&root);
@@ -223,10 +316,52 @@ mod tests {
         fs::write(&old, "{}\n").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
         fs::write(&new, "not json\n").unwrap();
-        let s = scan(&root);
+        let s = scan_claude(&root);
         assert_eq!(s.len(), 2);
         assert_eq!(s[0].id, "new");
         assert_eq!(s[1].id, "old");
+        assert_eq!(s[0].title, "(untitled)");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn omp_sessions_read_id_cwd_and_the_freshest_title() {
+        let root = fixture_root("omp");
+        fs::create_dir_all(root.join("-w-repo")).unwrap();
+        fs::write(
+            root.join("-w-repo/2026-09-09T22-44-32-066Z_01a08858-abcd.jsonl"),
+            concat!(
+                // The padded head record, rewritten in place as the title changes.
+                r#"{"type":"title","title":"Remove   noreply lines","pad":"      ","v":1}"#,
+                "\n",
+                r#"{"type":"session","id":"01a08858-abcd","cwd":"/w/repo","title":"stale title"}"#,
+                "\n",
+                r#"{"type":"model_change","id":"f7f4"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        // A file with no session record is not an OMP session we understand.
+        fs::write(root.join("-w-repo/notes.jsonl"), "{\"type\":\"model_change\"}\n").unwrap();
+
+        let s = scan_omp(&root);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].id, "01a08858-abcd");
+        assert_eq!(s[0].cwd, "/w/repo");
+        assert_eq!(s[0].title, "Remove noreply lines", "the head title wins, whitespace squashed");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn omp_falls_back_to_the_session_records_title() {
+        let root = fixture_root("omp2");
+        fs::create_dir_all(root.join("proj")).unwrap();
+        fs::write(
+            root.join("proj/a_b.jsonl"),
+            "{\"type\":\"session\",\"id\":\"b\",\"cwd\":\"/x\"}\n",
+        )
+        .unwrap();
+        let s = scan_omp(&root);
         assert_eq!(s[0].title, "(untitled)");
         let _ = fs::remove_dir_all(&root);
     }
@@ -240,7 +375,7 @@ mod tests {
             format!("{{\"type\":\"user\",\"message\":{{\"content\":\"{long}\"}}}}\n"),
         )
         .unwrap();
-        let s = scan(&root);
+        let s = scan_claude(&root);
         assert_eq!(s[0].title.chars().count(), 80);
         let _ = fs::remove_dir_all(&root);
     }

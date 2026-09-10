@@ -58,6 +58,27 @@ pub fn claude_projects() -> PathBuf {
     PathBuf::from(home).join(".claude").join("projects")
 }
 
+/// OMP's data directory (`WARREN_OMP_HOME` overrides it, for tests).
+pub fn omp_home() -> PathBuf {
+    if let Ok(dir) = std::env::var("WARREN_OMP_HOME") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    PathBuf::from(home).join(".omp")
+}
+
+/// One directory per project, each holding `<timestamp>_<uuid>.jsonl`.
+pub fn omp_sessions() -> PathBuf {
+    omp_home().join("agent").join("sessions")
+}
+
+/// One row per tty: the cwd and session file of the OMP running on it.
+pub fn omp_terminal_sessions() -> PathBuf {
+    omp_home().join("agent").join("terminal-sessions")
+}
+
 fn restrict_to_owner(dir: &std::path::Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let perms = std::fs::Permissions::from_mode(0o700);

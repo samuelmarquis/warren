@@ -1,11 +1,13 @@
 # warren
 
-**A meta-harness for Claude Code: run a colony of agents from one terminal.**
+**A meta-harness for Claude Code and OMP: run a colony of agents from one
+terminal.**
 
-Claude Code is a harness for one agent. warren is the layer above it — a
-dashboard for running *many* Claude Code agents at once, each in its own
+Claude Code is a harness for one agent; so is OMP. warren is the layer above
+them — a dashboard for running *many* agents at once, each in its own
 independent process, switched between like vim buffers, over an SSH
-connection you're allowed to lose.
+connection you're allowed to lose. Pick the harness per agent when you create
+it; nothing after that treats them differently.
 
 A warren is a maze of interconnected burrows where a colony lives — and
 *survives*. Each agent runs in its own burrow (a daemon that answers to no
@@ -97,13 +99,13 @@ Override the destination with `PREFIX=…`.
 ```
 warren                 open the dashboard (rebuilds the view from running agents)
 warren new NAME [DIR] [COLOR 0-255] [new|resume|continue] [session-id]
-           [--sys=SYSTEM-PROMPT] [--extra=EXTRA-CLAUDE-ARGS]
+           [--kind=claude|omp] [--sys=SYSTEM-PROMPT] [--extra=EXTRA-AGENT-ARGS]
 warren ls              list agents and their states
 warren kill NAME       terminate an agent
 warren sleep NAME      stop its claude process, keep the agent (resumable)
 warren wake NAME       start it again on the same conversation
 warren attach NAME     view a single agent raw (no sidebar; Ctrl-\ detaches)
-warren sessions        all resumable Claude sessions (id, mtime, cwd, title)
+warren sessions [KIND] all resumable sessions (id, mtime, cwd, title) — claude, or omp
 warren help
 ```
 
@@ -133,10 +135,39 @@ folder header to fold that directory away, wheel over the sidebar cycles
 agents, clicks and wheel over the pane go to the agent (Claude's fullscreen
 TUI handles its own scrolling), palette swatches are clickable.
 
-The **new-agent form** (the `+` tab): pick `new` / `resume` / `continue`,
-title, root dir, a session from the resume picker, a system prompt
-(`--system-prompt`), extra claude CLI args, and a tab color. Tab/Shift+Tab
-cycle fields; NORMAL always navigates away — the form never traps you.
+The **new-agent form** (the `+` tab): pick the harness (`claude` / `omp`),
+then `new` / `resume` / `continue`, title, root dir, a session from that
+harness's resume picker, a system prompt (`--system-prompt`), extra CLI args,
+and a tab color. Tab/Shift+Tab cycle fields; NORMAL always navigates away —
+the form never traps you.
+
+### Two harnesses, one colony
+
+`--kind=claude` (the default) and `--kind=omp` are the only place the choice
+appears. Both harnesses spell `--continue`, `--resume` and `--system-prompt`
+identically, so modes, the resume picker, per-agent system prompts, extra
+args, title sync, folders, sleep and wake all work the same either way — and
+the sidebar deliberately doesn't say which is which, because the row is
+narrow and the pane already tells you.
+
+What differs is how much an agent can say about itself. Claude Code runs
+warren's generated lifecycle hooks, which push exact states and the session
+id. OMP has no equivalent settings file, so its agents fall back to the
+output-activity heuristic every viewer already computes: they read *working*
+and *idle* correctly, but never `!`, because nothing tells us a permission
+prompt is up.
+
+Sleep still works, because OMP says which session it is running another way:
+it writes `<cwd>` and the session file to
+`~/.omp/agent/terminal-sessions/<tty>` at startup, and the daemon owns that
+pty — so the row keyed by its own slave tty is that agent's own session, even
+with several agents in one directory. A row is rejected if it predates the
+agent (tty names get recycled) or names another directory.
+
+Everything harness-specific lives in `src/kind.rs`: the command line for a
+run, whether lifecycle state can reach the daemon, where sessions are kept,
+and how a live agent's session is identified. A third harness is a variant
+and those four answers.
 
 ### Folders
 
@@ -174,8 +205,9 @@ land in the resumed prompt.
 
 The session id comes from the agent's own lifecycle hooks: Claude passes one
 on stdin with every hook event, so warren knows it a second after spawn and
-keeps it current. Resuming appends to the same session, so an agent can sleep
-and wake forever without ever forking its conversation.
+keeps it current. OMP agents are identified through their tty instead (see
+above). Either way resuming appends to the same session, so an agent can
+sleep and wake forever without ever forking its conversation.
 
 Two refusals, both about not losing anything you can't get back. Sleeping
 **mid-turn** is refused (`AGENT BUSY` in the status bar) — the in-flight turn
@@ -194,7 +226,8 @@ back within a session, and the conversations were always resumable anyway.
 
 ### How agent states work
 
-warren generates a Claude Code settings file whose lifecycle hooks run
+This is Claude Code only; OMP agents fall back to the activity heuristic
+below. warren generates a Claude Code settings file whose lifecycle hooks run
 `warren hook <state>`, which pokes the agent's own daemon over its socket:
 prompt submitted or tool running → *working*, turn finished → *ready*,
 permission prompt → *attention*. The hook also reads the `session_id` out of
@@ -209,8 +242,9 @@ socket, and it always exits 0 — a wedged daemon can never stall Claude.
 ~/.warren/hooks.json        Claude Code hook settings (regenerated on spawn)
 ```
 
-That's everything warren writes. Agents die with the machine (conversations
-persist in `~/.claude` and come back through the resume picker).
+That's everything warren writes — it only ever reads `~/.claude` and
+`~/.omp`. Agents die with the machine (conversations persist in their
+harness's own store and come back through the resume picker).
 
 ## Development
 
