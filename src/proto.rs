@@ -15,6 +15,11 @@ use serde::de::DeserializeOwned;
 
 use crate::spans::LineSpans;
 
+/// Bumped whenever a change to these messages would confuse an older peer.
+/// `warren __roster` reports it so the near side can name a version mismatch
+/// instead of meeting it later as a corrupt frame.
+pub const WIRE_VERSION: u32 = 2;
+
 /// Refuse frames bigger than this — a corrupt length prefix must not make us
 /// buffer gigabytes. A full 4k-cell snapshot with worst-case styling is far
 /// below this.

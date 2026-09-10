@@ -8,7 +8,8 @@ use crate::spans::{self, LineSpans, Span};
 
 use crate::proto::Power;
 
-use super::{Dash, Mode, Row, Sub};
+use super::tree::{self, Row};
+use super::{Dash, Mode, Sub};
 
 pub const SIDEBAR_WIDTH: u16 = 24;
 
@@ -80,8 +81,8 @@ fn row_number(n: usize) -> String {
 fn draw_sidebar(dash: &mut Dash, out: &mut String) {
     let height = dash.rows.saturating_sub(1);
     let text_w = (SIDEBAR_WIDTH - 1) as usize;
-    let folders = dash.folders();
-    let layout = dash.rows(&folders);
+    let sections = dash.sections();
+    let layout = tree::rows(&sections);
 
     for row in 0..height {
         let _ = write!(out, "\x1b[{};1H", row + 1);
@@ -89,7 +90,7 @@ fn draw_sidebar(dash: &mut Dash, out: &mut String) {
             let _ = write!(out, "\x1b[0m{}", " ".repeat(text_w));
             continue;
         };
-        match item {
+        match *item {
             // The pinned "+ new agent" tab.
             Row::NewAgent => {
                 let focused = dash.on_newform();
@@ -99,14 +100,27 @@ fn draw_sidebar(dash: &mut Dash, out: &mut String) {
                 let pad = text_w.saturating_sub(label.chars().count());
                 let _ = write!(out, "{style}{label}{}\x1b[0m", " ".repeat(pad));
             }
+            // A machine. Bold while it is answering, and saying so when not.
+            Row::Host(s) => {
+                let section = &sections[s];
+                let text = match &section.status {
+                    Some(state) => format!(" {} \u{b7} {state}", section.label),
+                    None => format!(" {}", section.label),
+                };
+                let text: String = text.chars().take(text_w).collect();
+                let pad = text_w.saturating_sub(text.chars().count());
+                let style = if section.status.is_some() { "\x1b[0;2;3m" } else { "\x1b[0;1;4m" };
+                let _ = write!(out, "{style}{text}\x1b[0m{}", " ".repeat(pad));
+            }
             // A working directory. Folded, it says how many it is holding.
-            Row::Folder(fi) => {
-                let folder = &folders[*fi];
-                let holds_focus = folder.agents().contains(&dash.focus);
+            Row::Folder(s, f) => {
+                let folder = &sections[s].folders[f];
+                let holds_focus =
+                    folder.items.contains(&tree::Item::Live(dash.focus));
                 let tail =
-                    if folder.collapsed { format!("\u{25b8}{} ", folder.len) } else { String::new() };
+                    if folder.collapsed { format!("\u{25b8}{} ", folder.items.len()) } else { String::new() };
                 let room = text_w.saturating_sub(tail.chars().count());
-                let head = format!(" {} {}/", row_number(fi + 1), folder.label);
+                let head = format!(" {} {}/", row_number(folder.number), folder.label);
                 let head: String = head.chars().take(room).collect();
                 let pad = room.saturating_sub(head.chars().count());
                 // Bold while it holds the focused agent — a folded folder is
@@ -114,56 +128,70 @@ fn draw_sidebar(dash: &mut Dash, out: &mut String) {
                 let style = if holds_focus { "\x1b[0;1m" } else { "\x1b[0;2m" };
                 let _ = write!(out, "{style}{head}{}{tail}\x1b[0m", " ".repeat(pad));
             }
-            Row::Agent(i) => {
-                let folder = folders.iter().find(|f| f.agents().contains(i)).unwrap();
-                let agent = &dash.agents[*i];
-                let focused = dash.focus == *i;
-                let last = *i + 1 == folder.start + folder.len;
-                let number = row_number(*i - folder.start + 1);
-                // Trailing mark: 'z' = asleep (no process, resumable); '!' =
-                // blocked on a permission prompt and quiet; '*' = went idle
-                // while unfocused, not yet examined.
-                let mark = if agent.asleep() {
-                    " z"
-                } else if agent.needs_attention() {
-                    " !"
-                } else if agent.unseen {
-                    " *"
-                } else {
-                    ""
-                };
+            Row::Item(s, f, i) => {
+                let folder = &sections[s].folders[f];
+                let last = i + 1 == folder.items.len();
                 let branch = if last { '\u{2514}' } else { '\u{251c}' };
-                let name_w = text_w.saturating_sub(5 + mark.len());
-                let name: String = agent.meta.display.chars().take(name_w).collect();
-                let label = format!(" {branch} {number} {name}{mark}");
-                let pad = text_w.saturating_sub(label.chars().count());
+                let number = row_number(i + 1);
+                match folder.items[i] {
+                    tree::Item::Live(index) => {
+                        let agent = &dash.agents[index];
+                        let focused = dash.focus == index;
+                        // Trailing mark: 'z' = asleep (no process, resumable);
+                        // '!' = blocked on a permission prompt and quiet; '*' =
+                        // went idle while unfocused, not yet examined.
+                        let mark = if agent.asleep() {
+                            " z"
+                        } else if agent.needs_attention() {
+                            " !"
+                        } else if agent.unseen {
+                            " *"
+                        } else {
+                            ""
+                        };
+                        let name_w = text_w.saturating_sub(5 + mark.len());
+                        let name: String = agent.meta.display.chars().take(name_w).collect();
+                        let label = format!(" {branch} {number} {name}{mark}");
+                        let pad = text_w.saturating_sub(label.chars().count());
 
-                let color = agent.meta.color;
-                let mut style = String::from("\x1b[0");
-                // Busy = plain weight, idle = bold. Never dim: dim fg over a
-                // colored background reads as unreadable mid-gray — so a
-                // sleeping row is dimmed only when it isn't the focused
-                // (color-backed) one.
-                if agent.asleep() {
-                    if !focused {
-                        style.push_str(";2");
+                        let color = agent.meta.color;
+                        let mut style = String::from("\x1b[0");
+                        // Busy = plain weight, idle = bold. Never dim: dim fg
+                        // over a colored background reads as unreadable
+                        // mid-gray — so a sleeping row is dimmed only when it
+                        // isn't the focused (color-backed) one.
+                        if agent.asleep() {
+                            if !focused {
+                                style.push_str(";2");
+                            }
+                        } else if !agent.busy() {
+                            style.push_str(";1");
+                        }
+                        if focused {
+                            if color != 0 {
+                                let (r, g, b) = spans::xterm256_to_rgb(color);
+                                let fg = if spans::color_is_dark(r, g, b) { 231 } else { 16 };
+                                let _ = write!(style, ";48;5;{color};38;5;{fg}");
+                            } else {
+                                style.push_str(";7");
+                            }
+                        } else if color != 0 {
+                            let _ = write!(style, ";38;5;{color}");
+                        }
+                        style.push('m');
+                        let _ = write!(out, "{style}{label}{}\x1b[0m", " ".repeat(pad));
                     }
-                } else if !agent.busy() {
-                    style.push_str(";1");
-                }
-                if focused {
-                    if color != 0 {
-                        let (r, g, b) = spans::xterm256_to_rgb(color);
-                        let fg = if spans::color_is_dark(r, g, b) { 231 } else { 16 };
-                        let _ = write!(style, ";48;5;{color};38;5;{fg}");
-                    } else {
-                        style.push_str(";7");
+                    // A machine that isn't answering: its last known rows,
+                    // dimmed, and not somewhere you can go.
+                    tree::Item::Ghost(h, g) => {
+                        let ghost = &dash.hosts.hosts[h].ghosts[g];
+                        let name_w = text_w.saturating_sub(5);
+                        let name: String = ghost.display.chars().take(name_w).collect();
+                        let label = format!(" {branch} {number} {name}");
+                        let pad = text_w.saturating_sub(label.chars().count());
+                        let _ = write!(out, "\x1b[0;2m{label}{}\x1b[0m", " ".repeat(pad));
                     }
-                } else if color != 0 {
-                    let _ = write!(style, ";38;5;{color}");
                 }
-                style.push('m');
-                let _ = write!(out, "{style}{label}{}\x1b[0m", " ".repeat(pad));
             }
         }
     }
@@ -442,12 +470,24 @@ fn draw_status(dash: &mut Dash, out: &mut String) {
     } else if matches!(dash.sub, Sub::Rename) {
         format!(" rename> {}\u{2588}   Enter save · Esc cancel", dash.cmdline)
     } else if let Sub::Goto(folder) = dash.sub {
-        let folders = dash.folders();
-        match folders.get(folder as usize - 1) {
-            Some(f) => format!(
-                " go to  {folder} {}/  \u{2588}   agent 1-{} · Esc cancel",
-                f.label, f.len
-            ),
+        let sections = dash.sections();
+        let found = sections
+            .iter()
+            .flat_map(|s| s.folders.iter().map(move |f| (s, f)))
+            .find(|(_, f)| f.number == folder as usize);
+        match found {
+            Some((section, f)) => {
+                let where_ = if section.label.is_empty() {
+                    String::new()
+                } else {
+                    format!(" on {}", section.label)
+                };
+                format!(
+                    " go to  {folder} {}/{where_}  \u{2588}   agent 1-{} · Esc cancel",
+                    f.label,
+                    f.items.len()
+                )
+            }
             None => format!(" go to  {folder} \u{2588}   (no folder {folder})"),
         }
     } else if matches!(dash.sub, Sub::Kill) {

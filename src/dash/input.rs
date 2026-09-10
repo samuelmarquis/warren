@@ -11,7 +11,8 @@
 //! form never traps you.
 
 use super::render::SIDEBAR_WIDTH;
-use super::{forms, Dash, Mode, Row, Sub};
+use super::tree::{self, Row};
+use super::{forms, Dash, Mode, Sub};
 use crate::proto::{MouseKind, ToDaemon};
 
 pub enum Outcome {
@@ -333,23 +334,52 @@ fn handle_mouse(dash: &mut Dash, ev: MouseReport) {
                 dash.focus_next();
             }
         } else if ev.press && !motion && button == 0 {
-            // Click an agent to focus it; click its folder to fold that
-            // directory away, or open it again.
-            let folders = dash.folders();
-            match dash.rows(&folders).get(ev.row as usize) {
-                Some(Row::Folder(fi)) => {
-                    let fi = *fi;
-                    drop(folders);
-                    dash.toggle_folder(fi);
+            // Click an agent to focus it, its folder to fold that directory
+            // away, or a machine's row to fold the whole machine.
+            let sections = dash.sections();
+            match tree::rows(&sections).get(ev.row as usize).copied() {
+                Some(Row::Host(s)) => {
+                    let cwds: Vec<String> =
+                        sections[s].folders.iter().map(|f| f.cwd.clone()).collect();
+                    let folded = sections[s].folders.iter().all(|f| f.collapsed);
+                    let offline = sections[s]
+                        .status
+                        .is_some()
+                        .then(|| sections[s].host.and_then(|h| dash.hosts.hosts.get(h)))
+                        .flatten()
+                        .map(|h| h.dest.clone());
+                    drop(sections);
+                    // Clicking a machine that isn't answering asks it again
+                    // rather than folding rows you cannot use anyway.
+                    if let Some(dest) = offline {
+                        dash.hosts.retry_now(&dest);
+                        dash.status_dirty = true;
+                        return;
+                    }
+                    for cwd in cwds {
+                        if folded {
+                            dash.collapsed.remove(&cwd);
+                        } else {
+                            dash.collapsed.insert(cwd);
+                        }
+                    }
+                    dash.sidebar_dirty = true;
                 }
-                Some(Row::Agent(i)) => {
-                    let i = *i;
-                    drop(folders);
-                    dash.set_focus(i);
+                Some(Row::Folder(s, f)) => {
+                    let cwd = sections[s].folders[f].cwd.clone();
+                    drop(sections);
+                    dash.toggle_folder(&cwd);
+                }
+                Some(Row::Item(s, f, i)) => {
+                    let item = sections[s].folders[f].items[i];
+                    drop(sections);
+                    if let tree::Item::Live(index) = item {
+                        dash.set_focus(index);
+                    }
                 }
                 Some(Row::NewAgent) => {
                     let last = dash.agents.len();
-                    drop(folders);
+                    drop(sections);
                     dash.set_focus(last);
                 }
                 None => {}

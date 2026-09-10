@@ -9,6 +9,7 @@ pub mod conn;
 mod forms;
 mod input;
 mod render;
+mod tree;
 
 use std::collections::HashSet;
 use std::collections::HashMap;
@@ -48,111 +49,6 @@ pub enum Sub {
     Goto(u8),
 }
 
-/// One sidebar folder: the run of agents sharing a working directory,
-/// labelled by that directory's own name — `~/Developer/Phylogen` reads
-/// `Phylogen/`, never the path that got you there.
-pub struct Folder {
-    pub label: String,
-    pub cwd: String,
-    /// First agent index, and how many; members are contiguous by sort order.
-    pub start: usize,
-    pub len: usize,
-    pub collapsed: bool,
-}
-
-impl Folder {
-    pub fn agents(&self) -> std::ops::Range<usize> {
-        self.start..self.start + self.len
-    }
-}
-
-/// What occupies one sidebar line.
-pub enum Row {
-    /// Index into `folders()`.
-    Folder(usize),
-    /// Index into `agents`.
-    Agent(usize),
-    /// The pinned "+ new agent" tab.
-    NewAgent,
-}
-
-/// Group agents into folders by working directory, in the order given.
-///
-/// Agents sharing a directory are contiguous (see `sort_agents`), so a folder
-/// is just a range. Labels that would collide take one parent component to
-/// tell them apart — still a name, not a path.
-pub fn group_folders<'a>(
-    cwds: impl Iterator<Item = &'a str>,
-    collapsed: &HashSet<String>,
-) -> Vec<Folder> {
-    let mut out: Vec<Folder> = Vec::new();
-    for (i, cwd) in cwds.enumerate() {
-        match out.last_mut() {
-            Some(f) if f.cwd == cwd => f.len += 1,
-            _ => out.push(Folder {
-                label: folder_label(cwd),
-                cwd: cwd.to_string(),
-                start: i,
-                len: 1,
-                collapsed: collapsed.contains(cwd),
-            }),
-        }
-    }
-    let mut seen: HashMap<&str, usize> = HashMap::new();
-    for f in &out {
-        *seen.entry(f.label.as_str()).or_insert(0) += 1;
-    }
-    let ambiguous: HashSet<String> =
-        seen.iter().filter(|(_, n)| **n > 1).map(|(l, _)| l.to_string()).collect();
-    for f in &mut out {
-        if !ambiguous.contains(&f.label) {
-            continue;
-        }
-        // One step up, and only the step: "src/" becoming "phylo/src/" is a
-        // disambiguation, "…/Developer/phylo/src/" would be a path.
-        let trimmed = f.cwd.trim_end_matches('/');
-        let above = trimmed[..trimmed.len() - f.label.len().min(trimmed.len())]
-            .trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .unwrap_or("");
-        if !above.is_empty() {
-            f.label = format!("{above}/{}", f.label);
-        }
-    }
-    out
-}
-
-/// Folder headers, the agents of the folders that are open, and the + tab.
-pub fn layout_rows(folders: &[Folder]) -> Vec<Row> {
-    let mut rows = Vec::new();
-    for (i, folder) in folders.iter().enumerate() {
-        rows.push(Row::Folder(i));
-        if !folder.collapsed {
-            rows.extend(folder.agents().map(Row::Agent));
-        }
-    }
-    rows.push(Row::NewAgent);
-    rows
-}
-
-/// A working directory's own name: the last component, `~` for the home
-/// directory itself, and never a path.
-fn folder_label(cwd: &str) -> String {
-    if cwd.is_empty() {
-        return "…".to_string(); // meta hasn't landed yet
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() && cwd == home {
-            return "~".to_string();
-        }
-    }
-    match cwd.trim_end_matches('/').rsplit('/').next() {
-        Some(name) if !name.is_empty() => name.to_string(),
-        _ => "/".to_string(),
-    }
-}
-
 pub struct Dash {
     pub agents: Vec<AgentConn>,
     /// poll key per agent, parallel to `agents`.
@@ -170,6 +66,10 @@ pub struct Dash {
     /// Folders folded away, by working directory. Viewer-local, like every
     /// other thing the dashboard knows: fold state is not worth a protocol.
     pub collapsed: HashSet<String>,
+    /// Other machines whose agents share this sidebar.
+    pub hosts: crate::remote::Hosts,
+    /// What to call this machine once there is another one to tell it from.
+    pub here: String,
     /// 0-based (row, col, box_w, box_h) of the color grid, when on screen.
     pub palette_geom: Option<(u16, u16, u16, u16)>,
     /// Dashboard start, the clock the sleeping-sheep animation runs on.
@@ -241,26 +141,47 @@ impl Dash {
 
     // ----------------------------------------------------------- folders
 
-    /// The sidebar's folders, in display order.
-    pub fn folders(&self) -> Vec<Folder> {
-        group_folders(self.agents.iter().map(|a| a.meta.cwd.as_str()), &self.collapsed)
+    /// The whole sidebar: machines, their folders, and what is in them.
+    pub fn sections(&self) -> Vec<tree::Section> {
+        let entries: Vec<tree::Entry> = self
+            .agents
+            .iter()
+            .enumerate()
+            .map(|(index, a)| tree::Entry {
+                index,
+                host: a.host.as_deref(),
+                cwd: a.meta.cwd.as_str(),
+            })
+            .collect();
+        let hosts: Vec<tree::HostView> = self
+            .hosts
+            .hosts
+            .iter()
+            .map(|h| tree::HostView {
+                dest: &h.dest,
+                label: &h.label,
+                status: match &h.state {
+                    crate::remote::HostState::Live => None,
+                    crate::remote::HostState::Connecting => Some("connecting…".to_string()),
+                    crate::remote::HostState::Offline(_) => Some("reconnecting…".to_string()),
+                },
+                ghosts: &h.ghosts,
+            })
+            .collect();
+        let mut sections = tree::build(&entries, &hosts, &self.collapsed, &self.here);
+        tree::disambiguate(&mut sections);
+        sections
     }
 
-    /// The sidebar, line by line.
-    pub fn rows(&self, folders: &[Folder]) -> Vec<Row> {
-        layout_rows(folders)
-    }
-
-    /// Is this agent's row on screen (its folder open)?
+    /// Is this agent's row on screen (its folder open, its machine answering)?
     fn shown(&self, idx: usize) -> bool {
         self.agents.get(idx).map(|a| !self.collapsed.contains(&a.meta.cwd)).unwrap_or(true)
     }
 
     /// Fold a folder away, or open it. Its agents keep running either way.
-    pub fn toggle_folder(&mut self, folder: usize) {
-        let Some(f) = self.folders().into_iter().nth(folder) else { return };
-        if !self.collapsed.remove(&f.cwd) {
-            self.collapsed.insert(f.cwd);
+    pub fn toggle_folder(&mut self, cwd: &str) {
+        if !self.collapsed.remove(cwd) {
+            self.collapsed.insert(cwd.to_string());
         }
         self.sidebar_dirty = true;
         self.status_dirty = true;
@@ -273,31 +194,27 @@ impl Dash {
         self.status_dirty = true;
     }
 
-    /// `^Space <folder> <agent>`: both 1-based, 10 being the `0` key.
+    /// `^Space <folder> <agent>`: both 1-based, 10 being the `0` key. Folder
+    /// numbers run through the whole sidebar, so this reaches another machine
+    /// without a third digit.
     pub fn goto(&mut self, folder: u8, agent: u8) {
-        let folders = self.folders();
-        let Some(f) = folders.get(folder as usize - 1) else {
-            self.flash = Some(format!("no folder {folder}"));
-            self.status_dirty = true;
-            return;
-        };
-        let Some(idx) = (agent as usize)
-            .checked_sub(1)
-            .map(|n| f.start + n)
-            .filter(|i| *i < f.start + f.len)
-        else {
-            self.flash = Some(format!("{}/ has no agent {agent}", f.label));
-            self.status_dirty = true;
-            return;
-        };
-        // Jumping into a folded folder opens it — you asked to go there.
-        let cwd = f.cwd.clone();
-        drop(folders);
-        if self.collapsed.remove(&cwd) {
-            self.sidebar_dirty = true;
+        let sections = self.sections();
+        match tree::locate(&sections, folder as usize, agent as usize) {
+            Ok(index) => {
+                // Jumping into a folded folder opens it — you asked to go there.
+                let cwd = self.agents[index].meta.cwd.clone();
+                drop(sections);
+                if self.collapsed.remove(&cwd) {
+                    self.sidebar_dirty = true;
+                }
+                self.set_focus(index);
+                self.enter_insert();
+            }
+            Err(why) => {
+                self.flash = Some(why);
+                self.status_dirty = true;
+            }
         }
-        self.set_focus(idx);
-        self.enter_insert();
     }
 
     // -------------------------------------------------------------- focus
@@ -403,13 +320,22 @@ impl Dash {
             return;
         }
         let focus = self.focus;
-        let Some(folder) = self.folders().into_iter().find(|f| f.agents().contains(&focus)) else {
+        let sections = self.sections();
+        let Some(folder) = sections
+            .iter()
+            .flat_map(|s| s.folders.iter())
+            .find(|f| f.items.contains(&tree::Item::Live(focus)))
+        else {
             return;
         };
-        let target = folder.start + n as usize - 1;
-        if target >= folder.start + folder.len || target == self.focus {
+        let target = match folder.items.get(n as usize - 1) {
+            Some(tree::Item::Live(index)) => *index,
+            _ => return,
+        };
+        if target == self.focus {
             return;
         }
+        drop(sections);
         let a_slot = self.agents[self.focus].meta.slot;
         let b_slot = self.agents[target].meta.slot;
         self.agents[target].send(&ToDaemon::SetMeta {
@@ -475,6 +401,8 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
         editform: None,
         pending_focus: None,
         collapsed: HashSet::new(),
+        hosts: crate::remote::Hosts::default(),
+        here: local_hostname(),
         palette_geom: None,
         started: Instant::now(),
         sheep_frame: u64::MAX,
@@ -494,6 +422,8 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
     }
 
     let mut next_key = KEY_FIRST_AGENT;
+    dash.hosts.reload(&poller);
+    dash.hosts.dial(&poller, &mut next_key);
     discover_new(&mut dash, &poller, &mut next_key);
     // Initial focus: the first agent (discover_new's stay-on-form rule is for
     // MID-SESSION arrivals; before discovery "empty == on the + tab" lies).
@@ -596,6 +526,15 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
                         }
                     }
                 }
+                key if dash.hosts.hosts.iter().any(|h| h.key == Some(key)) => {
+                    // A machine talking: the roster it just printed, or the
+                    // silence of an ssh that ended.
+                    if dash.hosts.read_watcher(key, &poller) {
+                        discover_remote(&mut dash, &poller, &mut next_key);
+                        dash.sidebar_dirty = true;
+                        dash.status_dirty = true;
+                    }
+                }
                 key => {
                     if let Some(idx) = dash.keys.iter().position(|&k| k == key) {
                         if ev.readable {
@@ -642,6 +581,23 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
         if last_scan.elapsed() >= Duration::from_secs(1) {
             last_scan = Instant::now();
             discover_new(&mut dash, &poller, &mut next_key);
+            if dash.hosts.reload(&poller) {
+                dash.sidebar_dirty = true;
+            }
+            let dialled = dash.hosts.dial(&poller, &mut next_key);
+            discover_remote(&mut dash, &poller, &mut next_key);
+            park_unreachable(&mut dash, &poller);
+            if log.is_some() {
+                let states: Vec<String> = dash
+                    .hosts
+                    .hosts
+                    .iter()
+                    .map(|h| {
+                        format!("{}={:?} key={:?} roster={}", h.label, h.state, h.key, h.roster.len())
+                    })
+                    .collect();
+                dlog!("hosts: [{}] dialled={dialled:?}", states.join(" | "));
+            }
         }
     };
 
@@ -694,6 +650,88 @@ fn discover_new(dash: &mut Dash, poller: &Poller, next_key: &mut usize) {
     }
 }
 
+/// Attach anything a machine reports that we are not already showing.
+fn discover_remote(dash: &mut Dash, poller: &Poller, next_key: &mut usize) {
+    let (pw, ph) = dash.pane_size();
+    let mut wanted: Vec<(String, String)> = Vec::new();
+    for host in &dash.hosts.hosts {
+        if !host.reachable() {
+            continue;
+        }
+        for name in &host.roster {
+            let known = dash
+                .agents
+                .iter()
+                .any(|a| a.ident() == (Some(host.dest.as_str()), name.as_str()));
+            if !known {
+                wanted.push((host.dest.clone(), name.clone()));
+            }
+        }
+    }
+    for (dest, name) in wanted {
+        let Some(host) = dash.hosts.get(&dest) else { continue };
+        // One `ssh … warren __pipe` per agent, all sharing the machine's
+        // single ssh connection. What comes back is an ordinary UnixStream.
+        let agent = match AgentConn::attach_remote(host, &name, pw, ph) {
+            Ok(agent) => agent,
+            Err(_) => continue, // the watcher will report why, if it is fatal
+        };
+        let key = *next_key;
+        *next_key += 1;
+        unsafe {
+            if poller
+                .add_with_mode(agent.stream(), PollEvent::readable(key), PollMode::Level)
+                .is_err()
+            {
+                continue;
+            }
+        }
+        let was_on_form = dash.on_newform();
+        dash.agents.push(agent);
+        dash.keys.push(key);
+        if was_on_form {
+            dash.focus = dash.agents.len(); // stay on the + tab
+        }
+        dash.sidebar_dirty = true;
+    }
+}
+
+/// A machine stopped answering: keep its rows as ghosts and let go of the
+/// connections, rather than showing tabs that cannot come back until it does.
+fn park_unreachable(dash: &mut Dash, poller: &Poller) {
+    let offline: HashSet<String> = dash
+        .hosts
+        .hosts
+        .iter()
+        .filter(|h| !h.reachable())
+        .map(|h| h.dest.clone())
+        .collect();
+    if offline.is_empty() {
+        return;
+    }
+    let mut parked: HashMap<String, Vec<crate::remote::Ghost>> = HashMap::new();
+    let mut i = 0;
+    while i < dash.agents.len() {
+        match dash.agents[i].host.clone() {
+            Some(dest) if offline.contains(&dest) => {
+                let agent = dash.agents.remove(i);
+                dash.keys.remove(i);
+                let _ = poller.delete(agent.stream());
+                parked.entry(dest).or_default().push(agent.ghost());
+                if dash.focus >= i && dash.focus > 0 {
+                    dash.focus -= 1;
+                }
+                dash.sidebar_dirty = true;
+                dash.full_redraw = true;
+            }
+            _ => i += 1,
+        }
+    }
+    for (dest, ghosts) in parked {
+        dash.hosts.park(&dest, ghosts);
+    }
+}
+
 /// Sidebar order: folders by their earliest member, agents by (slot, created)
 /// within a folder — so a working directory's agents are always contiguous,
 /// which is what lets a folder be a range. Follows the focused agent across
@@ -707,27 +745,40 @@ fn sort_agents(dash: &mut Dash) {
     // the already-sorted path (nearly all of them) allocates nothing.
     fn order<'a>(
         agent: &'a AgentConn,
-        rank: &HashMap<&str, (u8, u64)>,
-    ) -> ((u8, u64), &'a str, u8, u64) {
-        let folder = rank.get(agent.meta.cwd.as_str()).copied().unwrap_or((u8::MAX, u64::MAX));
-        (folder, agent.meta.cwd.as_str(), agent.meta.slot, agent.meta.created)
+        rank: &HashMap<(Option<&str>, &str), (u8, u64)>,
+        hosts: &[String],
+    ) -> (usize, (u8, u64), &'a str, u8, u64) {
+        let key = (agent.host.as_deref(), agent.meta.cwd.as_str());
+        let folder = rank.get(&key).copied().unwrap_or((u8::MAX, u64::MAX));
+        // This machine first, then the others in the order the file lists.
+        let machine = match &agent.host {
+            None => 0,
+            Some(dest) => hosts.iter().position(|h| h == dest).map(|i| i + 1).unwrap_or(usize::MAX),
+        };
+        (machine, folder, agent.meta.cwd.as_str(), agent.meta.slot, agent.meta.created)
     }
-    let mut rank: HashMap<&str, (u8, u64)> = HashMap::new();
+    let hosts: Vec<String> = dash.hosts.hosts.iter().map(|h| h.dest.clone()).collect();
+    let mut rank: HashMap<(Option<&str>, &str), (u8, u64)> = HashMap::new();
     for agent in &dash.agents {
         let key = (agent.meta.slot, agent.meta.created);
-        rank.entry(agent.meta.cwd.as_str())
+        rank.entry((agent.host.as_deref(), agent.meta.cwd.as_str()))
             .and_modify(|r| *r = (*r).min(key))
             .or_insert(key);
     }
-    if dash.agents.windows(2).all(|w| order(&w[0], &rank) <= order(&w[1], &rank)) {
+    if dash.agents.windows(2).all(|w| order(&w[0], &rank, &hosts) <= order(&w[1], &rank, &hosts)) {
         return;
     }
     // Owned keys from here: the sort has to outlive the agents' current home.
-    let rank: HashMap<String, (u8, u64)> =
-        rank.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    let rank: HashMap<(Option<String>, String), (u8, u64)> =
+        rank.into_iter().map(|((h, c), v)| ((h.map(String::from), c.to_string()), v)).collect();
     let owned = |a: &AgentConn| {
-        let folder = rank.get(&a.meta.cwd).copied().unwrap_or((u8::MAX, u64::MAX));
-        (folder, a.meta.cwd.clone(), a.meta.slot, a.meta.created)
+        let key = (a.host.clone(), a.meta.cwd.clone());
+        let folder = rank.get(&key).copied().unwrap_or((u8::MAX, u64::MAX));
+        let machine = match &a.host {
+            None => 0,
+            Some(dest) => hosts.iter().position(|h| h == dest).map(|i| i + 1).unwrap_or(usize::MAX),
+        };
+        (machine, folder, a.meta.cwd.clone(), a.meta.slot, a.meta.created)
     };
     let focused_name = dash.focused().map(|a| a.meta.name.clone());
     let mut zipped: Vec<(AgentConn, usize)> =
@@ -753,6 +804,12 @@ fn reap_agents(dash: &mut Dash, poller: &Poller) {
             let agent = dash.agents.remove(i);
             dash.keys.remove(i);
             let _ = poller.delete(agent.stream());
+            // Keep what a remote agent looked like. If its machine is simply
+            // gone, that row stays on screen dimmed; if the agent really did
+            // end, the machine's next roster (within the second) clears it.
+            if let Some(dest) = agent.host.clone() {
+                dash.hosts.park(&dest, vec![agent.ghost()]);
+            }
             if dash.focus >= i && dash.focus > 0 {
                 dash.focus -= 1;
             }
@@ -813,70 +870,23 @@ fn read_nb(mut src: impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn folders(cwds: &[&str], folded: &[&str]) -> Vec<Folder> {
-        let collapsed: HashSet<String> = folded.iter().map(|s| s.to_string()).collect();
-        group_folders(cwds.iter().copied(), &collapsed)
+/// This machine's short name, for the sidebar heading once there is another
+/// machine to tell it apart from.
+fn local_hostname() -> String {
+    let mut buf = [0u8; 256];
+    // SAFETY: a plain gethostname into a buffer we own; the result is
+    // NUL-terminated within it or truncated, and we only read up to the NUL.
+    let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
+    if !ok {
+        return "here".to_string();
     }
-
-    fn labels(f: &[Folder]) -> Vec<String> {
-        f.iter().map(|f| format!("{}/{}", f.label, f.len)).collect()
-    }
-
-    #[test]
-    fn a_folder_is_a_directory_named_by_itself() {
-        let f = folders(
-            &[
-                "/Users/x/Research",
-                "/Users/x/Research",
-                "/Users/x/Developer/Phylogen",
-                "/Users/x/Developer",
-            ],
-            &[],
-        );
-        // ~/Developer/Phylogen reads Phylogen/, never the path to it.
-        assert_eq!(labels(&f), ["Research/2", "Phylogen/1", "Developer/1"]);
-        assert_eq!(f[0].agents(), 0..2);
-        assert_eq!(f[1].agents(), 2..3);
-    }
-
-    #[test]
-    fn colliding_names_take_one_parent_and_no_more() {
-        let f = folders(&["/Users/x/phylo/src", "/Users/x/warren/src", "/Users/x/lone"], &[]);
-        assert_eq!(labels(&f), ["phylo/src/1", "warren/src/1", "lone/1"]);
-    }
-
-    #[test]
-    fn odd_directories_still_get_a_name() {
-        let home = std::env::var("HOME").unwrap_or_default();
-        if !home.is_empty() {
-            assert_eq!(folder_label(&home), "~");
-        }
-        assert_eq!(folder_label("/"), "/");
-        assert_eq!(folder_label("/opt/tools/"), "tools");
-        assert_eq!(folder_label(""), "…"); // meta not in yet
-    }
-
-    #[test]
-    fn folding_hides_a_folders_agents_but_never_the_new_tab() {
-        let f = folders(&["/a/one", "/a/one", "/b/two"], &["/a/one"]);
-        let rows = layout_rows(&f);
-        let shape: Vec<String> = rows
-            .iter()
-            .map(|r| match r {
-                Row::Folder(i) => format!("[{}]", f[*i].label),
-                Row::Agent(i) => format!("{i}"),
-                Row::NewAgent => "+".to_string(),
-            })
-            .collect();
-        assert_eq!(shape, ["[one]", "[two]", "2", "+"]);
-
-        let open = layout_rows(&folders(&["/a/one", "/a/one", "/b/two"], &[]));
-        assert_eq!(open.len(), 6, "two headers, three agents, the + tab");
-    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end])
+        .split('.')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("here")
+        .to_string()
 }
 
 /// Self-pipe for SIGWINCH so terminal resizes wake the poll loop.

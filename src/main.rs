@@ -20,6 +20,7 @@ mod kind;
 mod names;
 mod paths;
 mod proto;
+mod remote;
 mod sessions;
 mod spans;
 
@@ -57,6 +58,8 @@ fn main() {
         "attach" => cli::cmd_attach(rest),
         "sessions" => sessions::cmd_sessions(rest),
         "hook" => hooks::cmd_hook(rest),
+        "__roster" => remote::wire::cmd_roster(),
+        "__pipe" => remote::wire::cmd_pipe(rest),
         "__daemon" => daemon::DaemonArgs::parse(rest).and_then(daemon::run),
         "help" | "-h" | "--help" => {
             print!("{HELP}");

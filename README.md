@@ -45,8 +45,10 @@ everything outlives the connection it was started in.
 - **Resume anything.** The new-agent form lists every resumable Claude
   session on the machine, most recent first, with titles — pick one and it
   reopens in a fresh burrow. Per-agent system prompts and extra CLI args too.
-- **One static Rust binary.** No tmux, no screen, no ncurses, no Python, no
-  config file.
+- **Agents on other machines** in the same sidebar as the ones here, grouped
+  under a heading per machine, over one ssh connection each.
+- **One static Rust binary.** No tmux, no screen, no ncurses, no Python. The
+  only file you would ever hand-edit is a list of machines.
 
 ## Why
 
@@ -191,6 +193,64 @@ fold is the one thing the dashboard remembers, it is per-viewer, and it is
 deliberately forgotten when you detach — everything else still lives in the
 daemons.
 
+### Other machines
+
+Put ssh destinations in `~/.warren/hosts`, one per line, and their agents
+join this sidebar:
+
+```
+# machines
+smq
+servo@mini.local  /opt/homebrew/bin/warren   # where warren lives over there
+```
+
+The second column is optional and usually necessary: an ssh command runs
+without your login shell's PATH, so `~/.local/bin/warren` is not on it.
+Agents from this machine come first under its own hostname, then each host in
+the order listed:
+
+```
+ solidgoldmagikarp
+ 1 Research/
+ ├ 1 SVM-Encrypt
+ 2 warren/
+ └ 1 Warren tab
+ smq · reconnecting…
+ 3 Games/
+ └ 1 Spork
+```
+
+Folder numbers run straight through, so `^Space 3 1` reaches an agent on
+another machine with the same two digits as one here — the machine is a
+heading, not another digit to type. Nothing else marks a row as remote: the
+sidebar is 23 columns wide and the pane already tells you what you are
+looking at.
+
+Under it, per machine, is one `ssh … warren __roster` (which reports the
+agent list and reprints it whenever it changes) and one `ssh … warren
+__pipe <agent>` per agent, all sharing a single ssh connection through
+ControlMaster. Each pipe carries that agent's socket on its stdio, and the
+dashboard holds the near end of a socketpair — an ordinary unix socket, which
+is what a viewer always talked to. The daemon protocol, the daemons, and the
+poll loop are unchanged; the far machine only needs a warren new enough to
+have `__pipe`.
+
+BatchMode is forced on, because ssh's stdin is an agent's protocol stream and
+a password prompt would read frames as a passphrase. Use keys or an agent; a
+host that cannot connect says so on its row instead of hanging.
+
+A machine that stops answering keeps its rows, dimmed and unfocusable, drawn
+from the last thing warren saw there — so a wifi blip does not renumber the
+sidebar out from under you mid-keystroke. warren keeps redialling (backing
+off to every ten seconds), clicking its heading retries immediately, and when
+it answers the rows go live again on their own. Nothing about a remote agent
+is stored on this machine: sleep, wake, rename, colour and close all work
+exactly as they do locally, because they are the same messages to the same
+daemon.
+
+`warren ls`, `kill`, `sleep` and `wake` on the command line are still
+local-only; the dashboard is what spans machines.
+
 ### Sleep mode
 
 A colony costs what its members cost, and an idle Claude Code still holds
@@ -240,6 +300,8 @@ socket, and it always exits 0 — a wedged daemon can never stall Claude.
 ```
 ~/.warren/run/<name>.sock   one unix socket per live agent daemon
 ~/.warren/hooks.json        Claude Code hook settings (regenerated on spawn)
+~/.warren/hosts             optional: ssh destinations whose agents join the sidebar
+~/.warren/ssh/              ssh's shared connection sockets, one per host
 ```
 
 That's everything warren writes — it only ever reads `~/.claude` and
@@ -255,8 +317,12 @@ cargo test
 Unit tests plus headless integration tests that spawn real daemons around
 scripted children and drive them over the socket — snapshot fidelity, damage
 streaming, resize fan-out, hook round-trips, exit reaping, sleep/wake (the
-process really dies, the agent really doesn't), and the stalled-viewer
-regression test.
+process really dies, the agent really doesn't), folders and two-digit
+navigation on a real dashboard, and the stalled-viewer regression test.
+
+The remote path is tested without a network: `WARREN_SSH` replaces ssh with a
+stand-in that runs the command here against a second `WARREN_HOME`, so the
+roster, the pipes, the socketpairs and the two-machine sidebar all run in CI.
 
 ```sh
 cargo test sheep -- --nocapture     # watch the flock

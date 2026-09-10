@@ -16,6 +16,16 @@ const OUT_CAP: usize = 1024 * 1024;
 
 pub struct AgentConn {
     pub sock: PathBuf,
+    /// The agent's immutable name — the socket's stem, or the name the far
+    /// machine's roster gave it. Known before any meta arrives, so it can
+    /// identify the connection from the moment it is made.
+    pub agent: String,
+    /// Which machine it runs on: None here, or the ssh destination. The only
+    /// difference between a local and a remote agent, and the sidebar is the
+    /// only thing that looks.
+    pub host: Option<String>,
+    /// The `ssh … warren __pipe` carrying a remote agent, to be reaped with it.
+    child: Option<std::process::Child>,
     stream: UnixStream,
     decoder: FrameDecoder,
     out: Vec<u8>,
@@ -61,8 +71,47 @@ impl AgentConn {
             .and_then(|s| s.to_str())
             .unwrap_or("?")
             .to_string();
+        Self::wrap(sock, name, None, None, stream, cols, rows)
+    }
+
+    /// The same thing one machine away: `ssh … warren __pipe NAME` with a
+    /// socketpair for its stdio, so what we hold is still a UnixStream and
+    /// every line below this one is unchanged.
+    pub fn attach_remote(
+        host: &crate::remote::Host,
+        name: &str,
+        cols: u16,
+        rows: u16,
+    ) -> std::io::Result<AgentConn> {
+        let (stream, child) = host
+            .open_agent(name)
+            .map_err(|e| std::io::Error::other(format!("{e:#}")))?;
+        Self::wrap(
+            PathBuf::from(format!("{}:{name}", host.dest)),
+            name.to_string(),
+            Some(host.dest.clone()),
+            Some(child),
+            stream,
+            cols,
+            rows,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn wrap(
+        sock: PathBuf,
+        name: String,
+        host: Option<String>,
+        child: Option<std::process::Child>,
+        stream: UnixStream,
+        cols: u16,
+        rows: u16,
+    ) -> std::io::Result<AgentConn> {
         let mut conn = AgentConn {
             sock,
+            agent: name.clone(),
+            host,
+            child,
             stream,
             decoder: FrameDecoder::new(),
             out: Vec::new(),
@@ -70,7 +119,7 @@ impl AgentConn {
             dead: false,
             meta: Meta {
                 name: name.clone(),
-                display: name,
+                display: name.clone(),
                 color: 0,
                 pinned: false,
                 slot: u8::MAX,
@@ -106,8 +155,24 @@ impl AgentConn {
         Ok(conn)
     }
 
+    /// Identity across rescans: which machine, and which agent on it.
+    pub fn ident(&self) -> (Option<&str>, &str) {
+        (self.host.as_deref(), self.agent.as_str())
+    }
+
     pub fn stream(&self) -> &UnixStream {
         &self.stream
+    }
+
+    /// What the sidebar keeps when the machine this agent is on goes away.
+    pub fn ghost(&self) -> crate::remote::Ghost {
+        crate::remote::Ghost {
+            name: self.agent.clone(),
+            display: self.meta.display.clone(),
+            cwd: self.meta.cwd.clone(),
+            slot: self.meta.slot,
+            created: self.meta.created,
+        }
     }
 
     pub fn send(&mut self, msg: &ToDaemon) {
@@ -284,5 +349,16 @@ impl AgentConn {
         !self.asleep()
             && self.state.hook == Some(crate::proto::HookState::Attention)
             && !self.busy()
+    }
+}
+
+impl Drop for AgentConn {
+    fn drop(&mut self) {
+        // A remote agent's ssh belongs to its connection: when the row goes,
+        // so does the process carrying it.
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }

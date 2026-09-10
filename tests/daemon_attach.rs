@@ -742,6 +742,108 @@ fn input_triggered_burst_arrives_promptly() {
     }
 }
 
+/// End-to-end: a REAL dashboard showing agents from two machines at once.
+///
+/// The far machine is this one wearing a different WARREN_HOME, reached
+/// through a stand-in for ssh (WARREN_SSH) that runs the command here. That
+/// exercises everything but the network itself: the roster, a `warren __pipe`
+/// per agent, the socketpair each becomes, and the sidebar that has to number
+/// folders straight through both machines.
+#[test]
+fn a_second_machine_shares_the_sidebar() {
+    let far = TestHome::new("far");
+    let near = TestHome::new("near");
+    let outer = TestHome::new("nearout");
+
+    // Two directories over there, one here.
+    new_agent_in(&far, "spork", &far.dir.join("Games"), "sleep 300");
+    new_agent_in(&far, "terrain", &far.dir.join("Games"), "sleep 300");
+    new_agent_in(&far, "grader", &far.dir.join("Courses"), "sleep 300");
+    new_agent_in(&near, "svm", &near.dir.join("Research"), "sleep 300");
+
+    // The near machine is told where the far one is.
+    std::fs::write(near.dir.join("hosts"), format!("smq  {BIN}\n")).unwrap();
+
+    // ssh, for the purposes of this test: drop the destination, run the rest
+    // here against the far machine's home.
+    let shim = near.dir.join("fake-ssh");
+    std::fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\nshift\nexec env WARREN_HOME={} WARREN_AGENT_CMD='sleep 300' \"$@\"\n",
+            far.dir.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let dash_cmd = format!(
+        "WARREN_HOME={} WARREN_SSH={} {} up",
+        near.dir.display(),
+        shim.display(),
+        BIN
+    );
+    new_agent(&outer, "dash", &dash_cmd);
+    let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 22);
+
+    let grid = std::cell::RefCell::new(Vec::<String>::new());
+    let apply = |grid: &std::cell::RefCell<Vec<String>>, m: &ToClient| {
+        let mut g = grid.borrow_mut();
+        match m {
+            ToClient::Snapshot { screen, .. } => {
+                *g = screen.iter().map(|l| l.0.iter().map(|s| s.text.as_str()).collect()).collect();
+            }
+            ToClient::Damage { lines, .. } => {
+                for (row, line) in lines {
+                    let r = *row as usize;
+                    if g.len() <= r {
+                        g.resize(r + 1, String::new());
+                    }
+                    g[r] = line.0.iter().map(|s| s.text.as_str()).collect();
+                }
+            }
+            _ => {}
+        }
+    };
+    apply(&grid, &snap);
+    fn sidebar(grid: &std::cell::RefCell<Vec<String>>) -> Vec<String> {
+        grid.borrow()
+            .iter()
+            .map(|r| r.chars().take(23).collect::<String>().trim_end().to_string())
+            .collect()
+    }
+
+    // Everything from both machines, in one list.
+    let up = viewer.await_frame(20_000, |m| {
+        apply(&grid, m);
+        let rows = sidebar(&grid);
+        rows.iter().any(|r| r.contains("grader")) && rows.iter().any(|r| r.contains("svm"))
+    });
+    assert!(up.is_some(), "both machines' agents arrived: {:?}", sidebar(&grid));
+
+    let rows = sidebar(&grid);
+    let smq = rows.iter().position(|r| r.trim() == "smq").expect("a heading for the far machine");
+    let here = rows.iter().position(|r| r.contains("Research/")).unwrap();
+    assert!(here < smq, "this machine comes first: {rows:?}");
+    // Folder numbers run straight through, so two digits still reach any of
+    // them — 1 is local, 2 and 3 are one machine away.
+    assert!(rows.iter().any(|r| r.trim() == "1 Research/"), "{rows:?}");
+    assert!(rows.iter().any(|r| r.trim() == "2 Games/"), "{rows:?}");
+    assert!(rows.iter().any(|r| r.trim() == "3 Courses/"), "{rows:?}");
+    // And the sidebar says nothing about which machine an agent is on beyond
+    // the heading it sits under.
+    assert!(!rows.iter().any(|r| r.contains("smq:")), "no host tags on rows: {rows:?}");
+
+    // ^Space 2 1 reaches an agent on the other machine.
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x0021")));
+    let landed = viewer.await_frame(10_000, |m| {
+        apply(&grid, m);
+        grid.borrow().last().map(|s| s.contains("spork")).unwrap_or(false)
+    });
+    assert!(landed.is_some(), "two digits crossed the machine: {:?}", grid.borrow().last());
+}
+
 /// End-to-end, on a REAL dashboard: agents are grouped into folders by their
 /// working directory, `^Space <folder> <agent>` reaches one, and clicking a
 /// folder header folds that directory away.
