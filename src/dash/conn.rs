@@ -5,7 +5,7 @@
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::proto::{self, AgentState, FrameDecoder, Meta, MouseProto, Power, ToClient, ToDaemon};
 use crate::spans::LineSpans;
@@ -264,9 +264,16 @@ impl AgentConn {
                 self.mouse = mouse;
                 self.meta = meta;
                 self.have_meta = true;
+                // A snapshot is not evidence of output: it is equally what
+                // an attach, a resize or a scroll is answered with, and
+                // counting those as the agent working made scrolling shut
+                // itself off for a second and a half per notch. The daemon
+                // measured how long it has actually been; believe that.
+                self.output_rx = Instant::now()
+                    .checked_sub(Duration::from_millis(state.ms_since_output.min(60_000)))
+                    .unwrap_or_else(Instant::now);
                 self.state = state;
                 self.state_rx = Instant::now();
-                self.output_rx = Instant::now();
                 self.full_dirty = true;
                 self.meta_dirty = true;
             }

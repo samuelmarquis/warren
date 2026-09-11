@@ -38,6 +38,10 @@ pub struct Conn {
     /// Lines this viewer is scrolled back by. Per connection, because two
     /// people looking at one agent are not looking at the same thing.
     pub offset: usize,
+    /// The offset moved and this viewer has not been shown it yet. A
+    /// trackpad hands over a burst of wheel events; they cost one frame
+    /// between them, on the same timer that coalesces damage.
+    pub scroll_dirty: bool,
 }
 
 impl Conn {
@@ -51,6 +55,7 @@ impl Conn {
             close_after_write: false,
             dead: false,
             offset: 0,
+            scroll_dirty: false,
         }
     }
 

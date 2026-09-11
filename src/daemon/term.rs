@@ -231,7 +231,7 @@ mod tests {
     fn plain_text_becomes_one_span() {
         let mut at = AgentTerm::new(20, 4, 100);
         at.advance(b"hello world");
-        let snap = at.snapshot_screen();
+        let snap = at.snapshot_screen_at(0);
         assert_eq!(snap.len(), 4);
         assert_eq!(snap[0].0.len(), 1);
         assert_eq!(snap[0].0[0].text, "hello world");
@@ -243,7 +243,7 @@ mod tests {
     fn styled_runs_split_spans() {
         let mut at = AgentTerm::new(40, 3, 100);
         at.advance(b"a\x1b[1;31mred\x1b[0mb");
-        let snap = at.snapshot_screen();
+        let snap = at.snapshot_screen_at(0);
         let line = &snap[0].0;
         assert_eq!(line.len(), 3);
         assert_eq!(line[0].text, "a");
@@ -257,7 +257,7 @@ mod tests {
     fn truecolor_passthrough() {
         let mut at = AgentTerm::new(20, 2, 0);
         at.advance(b"\x1b[38;2;10;20;30mX");
-        let snap = at.snapshot_screen();
+        let snap = at.snapshot_screen_at(0);
         assert_eq!(snap[0].0[0].fg, Color::Rgb(10, 20, 30));
     }
 
@@ -283,7 +283,7 @@ mod tests {
         at.advance(b"\x1b[?1049l");
         at.resize(10, 4);
         assert_eq!((at.cols, at.rows), (10, 4));
-        assert_eq!(at.snapshot_screen().len(), 4);
+        assert_eq!(at.snapshot_screen_at(0).len(), 4);
     }
 
     #[test]
@@ -292,13 +292,13 @@ mod tests {
         // paint with SGR 48;5;16 — must come out as RGB white, not black.
         let mut at = AgentTerm::new(20, 2, 0);
         at.advance(b"\x1b]4;16;rgb:ff/ff/ff\x07\x1b[48;5;16m\x1b[38;5;17mX");
-        let snap = at.snapshot_screen();
+        let snap = at.snapshot_screen_at(0);
         let span = &snap[0].0[0];
         assert_eq!(span.bg, Color::Rgb(0xff, 0xff, 0xff));
         assert_eq!(span.fg, Color::Indexed(17)); // untouched slot stays indexed
         // OSC 104 resets the slot back to the default palette.
         at.advance(b"\x1b]104;16\x07\x1b[2;1H\x1b[48;5;16mY");
-        let snap = at.snapshot_screen();
+        let snap = at.snapshot_screen_at(0);
         assert_eq!(snap[1].0[0].bg, Color::Indexed(16));
     }
 

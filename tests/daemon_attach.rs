@@ -1086,7 +1086,7 @@ fn a_machine_with_no_agents_still_says_it_is_there() {
     // Nothing over there at all; one agent here so the sidebar has a shape.
     new_agent_in(&near, "svm", &near.dir.join("Research"), "sleep 300");
     std::fs::create_dir_all(far.dir.join("run")).unwrap();
-    std::fs::write(near.dir.join("hosts"), format!("smq  {BIN}\n")).unwrap();
+    std::fs::write(near.dir.join("hosts"), format!("faraway  {BIN}\n")).unwrap();
 
     let shim = fake_ssh(&near, &far);
     let dash_cmd =
@@ -1101,7 +1101,7 @@ fn a_machine_with_no_agents_still_says_it_is_there() {
     let settled = viewer.await_frame(20_000, |m| {
         apply_frame(&grid, m);
         let rows = sidebar_of(&grid);
-        rows.iter().any(|r| r.contains("Research/")) && !rows.iter().any(|r| r.contains("smq"))
+        rows.iter().any(|r| r.contains("Research/")) && !rows.iter().any(|r| r.contains("faraway"))
     });
     assert!(settled.is_some(), "no word about connecting: {:?}", sidebar_of(&grid));
 
@@ -1428,5 +1428,75 @@ fn highest_tick(grid: &std::cell::RefCell<Vec<String>>) -> u32 {
             n.parse().ok()
         })
         .max()
+        .unwrap_or(0)
+}
+
+
+/// A flick of the wheel goes as far as it was flicked. The answer to a
+/// scroll is a snapshot, and a snapshot used to be counted as the agent
+/// having produced output — so the first notch made the dashboard believe a
+/// turn had started and it refused the rest of the flick for a second and a
+/// half. Through a real dashboard, because that is where the gate lives.
+#[test]
+fn a_flick_of_the_wheel_scrolls_further_than_one_notch() {
+    let inner = TestHome::new("flick");
+    new_agent_in(
+        &inner,
+        "pager",
+        &inner.dir.join("Burrow"),
+        "for i in $(seq 1 200); do echo \"line $i\"; done; sleep 300",
+    );
+
+    let outer = TestHome::new("flickout");
+    let dash_cmd = format!("WARREN_HOME={} {} up", inner.dir.display(), BIN);
+    new_agent(&outer, "dash", &dash_cmd);
+    let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 24);
+
+    let grid = std::cell::RefCell::new(Vec::<String>::new());
+    apply_frame(&grid, &snap);
+    let up = grid.borrow().iter().any(|r| r.contains("line 200"))
+        || viewer
+            .await_frame(15_000, |m| {
+                apply_frame(&grid, m);
+                grid.borrow().iter().any(|r| r.contains("line 200"))
+            })
+            .is_some();
+    assert!(up, "the agent painted: {:?}", grid.borrow().clone());
+
+    // Past the busy window, so the turn counts as over.
+    std::thread::sleep(Duration::from_millis(1_800));
+    let before = topmost_line(&grid);
+    assert!(before > 0, "a live view to scroll from: {:?}", grid.borrow().clone());
+
+    // Eight notches spread over a flick's worth of time, which is what a
+    // trackpad sends — the answer to one notch lands before the next is
+    // typed, and that answer must not read as the agent going back to work.
+    for _ in 0..8 {
+        viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x1b[<64;50;10M")));
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let moved = viewer.await_frame(10_000, |m| {
+        apply_frame(&grid, m);
+        let now = topmost_line(&grid);
+        now > 0 && before - now >= 12
+    });
+    assert!(
+        moved.is_some(),
+        "the whole flick landed: from line {before} to line {} ({:?})",
+        topmost_line(&grid),
+        sidebar_of(&grid).first()
+    );
+}
+
+/// The lowest "line N" visible in the pane, 0 if none.
+fn topmost_line(grid: &std::cell::RefCell<Vec<String>>) -> u32 {
+    grid.borrow()
+        .iter()
+        .filter_map(|r| r.split("line ").nth(1))
+        .filter_map(|rest| {
+            let n: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            n.parse().ok()
+        })
+        .min()
         .unwrap_or(0)
 }

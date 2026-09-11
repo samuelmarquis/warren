@@ -434,10 +434,12 @@ impl Daemon {
 
             // Damage coalescing: first dirtying event arms the timer; the
             // frame goes out when it expires.
-            match (self.dirty, flush_at) {
+            let pending = self.dirty || self.conns.values().any(|c| c.scroll_dirty);
+            match (pending, flush_at) {
                 (true, None) => flush_at = Some(Instant::now() + FLUSH_INTERVAL),
                 (true, Some(at)) if Instant::now() >= at => {
                     self.flush_frame();
+                    self.flush_scrolled();
                     flush_at = None;
                 }
                 (false, Some(_)) => flush_at = None,
@@ -932,11 +934,33 @@ impl Daemon {
         if next == offset {
             return;
         }
-        let frame = self.snapshot_at(next);
-        let Ok(encoded) = proto::encode_frame(&frame) else { return };
         if let Some(conn) = self.conns.get_mut(&key) {
             conn.offset = next;
-            conn.send(&encoded);
+            conn.scroll_dirty = true;
+        }
+    }
+
+    /// One frame for each viewer whose offset moved, at most once per flush
+    /// interval — the same coalescing output gets, for the same reason.
+    fn flush_scrolled(&mut self) {
+        let moved: Vec<usize> = self
+            .conns
+            .iter()
+            .filter(|(_, c)| c.scroll_dirty && c.attached)
+            .map(|(k, _)| *k)
+            .collect();
+        for key in moved {
+            let Some(offset) = self.conns.get(&key).map(|c| c.offset) else { continue };
+            let frame = self.snapshot_at(offset);
+            let Ok(encoded) = proto::encode_frame(&frame) else { continue };
+            if let Some(conn) = self.conns.get_mut(&key) {
+                conn.scroll_dirty = false;
+                conn.send(&encoded);
+            }
+        }
+        // A viewer that stopped being attached keeps no debt.
+        for conn in self.conns.values_mut() {
+            conn.scroll_dirty = false;
         }
     }
 
@@ -949,6 +973,7 @@ impl Daemon {
         let Ok(encoded) = proto::encode_frame(&frame) else { return };
         if let Some(conn) = self.conns.get_mut(&key) {
             conn.offset = 0;
+            conn.scroll_dirty = false;
             if conn.attached {
                 conn.send(&encoded);
             }
@@ -966,6 +991,7 @@ impl Daemon {
         for conn in self.conns.values_mut() {
             if conn.offset != 0 {
                 conn.offset = 0;
+                conn.scroll_dirty = false;
                 if conn.attached {
                     conn.send(&encoded);
                 }
