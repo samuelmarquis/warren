@@ -20,6 +20,11 @@ use crate::spans::LineSpans;
 /// instead of meeting it later as a corrupt frame.
 pub const WIRE_VERSION: u32 = 2;
 
+/// How long without output means "not working", for anything that has no
+/// lifecycle hooks to ask. The sidebar's badge, the scroll gate and the
+/// daemon all have to agree, or a row says idle while the wheel says busy.
+pub const BUSY_QUIET_MS: u64 = 1500;
+
 /// Refuse frames bigger than this — a corrupt length prefix must not make us
 /// buffer gigabytes. A full 4k-cell snapshot with worst-case styling is far
 /// below this.

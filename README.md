@@ -140,7 +140,8 @@ anywhere — it is never forwarded, because a terminal's own `^Z` is SUSP and
 a harness stopped by its tty is one warren cannot wake. Mouse: click sidebar rows to focus, click a
 folder header to fold that directory away, wheel over the sidebar cycles
 agents, clicks and wheel over the pane go to the agent (Claude's fullscreen
-TUI handles its own scrolling). On a form, everything is clickable — a chip
+TUI handles its own scrolling; a harness that doesn't ask for the mouse gets
+warren's scrollback instead — see below). On a form, everything is clickable — a chip
 picks its option, a field row takes the cursor, a session in the resume
 picker selects it, the wheel scrolls that list, and palette swatches have
 always been clickable.
@@ -279,6 +280,35 @@ dashboard on that machine would only be a second viewer of the same ones.
 
 `warren ls`, `kill`, `sleep` and `wake` on the command line are still
 local-only; the dashboard is what spans machines.
+
+### Scrolling back
+
+The wheel over the pane belongs to whoever asked for it. Claude Code takes
+the alternate screen and subscribes to the mouse, so the wheel goes straight
+through and Claude scrolls its own history, exactly as before. A harness that
+does neither — OMP streams to the primary screen and never enables mouse
+tracking outside its fullscreen overlays — leaves the wheel to warren, which
+scrolls that viewer through the agent's scrollback instead.
+
+Which matters more than scrolling: warren *is* the terminal these agents run
+in. OMP repaints a live region while it works and flushes the finished turn
+up into the terminal's scrollback, so with no history of its own warren was
+dropping that transcript the moment it passed the top of the screen.
+
+**No scrolling while it works.** Mid-turn there is nothing up there to find —
+the harness is repainting in place and what went past the top has not been
+flushed yet — so the wheel says `AGENT BUSY` instead, and a turn starting
+takes every viewer back to the live screen. Typing does too, the way it does
+in any terminal.
+
+The offset is per viewer, not per agent: the grid indexes history with
+negative lines, so your phone can be reading back through a turn while the
+laptop watches the live screen. A viewer reading history is shown no cursor
+and is left alone by damage frames until it comes back down.
+
+`WARREN_SCROLLBACK` sets the depth (2000 lines). It costs memory per agent
+and a colony has many — though an agent on the alternate screen never puts a
+line up there at all, so Claude Code agents pay nothing for it.
 
 ### Sleep mode
 

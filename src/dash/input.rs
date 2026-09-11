@@ -420,6 +420,21 @@ fn handle_mouse(dash: &mut Dash, ev: MouseReport) {
     } else {
         MouseKind::Up(button)
     };
+    // An app that never asked for the mouse leaves the wheel to warren, and
+    // the daemon scrolls that viewer's own view of the scrollback with it.
+    // Not mid-turn though: the harness is repainting a live region and what
+    // went past the top is not in the scrollback yet, so say so rather than
+    // leave the wheel feeling broken.
+    let mid_turn = matches!(kind, MouseKind::WheelUp | MouseKind::WheelDown)
+        && dash
+            .focused()
+            .map(|a| a.mouse == crate::proto::MouseProto::None && a.busy())
+            .unwrap_or(false);
+    if mid_turn {
+        dash.flash = Some("AGENT BUSY".into());
+        dash.status_dirty = true;
+        return;
+    }
     let col = ev.col - SIDEBAR_WIDTH;
     let row = ev.row;
     if let Some(agent) = dash.focused_mut() {

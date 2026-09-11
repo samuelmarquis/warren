@@ -43,9 +43,22 @@ const KEY_FIRST_CLIENT: usize = 3;
 /// Damage coalescing: at most ~30 frames/sec to viewers.
 const FLUSH_INTERVAL: Duration = Duration::from_millis(33);
 
-/// No daemon-side scrollback: agents (Claude's fullscreen TUI) own their own
-/// history; warren serves a live view only.
-const SCROLLBACK: usize = 0;
+/// Lines of scrollback the daemon keeps for an agent.
+///
+/// A harness that takes the alternate screen (Claude Code) owns its history
+/// and never puts a line up here at all, so this costs it nothing. One that
+/// streams to the primary screen does the opposite: OMP repaints a live
+/// region while it works and flushes the finished turn into the terminal's
+/// scrollback — and warren *is* its terminal, so with no history that
+/// transcript was being dropped the moment it passed the top of the screen.
+///
+/// The cost is per agent and a colony has many, hence WARREN_SCROLLBACK.
+fn scrollback() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("WARREN_SCROLLBACK").ok().and_then(|v| v.parse().ok()).unwrap_or(2000)
+    })
+}
 
 /// How long a sleeping agent gets to honor SIGTERM before SIGKILL, and again
 /// before we stop escalating. Claude Code exits on SIGTERM after running its
@@ -265,7 +278,7 @@ pub fn run(args: DaemonArgs) -> Result<()> {
     let spawn_probe = spawn.kind.learns_session_from_tty() && spawn.custom.is_none();
     let created = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let mut daemon = Daemon {
-        term: term::AgentTerm::new(80, 24, SCROLLBACK),
+        term: term::AgentTerm::new(80, 24, scrollback()),
         pty: Some(pty),
         spawn,
         power: Power::Awake,
@@ -478,6 +491,10 @@ impl Daemon {
     }
 
     fn read_pty(&mut self) {
+        // Whether this wake began a turn, and how much history it pushed up:
+        // decided inside the loop, acted on once the pty borrow is done.
+        let mut began_turn = false;
+        let mut grew = 0usize;
         let Some(pty) = self.pty.as_mut() else { return };
         let mut buf = [0u8; 65536];
         let mut total = 0;
@@ -490,7 +507,12 @@ impl Daemon {
                     if log_total && preview.len() < 160 {
                         preview.push_str(&escape_bytes(&buf[..n.min(160)]));
                     }
+                    // Output after a quiet spell is a turn beginning.
+                    began_turn |= (self.last_output.elapsed().as_millis() as u64)
+                        >= proto::BUSY_QUIET_MS;
+                    let history_was = self.term.history_len();
                     self.term.advance(&buf[..n]);
+                    grew += self.term.history_len().saturating_sub(history_was);
                     self.last_output = Instant::now();
                     self.dirty = true;
                     total += n;
@@ -506,6 +528,15 @@ impl Daemon {
                 Err(e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(_) => break,
             }
+        }
+        // There is no scrolling while it works, so a turn beginning takes
+        // every viewer back to the live screen. Short of that, a viewer
+        // already reading history keeps the lines it is on while the ones
+        // above it pile up.
+        if began_turn {
+            self.unscroll_all();
+        } else if grew > 0 {
+            self.pin_scrolled(grew);
         }
         // First paint after a resume: the agent is properly back. `woke_at`
         // stays set — it's the grace window, and a claude that prints
@@ -700,7 +731,7 @@ impl Daemon {
         }
         // Claude repaints from scratch; start it on a clean screen so no
         // frozen cells from the old process survive underneath.
-        self.term = term::AgentTerm::new(cols, rows, SCROLLBACK);
+        self.term = term::AgentTerm::new(cols, rows, scrollback());
         self.sent_alt = false;
         self.sent_mouse = MouseProto::None;
         let snapshot = self.snapshot();
@@ -781,17 +812,31 @@ impl Daemon {
                         self.pty_in.extend_from_slice(&bytes);
                     }
                 }
+                self.unscroll(key);
             }
             ToDaemon::Resize { cols, rows } => self.resize_to(cols, rows),
             ToDaemon::Mouse { kind, col, row, mods } => {
-                // No process to click on; a stray wheel event must not queue
-                // up and land in the resumed prompt.
-                if self.pty.is_none() {
+                // No process to click on: a stray event must not queue up
+                // and land in the resumed prompt. The wheel still works,
+                // because scrolling what the agent left behind asks nothing
+                // of the process that left it.
+                if self.pty.is_some() {
+                    if let Some(bytes) = self.encode_mouse(kind, col, row, mods) {
+                        self.pty_in.extend_from_slice(&bytes);
+                        return;
+                    }
+                } else if self.term.mouse_proto() != MouseProto::None {
                     return;
                 }
-                if let Some(bytes) = self.encode_mouse(kind, col, row, mods) {
-                    self.pty_in.extend_from_slice(&bytes);
-                }
+                // Nothing subscribed to the mouse, so the wheel is warren's:
+                // scroll this viewer through the agent's own scrollback, the
+                // way the terminal underneath would have.
+                let lines = match kind {
+                    MouseKind::WheelUp => 3,
+                    MouseKind::WheelDown => -3,
+                    _ => return,
+                };
+                self.scroll_conn(key, lines);
             }
             ToDaemon::SetMeta { name, color, pinned, slot } => {
                 if let Some(n) = name {
@@ -851,6 +896,94 @@ impl Daemon {
         }
     }
 
+    /// Is a turn in flight? Hook state when the harness reports one, and
+    /// otherwise the same "output lately" heuristic the sidebar draws its
+    /// badge from — they have to agree about what working means.
+    fn busy(&self) -> bool {
+        if self.power != Power::Awake {
+            return false; // nothing is running; its last screen is all there is
+        }
+        match self.hook {
+            Some(HookState::Working) => true,
+            Some(HookState::Waiting) => false,
+            _ => (self.last_output.elapsed().as_millis() as u64) < proto::BUSY_QUIET_MS,
+        }
+    }
+
+    /// Move one viewer through the scrollback and hand it the view it asked
+    /// for. Everyone else's view is untouched.
+    fn scroll_conn(&mut self, key: usize, lines: i32) {
+        // Not while it works: mid-turn a harness repaints a live region, so
+        // what went past the top is not in the scrollback yet — there would
+        // be nothing up there to find, and the turn's own repaints would
+        // drag the view back down anyway.
+        if self.busy() {
+            return;
+        }
+        let max = self.term.history_len() as i32;
+        let (attached, offset) = match self.conns.get(&key) {
+            Some(conn) => (conn.attached, conn.offset),
+            None => return,
+        };
+        if !attached {
+            return;
+        }
+        let next = (offset as i32 + lines).clamp(0, max) as usize;
+        if next == offset {
+            return;
+        }
+        let frame = self.snapshot_at(next);
+        let Ok(encoded) = proto::encode_frame(&frame) else { return };
+        if let Some(conn) = self.conns.get_mut(&key) {
+            conn.offset = next;
+            conn.send(&encoded);
+        }
+    }
+
+    /// Put one viewer back on the live screen, if it had wandered off it.
+    fn unscroll(&mut self, key: usize) {
+        if self.conns.get(&key).map(|c| c.offset) == Some(0) {
+            return;
+        }
+        let frame = self.snapshot_at(0);
+        let Ok(encoded) = proto::encode_frame(&frame) else { return };
+        if let Some(conn) = self.conns.get_mut(&key) {
+            conn.offset = 0;
+            if conn.attached {
+                conn.send(&encoded);
+            }
+        }
+    }
+
+    /// Everyone back to the live screen: a turn started, or the geometry
+    /// changed under them.
+    fn unscroll_all(&mut self) {
+        if self.conns.values().all(|c| c.offset == 0) {
+            return;
+        }
+        let frame = self.snapshot_at(0);
+        let Ok(encoded) = proto::encode_frame(&frame) else { return };
+        for conn in self.conns.values_mut() {
+            if conn.offset != 0 {
+                conn.offset = 0;
+                if conn.attached {
+                    conn.send(&encoded);
+                }
+            }
+        }
+    }
+
+    /// History grew under a viewer that is reading it: hold the lines it is
+    /// looking at still, rather than letting them slide up out from under it.
+    fn pin_scrolled(&mut self, grown: usize) {
+        let max = self.term.history_len();
+        for conn in self.conns.values_mut() {
+            if conn.offset != 0 {
+                conn.offset = (conn.offset + grown).min(max);
+            }
+        }
+    }
+
     fn state(&self) -> AgentState {
         AgentState {
             hook: self.hook,
@@ -862,12 +995,19 @@ impl Daemon {
     }
 
     fn snapshot(&self) -> ToClient {
+        self.snapshot_at(0)
+    }
+
+    /// The screen as one viewer sees it: `back` lines up its own scrollback.
+    /// A scrolled viewer is shown no cursor, because the cursor is down on
+    /// the live screen where that viewer is not looking.
+    fn snapshot_at(&self, back: usize) -> ToClient {
         ToClient::Snapshot {
             cols: self.term.cols,
             rows: self.term.rows,
-            screen: self.term.snapshot_screen(),
+            screen: self.term.snapshot_screen_at(back),
             cursor: self.term.cursor(),
-            cursor_visible: self.term.cursor_visible(),
+            cursor_visible: back == 0 && self.term.cursor_visible(),
             alt_screen: self.term.alt_screen(),
             mouse: self.term.mouse_proto(),
             meta: self.meta.clone(),
@@ -882,6 +1022,9 @@ impl Daemon {
             return;
         }
         self.term.resize(cols, rows);
+        // Reflow moved every line that was being read, so nobody is where
+        // they think they are: back to the live screen for all of them.
+        self.unscroll_all();
         // Asleep, the emulator resizes alone: the frozen screen keeps filling
         // the pane, and the size is what the next wake spawns at.
         if let Some(pty) = self.pty.as_mut() {
@@ -931,7 +1074,9 @@ impl Daemon {
             self.logf(&msg);
         }
         for conn in self.conns.values_mut() {
-            if conn.attached {
+            // A viewer reading history is looking at lines this frame says
+            // nothing about; it stays as it is until it comes back down.
+            if conn.attached && conn.offset == 0 {
                 conn.send(&encoded);
             }
         }

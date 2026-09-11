@@ -35,6 +35,9 @@ pub struct Conn {
     pub close_after_write: bool,
     /// Marked for removal (overflow, IO error, or clean close).
     pub dead: bool,
+    /// Lines this viewer is scrolled back by. Per connection, because two
+    /// people looking at one agent are not looking at the same thing.
+    pub offset: usize,
 }
 
 impl Conn {
@@ -47,6 +50,7 @@ impl Conn {
             attached: false,
             close_after_write: false,
             dead: false,
+            offset: 0,
         }
     }
 

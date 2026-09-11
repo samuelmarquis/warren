@@ -1324,3 +1324,109 @@ fn ctrl_z_sleeps_the_agent_instead_of_suspending_it() {
     });
     assert!(woke.is_some(), "^Z woke it again: {:?}", sidebar_of(&grid));
 }
+
+/// What a harness leaves on the primary screen is history, and warren is the
+/// terminal it left it in: the wheel reads it back. OMP flushes a finished
+/// turn up there in one go, so this is the view that matters — and typing,
+/// or the next turn starting, puts you back on the live screen.
+#[test]
+fn the_wheel_reads_the_scrollback_when_the_turn_is_over() {
+    let home = TestHome::new("scroll");
+    // Forty lines, a quiet spell, then a second "turn".
+    new_agent(
+        &home,
+        "reader",
+        "for i in $(seq 1 40); do echo \"line $i\"; done; sleep 12; echo 'TURN TWO'; sleep 300",
+    );
+    let (mut viewer, snap) = Viewer::attach(&home.sock("reader"), 60, 10);
+
+    let grid = std::cell::RefCell::new(Vec::<String>::new());
+    apply_frame(&grid, &snap);
+    // The burst races the attach: it is either already in the snapshot or
+    // lands as the damage right after.
+    let done = grid.borrow().iter().any(|r| r.contains("line 40"))
+        || viewer
+            .await_frame(10_000, |m| {
+                apply_frame(&grid, m);
+                grid.borrow().iter().any(|r| r.contains("line 40"))
+            })
+            .is_some();
+    assert!(done, "the first burst finished: {:?}", grid.borrow().clone());
+    // Ten rows: the early lines are long gone from the screen.
+    assert!(!grid.borrow().iter().any(|r| r.contains("line 5")), "{:?}", grid.borrow().clone());
+
+    // Wait out the busy heuristic — this is the "turn is over" the rule is
+    // about — then wheel up.
+    std::thread::sleep(Duration::from_millis(1_800));
+    // Three lines a notch, the way a terminal does it, so this is a dozen
+    // notches back up a thirty-line history — it clamps at the top.
+    for _ in 0..12 {
+        viewer.send(&ToDaemon::Mouse { kind: MouseKind::WheelUp, col: 10, row: 5, mods: 0 });
+    }
+    let back = viewer.await_frame(10_000, |m| {
+        apply_frame(&grid, m);
+        grid.borrow().iter().any(|r| r.contains("line 5"))
+    });
+    assert!(back.is_some(), "the wheel reached the scrollback: {:?}", grid.borrow().clone());
+    // A viewer reading history is shown no cursor: it is down on the live
+    // screen, where this viewer is not looking.
+    if let Some(ToClient::Snapshot { cursor_visible, .. }) = back {
+        assert!(!cursor_visible, "no cursor while reading history");
+    }
+
+    // The next turn starts: no scrolling while it works, so the view comes
+    // back down on its own.
+    let live = viewer.await_frame(20_000, |m| {
+        apply_frame(&grid, m);
+        grid.borrow().iter().any(|r| r.contains("TURN TWO"))
+    });
+    assert!(live.is_some(), "a turn starting ends the scroll: {:?}", grid.borrow().clone());
+}
+
+/// No scrolling while it works. Mid-turn a harness repaints a live region,
+/// so what went past the top is not in the scrollback yet — the wheel must
+/// not freeze the view on a history that has nothing in it.
+#[test]
+fn the_wheel_does_nothing_while_the_agent_is_working() {
+    let home = TestHome::new("scrollbusy");
+    // Never stops printing: busy by the same heuristic the sidebar uses.
+    new_agent(&home, "chatty", "i=0; while :; do i=$((i+1)); echo \"tick $i\"; sleep 0.2; done");
+    let (mut viewer, snap) = Viewer::attach(&home.sock("chatty"), 60, 10);
+
+    let grid = std::cell::RefCell::new(Vec::<String>::new());
+    apply_frame(&grid, &snap);
+    let running = viewer.await_frame(10_000, |m| {
+        apply_frame(&grid, m);
+        highest_tick(&grid) >= 8
+    });
+    assert!(running.is_some(), "it is working: {:?}", grid.borrow().clone());
+
+    let at_wheel = highest_tick(&grid);
+    for _ in 0..6 {
+        viewer.send(&ToDaemon::Mouse { kind: MouseKind::WheelUp, col: 10, row: 5, mods: 0 });
+    }
+    // The view stays live: new ticks keep arriving rather than the viewer
+    // being parked on a frozen screen.
+    let still_live = viewer.await_frame(10_000, |m| {
+        apply_frame(&grid, m);
+        highest_tick(&grid) > at_wheel + 3
+    });
+    assert!(
+        still_live.is_some(),
+        "the wheel left the live view alone: at wheel {at_wheel}, now {}",
+        highest_tick(&grid)
+    );
+}
+
+/// The biggest "tick N" currently on screen.
+fn highest_tick(grid: &std::cell::RefCell<Vec<String>>) -> u32 {
+    grid.borrow()
+        .iter()
+        .filter_map(|r| r.split("tick ").nth(1))
+        .filter_map(|rest| {
+            let n: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            n.parse().ok()
+        })
+        .max()
+        .unwrap_or(0)
+}

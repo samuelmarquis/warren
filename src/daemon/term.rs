@@ -88,9 +88,20 @@ impl AgentTerm {
         (point.line.0.max(0) as u16, point.column.0 as u16)
     }
 
-    /// Visible screen as styled rows.
-    pub fn snapshot_screen(&self) -> Vec<LineSpans> {
-        (0..self.rows as i32).map(|r| self.line_spans(Line(r))).collect()
+    /// Visible screen as styled rows, `back` lines up into the scrollback
+    /// (0 being the live screen). The grid indexes
+    /// history with negative lines, so a viewer's own offset costs a
+    /// subtraction and never touches the shared display offset — two people
+    /// can read different parts of one agent at once.
+    pub fn snapshot_screen_at(&self, back: usize) -> Vec<LineSpans> {
+        let back = back as i32;
+        (0..self.rows as i32).map(|r| self.line_spans(Line(r - back))).collect()
+    }
+
+    /// Lines of scrollback held above the screen.
+    pub fn history_len(&self) -> usize {
+        use alacritty_terminal::grid::Dimensions;
+        self.term.grid().history_size()
     }
 
     /// Rows changed since the last `reset_damage`, or None for "everything".
