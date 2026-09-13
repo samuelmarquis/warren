@@ -150,6 +150,16 @@ The **new-agent form** (the `+` tab): pick the machine (once there is more
 than one), the harness (`claude` / `omp`), then `new` / `resume` /
 `continue`, title, root dir, a session from that harness's resume picker, a
 system prompt (`--system-prompt`), extra CLI args, and a tab color.
+
+A root dir that isn't there yet is **created** — asking for an agent in
+`~/Developer/new-thing` is how you say you want that directory — and one
+warren can't read is refused, with the reason in the status bar and your
+form still filled in. It never falls back to somewhere it made up: the pty
+spawn ignores a working directory it can't enter, so a bad path used to
+leave the agent running in `/` while its row went on naming the directory
+you asked for. `~/…` is this machine's home, a relative path is measured
+from home here (from the shell's directory on the command line), and a path
+for another machine is read by that machine, against its own home.
 Tab/Shift+Tab cycle fields; NORMAL always navigates away — the form never
 traps you.
 

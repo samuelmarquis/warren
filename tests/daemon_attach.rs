@@ -1500,3 +1500,58 @@ fn topmost_line(grid: &std::cell::RefCell<Vec<String>>) -> u32 {
         .min()
         .unwrap_or(0)
 }
+
+/// Asking for an agent in a directory nobody has made yet is how you say you
+/// want that directory — and the agent has to really be in it. The pty spawn
+/// ignores a working directory it cannot enter, so getting this wrong once
+/// meant an agent running in `/` while its row named somewhere else.
+#[test]
+fn a_directory_that_is_not_there_yet_is_made_and_used() {
+    let home = TestHome::new("mkdir");
+    let fresh = home.dir.join("Developer").join("brand-new");
+    assert!(!fresh.exists(), "not there to begin with");
+
+    let out = home
+        .warren("pwd; sleep 300")
+        .args(["new", "fresh", fresh.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(fresh.is_dir(), "the directory was made");
+
+    // The agent says where it is, in its own voice.
+    let (mut viewer, snap) = Viewer::attach(&home.sock("fresh"), 80, 10);
+    let grid = std::cell::RefCell::new(Vec::<String>::new());
+    apply_frame(&grid, &snap);
+    let says = grid.borrow().iter().any(|r| r.contains("brand-new"))
+        || viewer
+            .await_frame(10_000, |m| {
+                apply_frame(&grid, m);
+                grid.borrow().iter().any(|r| r.contains("brand-new"))
+            })
+            .is_some();
+    assert!(says, "the agent is in the directory it was given: {:?}", grid.borrow().clone());
+    assert!(
+        !grid.borrow().iter().any(|r| r.trim() == "/"),
+        "and not in the root of the disk: {:?}",
+        grid.borrow().clone()
+    );
+}
+
+/// A path warren cannot read is an error, not a silent `/`.
+#[test]
+fn a_path_that_makes_no_sense_is_refused() {
+    let home = TestHome::new("nonsense");
+    for bad in ["~~nonsense//path", "~someone-else/code"] {
+        let out = home.warren("sleep 300").args(["new", "nope", bad]).output().unwrap();
+        assert!(!out.status.success(), "'{bad}' was accepted");
+        let why = String::from_utf8_lossy(&out.stderr);
+        assert!(!why.is_empty(), "it says why");
+    }
+    // A file is not somewhere to run, either.
+    let file = home.dir.join("notes.md");
+    std::fs::write(&file, "x").unwrap();
+    let out = home.warren("sleep 300").args(["new", "nope", file.to_str().unwrap()]).output().unwrap();
+    assert!(!out.status.success(), "a file was accepted as a directory");
+    assert!(!home.sock("nope").exists(), "nothing was started");
+}

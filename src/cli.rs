@@ -4,7 +4,7 @@
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -101,7 +101,7 @@ pub fn cmd_new(args: &[String]) -> Result<()> {
     if base.is_empty() {
         bail!("empty name");
     }
-    let dir = expand_dir(pos.get(1).map(|s| s.as_str()));
+    let dir = resolve_dir(pos.get(1).map(|s| s.as_str()), &shell_dir())?;
     let color: u8 =
         pos.get(2).map(|c| c.parse()).transpose().context("COLOR must be 0-255")?.unwrap_or(0);
     let mode = pos.get(3).cloned().cloned().unwrap_or_else(|| "new".to_string());
@@ -201,14 +201,64 @@ fn spawn_daemon(name: &str, slot: u8, spec: &NewAgent) -> Result<()> {
     Ok(())
 }
 
-pub fn expand_dir(arg: Option<&str>) -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-    match arg {
-        None | Some("") => std::env::var("PWD").unwrap_or(home),
-        Some("~") => home,
-        Some(d) if d.starts_with("~/") => format!("{home}/{}", &d[2..]),
-        Some(d) => d.to_string(),
+/// Turn what someone typed into a directory an agent can actually run in.
+///
+/// `~` and `~/…` are this machine's home, and a relative path is relative to
+/// `base` — the shell's working directory on the command line, home on the
+/// dashboard's form, which has no meaningful one of its own. A directory
+/// that isn't there yet is created: asking for an agent in
+/// `~/Developer/new-thing` is how you say you want that directory.
+///
+/// What it will not do is invent something. A path it cannot make sense of
+/// is an error, because the alternative on the way in here was to hand the
+/// agent a directory it could not enter — which left it running in `/` while
+/// every row in the sidebar went on reporting the path that was asked for.
+pub fn resolve_dir(arg: Option<&str>, base: &str) -> Result<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let typed = arg.unwrap_or("").trim();
+    let path = match typed {
+        "" => PathBuf::from(base),
+        "~" | "~/" => {
+            if home.is_empty() {
+                bail!("no $HOME to read '~' against");
+            }
+            PathBuf::from(&home)
+        }
+        d if d.starts_with("~/") => {
+            if home.is_empty() {
+                bail!("no $HOME to read '~' against");
+            }
+            PathBuf::from(&home).join(d.trim_start_matches("~/"))
+        }
+        // `~someone` is another person's home and warren has no business
+        // guessing where it is.
+        d if d.starts_with('~') => {
+            bail!("don't know whose home '{d}' is — use ~/ or a full path")
+        }
+        d if d.starts_with('/') => PathBuf::from(d),
+        d => PathBuf::from(base).join(d),
+    };
+    if !path.is_absolute() {
+        bail!("'{}' is not a directory an agent can run in", path.display());
     }
+    match std::fs::metadata(&path) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => bail!("{} is a file, not a directory", path.display()),
+        Err(_) => std::fs::create_dir_all(&path)
+            .with_context(|| format!("creating {}", path.display()))?,
+    }
+    // Canonical, so the sidebar groups it under where it really is.
+    let real = std::fs::canonicalize(&path).unwrap_or(path);
+    Ok(real.to_string_lossy().into_owned())
+}
+
+/// Where a relative path is measured from on the command line.
+pub fn shell_dir() -> String {
+    std::env::var("PWD")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .or_else(|| std::env::var("HOME").ok())
+        .unwrap_or_default()
 }
 
 // ------------------------------------------------------------------------- ls
@@ -483,4 +533,46 @@ fn place_cursor(out: &mut impl Write, cursor: (u16, u16), visible: bool) -> Resu
     write!(out, "\x1b[{};{}H", cursor.0 + 1, cursor.1 + 1)?;
     write!(out, "{}", if visible { "\x1b[?25h" } else { "\x1b[?25l" })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_directory_is_made_when_it_is_asked_for_and_never_invented() {
+        let tmp = std::env::temp_dir().join(format!("warren-dirs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let base = tmp.to_string_lossy().to_string();
+        let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap().to_string_lossy().to_string();
+
+        // The point of the whole thing: a new project directory, made by
+        // asking for an agent in it.
+        let made = resolve_dir(Some("Developer/brand-new"), &base).unwrap();
+        assert!(Path::new(&made).is_dir(), "{made}");
+        assert!(made.ends_with("Developer/brand-new"), "{made}");
+        // Several levels at once, absolute this time.
+        let deep = tmp.join("a/b/c");
+        assert!(Path::new(&resolve_dir(Some(deep.to_str().unwrap()), &base).unwrap()).is_dir());
+
+        // Nothing typed is wherever you are.
+        assert_eq!(resolve_dir(None, &base).unwrap(), canon(&tmp));
+        assert_eq!(resolve_dir(Some("  "), &base).unwrap(), canon(&tmp));
+
+        // `~` is this machine's home. `~someone` is a guess, and a path that
+        // only looks like one is not a path: neither becomes `/`.
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(resolve_dir(Some("~"), &base).unwrap(), canon(Path::new(&home)));
+        assert!(resolve_dir(Some("~~nonsense//path"), &base).is_err());
+        assert!(resolve_dir(Some("~bob/code"), &base).is_err());
+
+        // A file is not a directory to run in, and saying so beats making a
+        // sibling of it up.
+        let file = tmp.join("notes.md");
+        std::fs::write(&file, "x").unwrap();
+        assert!(resolve_dir(Some(file.to_str().unwrap()), &base).is_err());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

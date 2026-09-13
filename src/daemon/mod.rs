@@ -166,6 +166,15 @@ impl Spawn {
 
     /// Spawn claude on a fresh pty of the given size.
     fn pty(&self, mode: &str, sid: Option<&str>, cols: u16, rows: u16) -> Result<tty::Pty> {
+        // The directory can go away between making an agent and starting it,
+        // or while it sleeps. Put it back if we can, and refuse to start if
+        // we cannot: the pty spawn ignores a working directory it cannot
+        // enter, so the alternative is an agent running in `/` while its row
+        // goes on naming somewhere else.
+        if !std::path::Path::new(&self.dir).is_dir() {
+            std::fs::create_dir_all(&self.dir)
+                .with_context(|| format!("agent directory {}", self.dir))?;
+        }
         let cmd = self.command(mode, sid)?;
         let window_size =
             WindowSize { num_lines: rows, num_cols: cols, cell_width: 8, cell_height: 16 };

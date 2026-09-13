@@ -214,7 +214,7 @@ impl NewForm {
         match self.machine {
             0 if self.root == "~" => self.root = home,
             0 => {}
-            // `~` is left for the far side's own expand_dir to resolve; this
+            // `~` is left for the far side's own resolver; this
             // machine has no business guessing another one's home.
             _ if self.root == home => self.root = "~".into(),
             _ => {}
@@ -522,9 +522,21 @@ fn submit_new(dash: &mut Dash) {
     }
     let dest = form.dest().map(str::to_string);
     // A path means whatever it means on the machine that will open it: only
-    // this one's is ours to expand.
+    // this one's is ours to read, and a form has no working directory of its
+    // own, so a relative one is measured from home. The far side resolves
+    // (and creates) its own when `warren new` runs over there.
     let dir = match dest {
-        None => crate::cli::expand_dir(Some(&dir)),
+        None => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            match crate::cli::resolve_dir(Some(&dir), &home) {
+                Ok(dir) => dir,
+                Err(e) => {
+                    dash.flash = Some(format!("{e}"));
+                    dash.status_dirty = true;
+                    return;
+                }
+            }
+        }
         Some(_) => dir,
     };
     let color = form.color.min(255) as u8;
