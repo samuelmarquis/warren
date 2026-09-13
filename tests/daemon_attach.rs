@@ -1555,3 +1555,61 @@ fn a_path_that_makes_no_sense_is_refused() {
     assert!(!out.status.success(), "a file was accepted as a directory");
     assert!(!home.sock("nope").exists(), "nothing was started");
 }
+
+/// `!` means the agent cannot go on without you. Claude Code fires its
+/// Notification hook for a permission prompt, but also for an idle nudge a
+/// minute after your turn starts — and taking every one of those as a block
+/// put `!` on every agent that was merely waiting for you to think.
+#[test]
+fn an_idle_nudge_is_not_a_permission_prompt() {
+    let home = TestHome::new("notify");
+    new_agent(&home, "pinged", "cat");
+    let sock = home.sock("pinged");
+    let notify = |kind: &str| {
+        let mut hook = Command::new(BIN)
+            .env("WARREN_SOCK", &sock)
+            .args(["hook", "attention"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let payload = format!(r#"{{"session_id":"s-1","notification_type":"{kind}"}}"#);
+        hook.stdin.take().unwrap().write_all(payload.as_bytes()).unwrap();
+        assert!(hook.wait().unwrap().success(), "a hook always exits 0");
+    };
+    let hook_state = || {
+        let (_, snap) = Viewer::attach(&sock, 80, 24);
+        let ToClient::Snapshot { state, .. } = snap else { unreachable!() };
+        state
+    };
+
+    // The turn ended: your move.
+    let mut hook = Command::new(BIN)
+        .env("WARREN_SOCK", &sock)
+        .args(["hook", "waiting"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin.take().unwrap().write_all(br#"{"session_id":"s-1"}"#).unwrap();
+    assert!(hook.wait().unwrap().success());
+    assert_eq!(hook_state().hook, Some(HookState::Waiting));
+
+    // A minute of quiet later, Claude says so. Nothing has changed about
+    // whether this agent is blocked, so nothing changes.
+    notify("idle_prompt");
+    let state = hook_state();
+    assert_eq!(state.hook, Some(HookState::Waiting), "an idle nudge is not a block");
+    assert_eq!(state.session.as_deref(), Some("s-1"), "the session still comes through");
+
+    // A permission prompt is the real thing.
+    notify("permission_prompt");
+    assert_eq!(hook_state().hook, Some(HookState::Attention));
+
+    // And a notification with no type at all still counts, for a Claude too
+    // old to say which kind it is.
+    let out = Command::new(BIN).env("WARREN_SOCK", &sock).args(["hook", "waiting"]).output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(hook_state().hook, Some(HookState::Waiting));
+    let out = Command::new(BIN).env("WARREN_SOCK", &sock).args(["hook", "attention"]).output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(hook_state().hook, Some(HookState::Attention));
+}

@@ -362,7 +362,18 @@ This is Claude Code only; OMP agents fall back to the activity heuristic
 below. warren generates a Claude Code settings file whose lifecycle hooks run
 `warren hook <state>`, which pokes the agent's own daemon over its socket:
 prompt submitted or tool running → *working*, turn finished → *ready*,
-permission prompt → *attention*. The hook also reads the `session_id` out of
+permission prompt → *attention*.
+
+`Notification` needs reading rather than obeying: Claude fires it for
+anything it wants to say, and being blocked is only one of those. A minute
+after your turn starts it also says "Claude is waiting for your input", and
+taking that as a block put `!` on every agent that was merely waiting for
+you to think of the next thing. The payload's `notification_type` says
+which it is — `permission_prompt`, `elicitation_dialog` and
+`agent_needs_input` are `!`; an idle nudge, an auth success or a background
+agent finishing change nothing, because they say nothing about whether this
+agent can go on. A notification with no type at all is still `!`: that is
+an older Claude, and a block nobody notices is what the mark is for. The hook also reads the `session_id` out of
 the JSON payload Claude hands it on stdin — that's what sleep resumes from.
 Outside warren the hook is a silent no-op, it never blocks on stdin or on the
 socket, and it always exits 0 — a wedged daemon can never stall Claude.

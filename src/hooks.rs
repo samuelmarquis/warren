@@ -57,34 +57,85 @@ pub fn cmd_hook(args: &[String]) -> Result<()> {
     // Every hook event's stdin payload carries the session id; that's how the
     // daemon learns what to `claude --resume` after a sleep. Best-effort: a
     // hook with no readable stdin still reports its state.
-    let session = read_session_id();
+    let payload = read_payload();
+    let session = payload.as_ref().and_then(session_of);
+    // Notification is fired for anything Claude wants to say, only some of
+    // which is "I am stuck": the payload says which.
+    let state = match state {
+        HookState::Attention => {
+            let kind = payload
+                .as_ref()
+                .and_then(|p| p.get("notification_type"))
+                .and_then(|v| v.as_str());
+            blocked_on_you(kind)
+        }
+        other => Some(other),
+    };
     let _ = try_send(&sock, state, session); // best-effort by design
     Ok(())
 }
 
-fn try_send(sock: &str, state: HookState, session: Option<String>) -> Result<()> {
+/// Which of Claude Code's notifications actually mean it is waiting on you.
+///
+/// `Notification` covers eleven different things, and a permission prompt is
+/// only one of them: an idle nudge a minute after your turn started, an auth
+/// success, a background agent finishing. The rest say nothing about whether
+/// this agent is blocked, so they leave its state exactly as it was — an
+/// agent that is merely waiting for you to think of the next thing has been
+/// wearing `!` (blocked) when it should wear `*` (finished while you were
+/// looking elsewhere).
+///
+/// An event with no type is an older Claude, or another harness, and gets
+/// the benefit of the doubt: a block nobody notices is the thing `!` exists
+/// to prevent.
+fn blocked_on_you(kind: Option<&str>) -> Option<HookState> {
+    match kind {
+        None => Some(HookState::Attention),
+        Some("permission_prompt" | "worker_permission_prompt") => Some(HookState::Attention),
+        Some("elicitation_dialog" | "agent_needs_input") => Some(HookState::Attention),
+        // Names warren has not seen but which can only mean one thing. The
+        // sibling elicitation_* events are answers, not questions, so that
+        // one is spelled out above rather than matched loosely.
+        Some(k) if k.contains("permission") || k.contains("needs_input") => {
+            Some(HookState::Attention)
+        }
+        Some(_) => None,
+    }
+}
+
+fn try_send(sock: &str, state: Option<HookState>, session: Option<String>) -> Result<()> {
+    if state.is_none() && session.is_none() {
+        return Ok(());
+    }
     let mut stream = UnixStream::connect(sock)?;
     stream.set_write_timeout(Some(Duration::from_millis(250)))?;
     // State first: a pre-sleep-mode daemon applies this one and only then
     // fails on the Session frame it has never heard of.
-    stream.write_all(&proto::encode_frame(&ToDaemon::HookState(state))?)?;
+    if let Some(state) = state {
+        stream.write_all(&proto::encode_frame(&ToDaemon::HookState(state))?)?;
+    }
     if let Some(sid) = session {
         stream.write_all(&proto::encode_frame(&ToDaemon::Session(sid))?)?;
     }
     Ok(())
 }
 
-/// `session_id` out of the hook's stdin JSON, if it arrives promptly.
+/// The session id an event's payload carries, if it carries one.
+fn session_of(payload: &serde_json::Value) -> Option<String> {
+    let sid = payload.get("session_id")?.as_str()?;
+    (!sid.is_empty()).then(|| sid.to_string())
+}
+
+/// The hook's stdin payload, if it arrives promptly.
 ///
 /// Claude writes one small JSON object and closes, but we never assume that:
 /// every read is poll-gated against a 200ms budget, so a hook whose stdin is
 /// a terminal (someone running `warren hook` by hand) returns immediately
 /// instead of blocking Claude's pipeline forever.
-fn read_session_id() -> Option<String> {
-    fn session_of(buf: &[u8]) -> Option<String> {
+fn read_payload() -> Option<serde_json::Value> {
+    fn parse(buf: &[u8]) -> Option<serde_json::Value> {
         let value: serde_json::Value = serde_json::from_slice(buf).ok()?;
-        let sid = value.get("session_id")?.as_str()?;
-        (!sid.is_empty()).then(|| sid.to_string())
+        value.is_object().then_some(value)
     }
 
     let stdin = std::io::stdin();
@@ -109,8 +160,8 @@ fn read_session_id() -> Option<String> {
                 // Return on a complete object rather than on EOF: this runs
                 // on every tool call, and must never pay the timeout just
                 // because the writer keeps the pipe open.
-                if let Some(sid) = session_of(&buf) {
-                    return Some(sid);
+                if let Some(value) = parse(&buf) {
+                    return Some(value);
                 }
                 if buf.len() > 1 << 20 {
                     break;
@@ -120,5 +171,34 @@ fn read_session_id() -> Option<String> {
             Err(_) => break,
         }
     }
-    session_of(&buf)
+    parse(&buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_notifications_that_block_raise_a_flag() {
+        let blocks = |k: Option<&str>| blocked_on_you(k) == Some(HookState::Attention);
+        // Claude is stuck and cannot go on without you.
+        assert!(blocks(Some("permission_prompt")));
+        assert!(blocks(Some("worker_permission_prompt")));
+        assert!(blocks(Some("elicitation_dialog")));
+        assert!(blocks(Some("agent_needs_input")));
+        // Claude is talking, not waiting. The idle nudge a minute into your
+        // turn is the one that had every quiet agent wearing `!`.
+        assert_eq!(blocked_on_you(Some("idle_prompt")), None);
+        assert_eq!(blocked_on_you(Some("auth_success")), None);
+        assert_eq!(blocked_on_you(Some("agent_completed")), None);
+        assert_eq!(blocked_on_you(Some("elicitation_response")), None);
+        assert_eq!(blocked_on_you(Some("elicitation_complete")), None);
+        assert_eq!(blocked_on_you(Some("computer_use_enter")), None);
+        // A name we have not met that can only mean one thing.
+        assert!(blocks(Some("tool_permission_prompt")));
+        assert!(blocks(Some("subagent_needs_input")));
+        // No type at all: an older Claude, or another harness. A block
+        // nobody notices is the thing the flag exists to prevent.
+        assert!(blocks(None));
+    }
 }
