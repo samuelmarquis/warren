@@ -1616,7 +1616,7 @@ fn an_idle_nudge_is_not_a_permission_prompt() {
 
 /// A note for an agent that is not running and never will be again.
 fn record_note(home: &TestHome, name: &str, session: &str) -> PathBuf {
-    let dir = home.dir.join("agents");
+    let dir = home.dir.join("notes");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("{name}.json"));
     std::fs::write(
@@ -1689,7 +1689,7 @@ fn agents_lost_with_the_machine_come_back_asleep() {
     // The note follows the agent, without anyone asking it to.
     // The note follows the agent — the session it learned, and then the name
     // it was given — without anyone asking it to.
-    let note = home.dir.join("agents").join("grader-lost.json");
+    let note = home.dir.join("notes").join("grader-lost.json");
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut body = String::new();
     while Instant::now() < deadline {
@@ -1765,7 +1765,7 @@ fn an_agent_that_ends_on_purpose_is_not_restored() {
         .unwrap();
     hook.stdin.take().unwrap().write_all(br#"{"session_id":"conv-7"}"#).unwrap();
     assert!(hook.wait().unwrap().success());
-    let note = home.dir.join("agents").join("shortlived.json");
+    let note = home.dir.join("notes").join("shortlived.json");
     let deadline = Instant::now() + Duration::from_secs(5);
     while !note.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));

@@ -326,9 +326,9 @@ line up there at all, so Claude Code agents pay nothing for it.
 Agents die with the machine — they are processes, and a reboot is a machine
 that stops running processes. What warren adds is that they leave a note:
 each daemon writes its name, colour, slot, directory, harness and session id
-to `~/.warren/agents/<name>.json`, keeps it current, and **removes it when
+to `~/.warren/notes/<name>.json`, keeps it current, and **removes it when
 the agent ends on purpose**. A daemon killed with its machine never gets to
-clean up, so what is left in that directory afterwards is exactly the set of
+clean up, so what is left in `notes/` afterwards is exactly the set of
 agents that were still running when the lights went out.
 
 `warren restore` brings them back — **asleep**. Not twelve harnesses
@@ -413,7 +413,7 @@ socket, and it always exits 0 — a wedged daemon can never stall Claude.
 
 ```
 ~/.warren/run/<name>.sock   one unix socket per live agent daemon
-~/.warren/agents/<name>.json what an agent was, for restoring it after a restart
+~/.warren/notes/<name>.json  what an agent was, for restoring it after a restart
 ~/.warren/hooks.json        Claude Code hook settings (regenerated on spawn)
 ~/.warren/hosts             optional: ssh destinations whose agents join the sidebar
 ~/.warren/ssh/              ssh's shared connection sockets, one per host

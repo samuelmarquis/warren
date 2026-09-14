@@ -34,8 +34,11 @@ pub struct Record {
     pub session: String,
 }
 
+/// Deliberately not `agents/`: that name belongs to v0, which kept its own
+/// per-agent directories there, and the two versions are meant to be able to
+/// share a home without reading each other's mail.
 pub fn dir() -> PathBuf {
-    crate::paths::home().join("agents")
+    crate::paths::home().join("notes")
 }
 
 fn path(name: &str) -> PathBuf {
