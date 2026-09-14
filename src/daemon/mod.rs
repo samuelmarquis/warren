@@ -94,6 +94,10 @@ pub struct DaemonArgs {
     pub sys: Option<String>,
     /// Raw extra args appended to the claude command line.
     pub extra: Option<String>,
+    /// Come up asleep: a tab with no process, waiting to be woken on the
+    /// conversation it names. What `warren restore` brings back after the
+    /// machine that was running it stopped.
+    pub asleep: bool,
 }
 
 impl DaemonArgs {
@@ -104,6 +108,7 @@ impl DaemonArgs {
             Some(k) => Kind::parse(k).with_context(|| format!("unknown agent kind '{k}'"))?,
             None => Kind::default(),
         };
+        let asleep = rest.iter().any(|a| a == "--asleep");
         let pos: Vec<&String> = rest.iter().filter(|a| !a.starts_with("--")).collect();
         if pos.len() < 5 {
             bail!("usage: warren __daemon NAME SLOT COLOR MODE DIR [SESSION-ID] [--kind=…] [--sys=…] [--extra=…]");
@@ -117,7 +122,7 @@ impl DaemonArgs {
             dir: pos[4].clone(),
             sid: pos.get(5).map(|s| s.to_string()),
             sys,
-            extra,
+            extra, asleep,
         })
     }
 }
@@ -236,6 +241,9 @@ struct Daemon {
     dirty: bool,
     log: Option<std::fs::File>,
     started: Instant,
+    /// The note last written to disk, so an unchanged one is not rewritten
+    /// on every turn of the loop.
+    noted: Option<crate::record::Record>,
 }
 
 pub fn run(args: DaemonArgs) -> Result<()> {
@@ -272,13 +280,20 @@ pub fn run(args: DaemonArgs) -> Result<()> {
     // A `resume` spawn already knows its session id; anything else learns it
     // from the SessionStart hook a moment from now.
     let sid = args.sid.clone().filter(|_| args.mode == "resume");
-    let mut pty = spawn.pty(&args.mode, args.sid.as_deref(), 80, 24)?;
-    let tty = slave_tty(&mut pty);
+    // Restored agents come up asleep: the burrow, the name and the colour,
+    // with no harness running in it until someone types.
+    let mut pty = match args.asleep {
+        true => None,
+        false => Some(spawn.pty(&args.mode, args.sid.as_deref(), 80, 24)?),
+    };
+    let tty = pty.as_mut().map(slave_tty).unwrap_or_default();
 
     let poller = Arc::new(Poller::new()?);
     unsafe {
         // Registers the pty fd as KEY_PTY and its SIGCHLD pipe as KEY_CHILD.
-        pty.register(&poller, PollEvent::readable(KEY_PTY), PollMode::Level)?;
+        if let Some(pty) = pty.as_mut() {
+            pty.register(&poller, PollEvent::readable(KEY_PTY), PollMode::Level)?;
+        }
         poller.add_with_mode(&listener, PollEvent::readable(KEY_LISTENER), PollMode::Level)?;
     }
 
@@ -288,15 +303,15 @@ pub fn run(args: DaemonArgs) -> Result<()> {
     let created = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let mut daemon = Daemon {
         term: term::AgentTerm::new(80, 24, scrollback()),
-        pty: Some(pty),
+        pty,
         spawn,
-        power: Power::Awake,
+        power: if args.asleep { Power::Asleep } else { Power::Awake },
         sid,
         sleep_deadline: None,
         woke_at: None,
         tty,
         pty_started: SystemTime::now(),
-        probe_at: spawn_probe.then(|| Instant::now()),
+        probe_at: (spawn_probe && !args.asleep).then(Instant::now),
         probe_until: Instant::now() + SESSION_PROBE_FOR,
         sigkilled: false,
         quit: None,
@@ -323,6 +338,7 @@ pub fn run(args: DaemonArgs) -> Result<()> {
         dirty: false,
         log,
         started: Instant::now(),
+        noted: None,
     };
 
     let status = daemon.event_loop()?;
@@ -340,6 +356,11 @@ pub fn run(args: DaemonArgs) -> Result<()> {
         std::thread::sleep(Duration::from_millis(20));
     }
     let _ = std::fs::remove_file(&sock);
+    // Ending on purpose is the difference between "this agent is over" and
+    // "this machine stopped": only the first leaves nothing behind. A daemon
+    // killed with its machine never reaches here, which is exactly what
+    // makes the leftover notes mean what they mean.
+    crate::record::forget(&args.name);
     Ok(())
 }
 
@@ -440,6 +461,7 @@ impl Daemon {
             self.update_pty_interest()?;
             self.escalate_sleep();
             self.poll_session();
+            self.remember();
 
             // Damage coalescing: first dirtying event arms the timer; the
             // frame goes out when it expires.
@@ -1017,6 +1039,36 @@ impl Daemon {
                 conn.offset = (conn.offset + grown).min(max);
             }
         }
+    }
+
+    /// This agent, as much of it as can outlive the process. An agent with
+    /// no session id is not written down: there would be nothing to come
+    /// back to but a name and a colour.
+    fn note(&self) -> Option<crate::record::Record> {
+        Some(crate::record::Record {
+            name: self.meta.name.clone(),
+            display: self.meta.display.clone(),
+            color: self.meta.color,
+            pinned: self.meta.pinned,
+            slot: self.meta.slot,
+            cwd: self.meta.cwd.clone(),
+            kind: self.spawn.kind.as_str().to_string(),
+            sys: self.spawn.sys.clone(),
+            extra: self.spawn.extra.clone(),
+            session: self.sid.clone()?,
+        })
+    }
+
+    /// Keep the note current. Checked once a turn rather than hooked into
+    /// every place a title or a colour can change, so nothing can quietly
+    /// stop being written down by growing a new way to be renamed.
+    fn remember(&mut self) {
+        let Some(note) = self.note() else { return };
+        if self.noted.as_ref() == Some(&note) {
+            return;
+        }
+        crate::record::save(&note);
+        self.noted = Some(note);
     }
 
     fn state(&self) -> AgentState {

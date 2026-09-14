@@ -552,6 +552,7 @@ fn submit_new(dash: &mut Dash) {
         sid: sid.as_deref(),
         sys: (!sys.is_empty()).then_some(sys.as_str()),
         extra: (!extra.is_empty()).then_some(extra.as_str()),
+        asleep: false,
     };
 
     let outcome = match &dest {

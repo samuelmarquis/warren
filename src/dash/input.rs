@@ -276,6 +276,30 @@ fn run_command(dash: &mut Dash, cmd: &str) -> Option<Outcome> {
         "" => return None,
         _ => {}
     }
+    if cmd == "restore" {
+        // The agents this machine lost when it stopped, back as sleeping
+        // tabs. discover_new picks them up within the second, the way it
+        // picks up an agent made anywhere else.
+        let live: std::collections::HashSet<String> =
+            dash.agents.iter().filter(|a| a.host.is_none()).map(|a| a.meta.name.clone()).collect();
+        let notes = crate::cli::restorable(&live).ready;
+        if notes.is_empty() {
+            dash.flash = Some("nothing to restore".into());
+            return None;
+        }
+        let mut back = 0;
+        for note in &notes {
+            if crate::cli::restore_agent(note).is_ok() {
+                back += 1;
+            }
+        }
+        dash.flash = Some(match back {
+            0 => "could not restore any of them".to_string(),
+            1 => "1 agent back, asleep".to_string(),
+            n => format!("{n} agents back, asleep"),
+        });
+        return None;
+    }
     if let Some(arg) = cmd.strip_prefix("color ").or_else(|| cmd.strip_prefix("c ")) {
         match parse_color(arg.trim()) {
             Some(color) => {

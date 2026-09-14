@@ -482,6 +482,22 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
         dash.mode = Mode::Normal;
     }
 
+    // Agents this machine lost when it stopped leave a note behind; say so
+    // once, rather than restoring anything on our own. A note can also be
+    // left by a daemon that was killed outright, and resurrecting things
+    // nobody asked for is how a colony grows ghosts.
+    {
+        let live: HashSet<String> =
+            dash.agents.iter().filter(|a| a.host.is_none()).map(|a| a.meta.name.clone()).collect();
+        let waiting = crate::cli::restorable(&live).ready.len();
+        if waiting > 0 {
+            dash.flash = Some(match waiting {
+                1 => "1 agent from before this machine restarted — :restore".to_string(),
+                n => format!("{n} agents from before this machine restarted — :restore"),
+            });
+        }
+    }
+
     // Opt-in field diagnostics, same file the daemons use (WARREN_LOG).
     let mut log = std::env::var("WARREN_LOG").ok().and_then(|p| {
         std::fs::OpenOptions::new().create(true).append(true).open(p).ok()

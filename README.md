@@ -110,6 +110,7 @@ warren kill NAME       terminate an agent
 warren sleep NAME      stop its claude process, keep the agent (resumable)
 warren wake NAME       start it again on the same conversation
 warren attach NAME     view a single agent raw (no sidebar; Ctrl-\ detaches)
+warren restore [NAME]  bring back agents this machine lost when it stopped, asleep
 warren sessions [KIND] all resumable sessions (id, mtime, cwd, title) — claude, or omp
 warren help
 ```
@@ -320,6 +321,36 @@ and is left alone by damage frames until it comes back down.
 and a colony has many — though an agent on the alternate screen never puts a
 line up there at all, so Claude Code agents pay nothing for it.
 
+### Surviving a restart
+
+Agents die with the machine — they are processes, and a reboot is a machine
+that stops running processes. What warren adds is that they leave a note:
+each daemon writes its name, colour, slot, directory, harness and session id
+to `~/.warren/agents/<name>.json`, keeps it current, and **removes it when
+the agent ends on purpose**. A daemon killed with its machine never gets to
+clean up, so what is left in that directory afterwards is exactly the set of
+agents that were still running when the lights went out.
+
+`warren restore` brings them back — **asleep**. Not twelve harnesses
+relaunching at boot and eating what they ate before, but twelve burrows with
+their names, colours and directories, each waking into `claude --resume` the
+moment you type at it. Sleep mode already knew how to do that; restore is
+the same tab, arrived at from the other direction. The dashboard says so
+once on launch (`3 agents from before this machine restarted — :restore`)
+and waits to be asked: a note can also be left by a daemon that was killed
+outright, and resurrecting things nobody asked for is how a colony grows
+ghosts.
+
+An agent whose conversation is no longer in its harness's store is not
+offered, because `claude --resume` on an id that names nothing exits 1 and
+leaves a tab that can never wake. Its note is kept anyway and warren says
+what it could not find: a store that moved, a home not mounted yet and a
+conversation genuinely deleted all look the same from here, and only one of
+them is worth throwing a record away for.
+
+What does not come back is the screen. The harness repaints its own
+scrollback on waking, which is the same thing that happens after a sleep.
+
 ### Sleep mode
 
 A colony costs what its members cost, and an idle Claude Code still holds
@@ -382,14 +413,15 @@ socket, and it always exits 0 — a wedged daemon can never stall Claude.
 
 ```
 ~/.warren/run/<name>.sock   one unix socket per live agent daemon
+~/.warren/agents/<name>.json what an agent was, for restoring it after a restart
 ~/.warren/hooks.json        Claude Code hook settings (regenerated on spawn)
 ~/.warren/hosts             optional: ssh destinations whose agents join the sidebar
 ~/.warren/ssh/              ssh's shared connection sockets, one per host
 ```
 
 That's everything warren writes — it only ever reads `~/.claude` and
-`~/.omp`. Agents die with the machine (conversations persist in their
-harness's own store and come back through the resume picker).
+`~/.omp`. Agents die with the machine; `warren restore` puts the colony back
+from its notes, asleep, on the conversations their harnesses kept.
 
 ## Development
 

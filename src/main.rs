@@ -8,6 +8,7 @@
 //!   warren sleep NAME      kill the agent's claude process, keeping the resumable tab
 //!   warren wake NAME       respawn it with --resume on the same conversation
 //!   warren attach NAME     raw single-agent viewer
+//!   warren restore [NAME]  re-create agents that died with the machine, asleep
 //!   warren sessions [claude|omp]  resumable sessions (id<TAB>mtime<TAB>cwd<TAB>title)
 //!   warren hook STATE      called by Claude Code hooks; reports state to the agent daemon
 //!   warren __daemon …      internal: the per-agent daemon process
@@ -20,6 +21,7 @@ mod kind;
 mod names;
 mod paths;
 mod proto;
+mod record;
 mod remote;
 mod sessions;
 mod spans;
@@ -36,6 +38,7 @@ warren - a Claude Code agent multiplexer
   warren sleep NAME      stop the agent's claude process, keep the agent
   warren wake NAME       start it again on the same conversation
   warren attach NAME     view a single agent raw (no sidebar)
+  warren restore [NAME]  bring back agents this machine lost when it stopped (asleep)
   warren sessions [KIND] list resumable sessions (claude, or omp)
   warren help            show this help
 
@@ -56,6 +59,7 @@ fn main() {
         "sleep" => cli::cmd_power(rest, false),
         "wake" => cli::cmd_power(rest, true),
         "attach" => cli::cmd_attach(rest),
+        "restore" => cli::cmd_restore(rest),
         "sessions" => sessions::cmd_sessions(rest),
         "hook" => hooks::cmd_hook(rest),
         "__roster" => remote::wire::cmd_roster(),

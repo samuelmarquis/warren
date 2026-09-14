@@ -124,6 +124,7 @@ pub fn cmd_new(args: &[String]) -> Result<()> {
             sid: sid.as_deref(),
             sys,
             extra,
+            asleep: false,
         },
         &live,
     )?;
@@ -152,6 +153,9 @@ pub struct NewAgent<'a> {
     pub sid: Option<&'a str>,
     pub sys: Option<&'a str>,
     pub extra: Option<&'a str>,
+    /// Come up asleep, with no harness running: how a restored agent waits
+    /// for you to want it.
+    pub asleep: bool,
 }
 
 /// Pick a unique name and free slot against `live` (name, slot) pairs and
@@ -183,6 +187,9 @@ fn spawn_daemon(name: &str, slot: u8, spec: &NewAgent) -> Result<()> {
         cmd.arg(sid);
     }
     cmd.arg(format!("--kind={}", kind.as_str()));
+    if spec.asleep {
+        cmd.arg("--asleep");
+    }
     if let Some(sys) = sys {
         cmd.arg(format!("--sys={sys}"));
     }
@@ -259,6 +266,150 @@ pub fn shell_dir() -> String {
         .filter(|p| !p.is_empty())
         .or_else(|| std::env::var("HOME").ok())
         .unwrap_or_default()
+}
+
+// -------------------------------------------------------------------- restore
+
+/// Bring back what this machine was running when it stopped.
+///
+/// Agents die with the machine; their conversations do not, and neither does
+/// the note each daemon keeps of what it was. What is left in the notes
+/// directory is what never got to clean up after itself — so restoring is
+/// offering those back, not guessing.
+///
+/// They come back **asleep**: the row, the name, the colour and the
+/// directory, with no harness running until you type at one. A colony of
+/// twelve costs nothing until you want it, and waking is the same
+/// `--resume` it has always been.
+pub fn cmd_restore(args: &[String]) -> Result<()> {
+    let live: std::collections::HashSet<String> =
+        discover().into_iter().map(|a| a.meta.name).collect();
+    let wanted: Option<&String> = args.iter().find(|a| !a.starts_with('-'));
+    let mut found = restorable(&live);
+    if let Some(name) = wanted {
+        let name = crate::names::sanitize(name);
+        found.ready.retain(|n| n.name == name);
+        found.orphaned.retain(|n| n.name == name);
+        if found.ready.is_empty() && found.orphaned.is_empty() {
+            bail!("nothing to restore called '{name}'");
+        }
+    }
+    // A note whose conversation is not in the harness's store would only
+    // produce a tab that can never wake, so it is not offered — but it is
+    // kept. "I cannot find it" is not "it is not there": a store that moved,
+    // a harness mid-write or a home that is not mounted yet all look the
+    // same from here, and throwing away the only record of an agent on that
+    // reading is not a mistake you can undo.
+    for note in &found.orphaned {
+        eprintln!(
+            "warren: '{}' names a conversation {} cannot find — leaving its note alone",
+            note.display, note.kind
+        );
+    }
+    let notes = found.ready;
+    if notes.is_empty() {
+        println!("warren: nothing to restore");
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--list" || a == "-l") {
+        println!("agents to restore (from {}):", crate::record::dir().display());
+        for n in &notes {
+            println!("{:>3}  {:<32}  {}", n.slot, n.display, n.cwd);
+        }
+        return Ok(());
+    }
+    let mut back = 0;
+    for note in &notes {
+        match restore_agent(note) {
+            Ok(_) => {
+                back += 1;
+                println!("warren: restored '{}' (asleep)", note.display);
+            }
+            Err(e) => eprintln!("warren: could not restore '{}': {e:#}", note.name),
+        }
+    }
+    if back > 0 {
+        println!("warren: {back} back and asleep — type at one to resume it");
+    }
+    Ok(())
+}
+
+/// What a restore would bring back, and what it cannot.
+pub struct Restorable {
+    /// Not running, and its conversation is still there to resume.
+    pub ready: Vec<crate::record::Record>,
+    /// Not running, and its conversation is gone — an agent that never got
+    /// a turn in before the machine stopped, or a transcript since deleted.
+    pub orphaned: Vec<crate::record::Record>,
+}
+
+/// Sort the notes into the ones worth offering and the ones that would only
+/// produce a tab that can never wake: `claude --resume` on a session id that
+/// names nothing exits 1, and warren would be left holding a sleeping agent
+/// with no way back.
+pub fn restorable(live: &std::collections::HashSet<String>) -> Restorable {
+    use std::collections::{HashMap, HashSet};
+    let mut known: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut out = Restorable { ready: Vec::new(), orphaned: Vec::new() };
+    for note in crate::record::restorable(live) {
+        let kind = Kind::parse(&note.kind).unwrap_or_default();
+        let ids = known.entry(note.kind.clone()).or_insert_with(|| {
+            kind.sessions().into_iter().map(|s| s.id).collect()
+        });
+        // An empty store is "cannot tell" rather than "nothing is there":
+        // an unreadable ~/.claude must not throw a colony away.
+        if ids.is_empty() || ids.contains(&note.session) {
+            out.ready.push(note);
+        } else {
+            out.orphaned.push(note);
+        }
+    }
+    out
+}
+
+/// Put one agent back where it was, asleep, with the name it had.
+pub fn restore_agent(note: &crate::record::Record) -> Result<String> {
+    let kind = Kind::parse(&note.kind).unwrap_or_default();
+    let spec = NewAgent {
+        base: &note.name,
+        dir: &note.cwd,
+        color: note.color,
+        kind,
+        mode: "resume",
+        sid: Some(&note.session),
+        sys: note.sys.as_deref(),
+        extra: note.extra.as_deref(),
+        asleep: true,
+    };
+    // Its own name and its own slot: a restored colony comes back in the
+    // order it was in, not in the order the notes were read.
+    spawn_daemon(&note.name, note.slot, &spec)?;
+    let sock = crate::paths::sock_path(&note.name);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if query_agent(&sock).is_some() {
+            if note.display != note.name {
+                let _ = rename_to(&sock, &note.display, note.pinned);
+            }
+            return Ok(note.name.clone());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    bail!("agent '{}' did not come up", note.name)
+}
+
+/// The label the row had, handed back to the daemon that now owns it.
+fn rename_to(sock: &Path, display: &str, pinned: bool) -> Result<()> {
+    let mut stream = UnixStream::connect(sock)?;
+    stream.set_write_timeout(Some(Duration::from_millis(500)))?;
+    let frame = proto::encode_frame(&ToDaemon::SetMeta {
+        name: Some(display.to_string()),
+        color: None,
+        pinned: Some(pinned),
+        slot: None,
+    })?;
+    stream.write_all(&frame)?;
+    Ok(())
 }
 
 // ------------------------------------------------------------------------- ls

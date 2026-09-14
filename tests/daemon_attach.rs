@@ -1613,3 +1613,178 @@ fn an_idle_nudge_is_not_a_permission_prompt() {
     assert!(out.status.success());
     assert_eq!(hook_state().hook, Some(HookState::Attention));
 }
+
+/// A note for an agent that is not running and never will be again.
+fn record_note(home: &TestHome, name: &str, session: &str) -> PathBuf {
+    let dir = home.dir.join("agents");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.json"));
+    std::fs::write(
+        &path,
+        format!(
+            r#"{{"name":"{name}","display":"{name}","color":0,"pinned":false,"slot":9,"cwd":"{}","kind":"claude","sys":null,"extra":null,"session":"{session}"}}"#,
+            home.dir.display()
+        ),
+    )
+    .unwrap();
+    path
+}
+
+/// The pid of an agent's daemon, for killing it the way a shutdown would.
+fn daemon_pid(name: &str) -> Option<String> {
+    let out = Command::new("pgrep").args(["-f", &format!("__daemon {name} ")]).output().ok()?;
+    String::from_utf8_lossy(&out.stdout).split_whitespace().next().map(String::from)
+}
+
+/// An agent is a process, and a machine that restarts kills every one of
+/// them. What it cannot kill is the note the daemon left of what it was —
+/// SIGKILL is what a shutdown looks like from in here, and nothing gets to
+/// clean up after itself. So the tab comes back: same name, colour, slot and
+/// directory, asleep on the conversation it was having.
+#[test]
+fn agents_lost_with_the_machine_come_back_asleep() {
+    let home = TestHome::new("restore");
+    let courses = home.dir.join("Courses");
+    // A harness store of its own, holding the one conversation this agent is
+    // having. Restore checks that a note still names something resumable —
+    // `claude --resume` on an id that means nothing exits 1, and a tab that
+    // can never wake is worse than no tab.
+    let store = home.dir.join("store").join(".claude").join("projects").join("Courses");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(
+        store.join("conv-42.jsonl"),
+        format!("{{\"type\":\"user\",\"cwd\":\"{}\",\"message\":{{\"role\":\"user\",\"content\":\"grade these\"}}}}\n", courses.display()),
+    )
+    .unwrap();
+    let fake_home = home.dir.join("store");
+
+    new_agent_in(&home, "grader-lost", &courses, "sleep 300");
+    let sock = home.sock("grader-lost");
+
+    // A conversation to come back to is what the hooks report.
+    let mut hook = Command::new(BIN)
+        .env("WARREN_SOCK", &sock)
+        .args(["hook", "waiting"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin.take().unwrap().write_all(br#"{"session_id":"conv-42"}"#).unwrap();
+    assert!(hook.wait().unwrap().success());
+
+    // And a name of its own, as a rename in the dashboard would give it.
+    {
+        let (mut viewer, _) = Viewer::attach(&sock, 80, 10);
+        viewer.send(&ToDaemon::SetMeta {
+            name: Some("ILKD-GRADER".into()),
+            color: Some(33),
+            pinned: Some(true),
+            slot: None,
+        });
+        let named = viewer.await_frame(5_000, |m| {
+            matches!(m, ToClient::MetaChanged(meta) if meta.display == "ILKD-GRADER")
+        });
+        assert!(named.is_some(), "the rename landed");
+    }
+
+    // The note follows the agent, without anyone asking it to.
+    // The note follows the agent — the session it learned, and then the name
+    // it was given — without anyone asking it to.
+    let note = home.dir.join("agents").join("grader-lost.json");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut body = String::new();
+    while Instant::now() < deadline {
+        body = std::fs::read_to_string(&note).unwrap_or_default();
+        if body.contains("conv-42") && body.contains("ILKD-GRADER") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(body.contains("conv-42") && body.contains("ILKD-GRADER"), "{body}");
+
+    // The machine stops. Every daemon dies where it stands, cleaning up
+    // nothing: the socket is left stale and the note is left behind.
+    let pid = daemon_pid("grader-lost").expect("the daemon is running");
+    assert!(Command::new("kill").args(["-9", &pid]).status().unwrap().success());
+    let gone = Instant::now() + Duration::from_secs(5);
+    while UnixStream::connect(&sock).is_ok() && Instant::now() < gone {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(UnixStream::connect(&sock).is_err(), "the daemon is gone");
+    assert!(note.exists(), "the note outlives the machine");
+
+    // A note for an agent whose conversation is gone is not offered back.
+    let orphan = record_note(&home, "ghost", "conv-none");
+    assert!(orphan.exists());
+
+    // Back it comes, and asleep: a row and a burrow, with nothing running.
+    let out =
+        home.warren("sleep 300").env("HOME", &fake_home).args(["restore"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(said.contains("ILKD-GRADER"), "it says what it restored: {said}");
+    // The one it cannot resume is not offered — and not thrown away either:
+    // "cannot find it" is not "it is not there".
+    assert!(orphan.exists(), "the note it could not use is still kept");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("cannot find"),
+        "saying so: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!said.contains("ghost"), "and not restored: {said}");
+
+    let (mut viewer, snap) = Viewer::attach(&home.sock("grader-lost"), 80, 10);
+    let ToClient::Snapshot { meta, state, .. } = &snap else { unreachable!() };
+    assert_eq!(state.power, Power::Asleep, "restored asleep, not running");
+    assert_eq!(meta.display, "ILKD-GRADER", "with the name it had");
+    assert_eq!(meta.color, 33, "and the colour");
+    assert!(meta.cwd.ends_with("Courses"), "in its own directory: {}", meta.cwd);
+    assert_eq!(state.session.as_deref(), Some("conv-42"), "on its own conversation");
+    assert!(state.resumable, "and it knows it can come back");
+
+    // And it wakes exactly as a sleeping tab always has — the dashboard
+    // sends this the moment you type at one.
+    viewer.send(&ToDaemon::Wake);
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"x")));
+    let awake = viewer.await_frame(15_000, |m| {
+        matches!(m, ToClient::StateChanged(s) if s.power != Power::Asleep)
+    });
+    assert!(awake.is_some(), "a keystroke woke it");
+}
+
+/// An agent that ends on purpose is over, and leaves nothing to offer back.
+#[test]
+fn an_agent_that_ends_on_purpose_is_not_restored() {
+    let home = TestHome::new("restoreclean");
+    new_agent_in(&home, "shortlived", &home.dir.join("Burrow"), "sleep 300");
+    let sock = home.sock("shortlived");
+    let mut hook = Command::new(BIN)
+        .env("WARREN_SOCK", &sock)
+        .args(["hook", "waiting"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin.take().unwrap().write_all(br#"{"session_id":"conv-7"}"#).unwrap();
+    assert!(hook.wait().unwrap().success());
+    let note = home.dir.join("agents").join("shortlived.json");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !note.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(note.exists(), "it was written down while it lived");
+
+    let out = home.warren("unused").args(["kill", "shortlived"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while note.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!note.exists(), "and forgotten when it ended");
+
+    let out = home.warren("sleep 300").args(["restore"]).output().unwrap();
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("nothing to restore"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
