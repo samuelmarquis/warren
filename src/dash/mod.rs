@@ -315,15 +315,17 @@ impl Dash {
         let Some(agent) = self.focused() else { return };
         let refusal = if agent.asleep() {
             None // waking is always allowed
-        } else if agent.busy() {
-            Some("AGENT BUSY")
+        } else if let Some(why) = agent.busy_because() {
+            // Say which kind of busy: one of them means wait, the other
+            // means press it again.
+            Some(format!("AGENT BUSY — {why}"))
         } else if !agent.resumable() {
-            Some("NO SESSION YET")
+            Some("NO SESSION YET".to_string())
         } else {
             None
         };
         if let Some(msg) = refusal {
-            self.flash = Some(msg.to_string());
+            self.flash = Some(msg);
             self.status_dirty = true;
             return;
         }

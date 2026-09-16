@@ -104,13 +104,15 @@ fn draw_sidebar(dash: &mut Dash, out: &mut String) {
             Row::Host(s) => {
                 let section = &sections[s];
                 let text = match &section.status {
-                    Some(state) => format!(" {} \u{b7} {state}", section.label),
-                    None => format!(" {}", section.label),
+                    Some(state) => format!("{} \u{b7} {state}", section.label),
+                    None => section.label.clone(),
                 };
-                let text: String = text.chars().take(text_w).collect();
-                let pad = text_w.saturating_sub(text.chars().count());
+                let text: String = text.chars().take(text_w.saturating_sub(1)).collect();
+                let pad = text_w.saturating_sub(text.chars().count() + 1);
                 let style = if section.status.is_some() { "\x1b[0;2;3m" } else { "\x1b[0;1;4m" };
-                let _ = write!(out, "{style}{text}\x1b[0m{}", " ".repeat(pad));
+                // The gutter is not part of the name: underlining it makes
+                // the heading look like it starts a column before it does.
+                let _ = write!(out, "\x1b[0m {style}{text}\x1b[0m{}", " ".repeat(pad));
             }
             // A working directory. Folded, it says how many it is holding.
             Row::Folder(s, f) => {

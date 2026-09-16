@@ -335,19 +335,35 @@ impl AgentConn {
         self.state.resumable
     }
 
-    /// The v0 busy heuristic: hook state wins; otherwise "output within the
-    /// last 1500ms" (Claude's status line repaints about once a second).
+    /// The v0 busy heuristic: hook state wins; otherwise "output lately"
+    /// (Claude's status line repaints about once a second).
     /// `attention` stays activity-based: mid-tool it reads as working.
     pub fn busy(&self) -> bool {
+        self.busy_because().is_some()
+    }
+
+    /// The same question, answered in the words a refusal should use.
+    ///
+    /// A sidebar badge only needs yes or no, but someone whose keystroke was
+    /// just refused needs to know which of the two it was: "it is mid-turn"
+    /// means wait for it, and "it painted 0.3s ago" means press the key
+    /// again. A harness with no lifecycle hooks — OMP — can only ever be
+    /// read the second way, so that is exactly where an unexplained refusal
+    /// is most likely and least explicable.
+    pub fn busy_because(&self) -> Option<String> {
         // A sleeping agent's last frame may be seconds old and mid-spinner;
         // nothing is running, so nothing is busy.
         if self.asleep() {
-            return false;
+            return None;
         }
         match self.state.hook {
-            Some(crate::proto::HookState::Working) => true,
-            Some(crate::proto::HookState::Waiting) => false,
-            _ => self.output_rx.elapsed().as_millis() < 1500,
+            Some(crate::proto::HookState::Working) => Some("mid-turn".to_string()),
+            Some(crate::proto::HookState::Waiting) => None,
+            _ => {
+                let ms = self.output_rx.elapsed().as_millis() as u64;
+                (ms < crate::proto::BUSY_QUIET_MS)
+                    .then(|| format!("painted {:.1}s ago", ms as f64 / 1000.0))
+            }
         }
     }
 

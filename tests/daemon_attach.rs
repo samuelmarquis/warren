@@ -1788,3 +1788,99 @@ fn an_agent_that_ends_on_purpose_is_not_restored() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+/// A refusal has to say which kind of busy it is: "mid-turn" means wait for
+/// it, "painted 0.3s ago" means press the key again. A harness with no
+/// lifecycle hooks can only ever be read the second way, which is where an
+/// unexplained refusal is both most likely and least explicable.
+#[test]
+fn a_refused_sleep_says_why_it_was_refused() {
+    let inner = TestHome::new("whybusy");
+    // Never stops printing: busy by the activity heuristic, with no hooks to
+    // say otherwise — an OMP agent mid-turn, as far as warren can tell.
+    new_agent_in(
+        &inner,
+        "chatterer",
+        &inner.dir.join("Burrow"),
+        "i=0; while :; do i=$((i+1)); echo \"tick $i\"; sleep 0.2; done",
+    );
+
+    let outer = TestHome::new("whybusyout");
+    let dash_cmd = format!("WARREN_HOME={} {} up", inner.dir.display(), BIN);
+    new_agent(&outer, "dash", &dash_cmd);
+    let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 20);
+
+    let grid = std::cell::RefCell::new(Vec::<String>::new());
+    apply_frame(&grid, &snap);
+    let up = viewer.await_frame(15_000, |m| {
+        apply_frame(&grid, m);
+        grid.borrow().iter().any(|r| r.contains("tick"))
+    });
+    assert!(up.is_some(), "the agent is printing: {:?}", grid.borrow().clone());
+
+    // ^Z at something that is painting: refused, and told why.
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x1a")));
+    let said = viewer.await_frame(10_000, |m| {
+        apply_frame(&grid, m);
+        grid.borrow().iter().any(|r| r.contains("AGENT BUSY"))
+    });
+    assert!(said.is_some(), "it refused: {:?}", grid.borrow().last());
+    let status: String = grid.borrow().iter().find(|r| r.contains("AGENT BUSY")).cloned().unwrap();
+    assert!(
+        status.contains("painted") && status.contains("s ago"),
+        "and said which kind of busy: {status:?}"
+    );
+}
+
+/// The gutter before a machine's name is not part of the name.
+#[test]
+fn a_machine_heading_underlines_its_name_and_not_the_space_before_it() {
+    let far = TestHome::new("headfar");
+    let near = TestHome::new("headnear");
+    let outer = TestHome::new("headout");
+    new_agent_in(&far, "spork", &far.dir.join("Games"), "sleep 300");
+    new_agent_in(&near, "svm", &near.dir.join("Research"), "sleep 300");
+    std::fs::write(near.dir.join("hosts"), format!("faraway  {BIN}\n")).unwrap();
+    let shim = fake_ssh(&near, &far);
+    let dash_cmd =
+        format!("WARREN_HOME={} WARREN_SSH={} {} up", near.dir.display(), shim.display(), BIN);
+    new_agent(&outer, "dash", &dash_cmd);
+    let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 22);
+
+    // Keep the rows as spans, not text: the styling is the point here.
+    let rows = std::cell::RefCell::new(Vec::<spans::LineSpans>::new());
+    let keep = |rows: &std::cell::RefCell<Vec<spans::LineSpans>>, m: &ToClient| match m {
+        ToClient::Snapshot { screen, .. } => *rows.borrow_mut() = screen.clone(),
+        ToClient::Damage { lines, .. } => {
+            let mut r = rows.borrow_mut();
+            for (row, line) in lines {
+                let i = *row as usize;
+                if r.len() <= i {
+                    r.resize(i + 1, spans::LineSpans::default());
+                }
+                r[i] = line.clone();
+            }
+        }
+        _ => {}
+    };
+    keep(&rows, &snap);
+    let text_of = |line: &spans::LineSpans| -> String {
+        line.0.iter().map(|s| s.text.as_str()).collect::<String>().chars().take(23).collect()
+    };
+    let found = viewer.await_frame(20_000, |m| {
+        keep(&rows, m);
+        rows.borrow().iter().any(|l| text_of(l).trim() == "faraway")
+    });
+    assert!(found.is_some(), "the far machine has a heading");
+
+    let heading = rows.borrow().iter().find(|l| text_of(l).trim() == "faraway").cloned().unwrap();
+    let first = heading.0.first().expect("the row starts with something");
+    assert!(first.text.starts_with(' '), "the gutter comes first: {first:?}");
+    assert_eq!(
+        first.attrs & spans::attr::UNDERLINE,
+        0,
+        "and is not underlined: {first:?}"
+    );
+    let name = heading.0.iter().find(|s| s.text.contains("faraway")).expect("the name is drawn");
+    assert_ne!(name.attrs & spans::attr::UNDERLINE, 0, "the name still is: {name:?}");
+}
