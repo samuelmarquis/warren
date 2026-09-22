@@ -2051,3 +2051,78 @@ fn the_form_offers_a_fork_only_where_the_harness_has_one() {
         grid.borrow().clone()
     );
 }
+
+/// An agent is found by the name it has. `sanitize` trims to 32 characters
+/// because that is the rule for *making* a name; running it over one you
+/// were asked to look up maps two agents onto one — which is how a
+/// 34-character `…-par-2` came to hold `…-par`'s socket, and why two rows in
+/// the sidebar were one daemon wearing two hats.
+#[test]
+fn an_agent_is_found_by_the_name_it_has_and_not_a_trimmed_one() {
+    let home = TestHome::new("longname");
+    let work = home.dir.join("Burrow");
+    std::fs::create_dir_all(&work).unwrap();
+    let short = "x".repeat(32); // exactly NAME_MAX
+    let long = format!("{short}-2"); // 34: what an older warren made of a duplicate
+
+    new_agent_in(&home, &short, &work, "sleep 300");
+    // The over-long one can only be made directly now, which is the point:
+    // it is the shape already out there on disk, not one warren still mints.
+    let mut raw = home
+        .warren("sleep 300")
+        .args(["__daemon", &long, "9", "0", "new", work.to_str().unwrap()])
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !(home.sock(&short).exists() && home.sock(&long).exists()) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(home.sock(&short).exists() && home.sock(&long).exists(), "both are up");
+
+    // The far side of an ssh: `__pipe NAME` must carry the agent named, not
+    // whatever that name trims to.
+    let mut pipe = home
+        .warren("sleep 300")
+        .args(["__pipe", &long])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    pipe.stdin
+        .as_mut()
+        .unwrap()
+        .write_all(&proto::encode_frame(&ToDaemon::Query).unwrap())
+        .unwrap();
+    let mut decoder = FrameDecoder::new();
+    let mut out = pipe.stdout.take().unwrap();
+    let mut buf = [0u8; 4096];
+    let mut piped_to = None;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while piped_to.is_none() && Instant::now() < deadline {
+        let n = out.read(&mut buf).unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        decoder.push(&buf[..n]);
+        while let Ok(Some(msg)) = decoder.next::<ToClient>() {
+            if let ToClient::MetaChanged(meta) = msg {
+                piped_to = Some(meta.name);
+            }
+        }
+    }
+    let _ = pipe.kill();
+    let _ = pipe.wait();
+    assert_eq!(piped_to.as_deref(), Some(long.as_str()), "the pipe carried the agent asked for");
+
+    // And killing it kills it, not its shorter neighbour.
+    let out = home.warren("sleep 300").args(["kill", &long]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while home.sock(&long).exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!home.sock(&long).exists(), "the one named is gone");
+    assert!(home.sock(&short).exists(), "and the other one is untouched");
+    let _ = raw.kill();
+    let _ = raw.wait();
+}

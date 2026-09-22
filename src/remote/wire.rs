@@ -93,8 +93,14 @@ pub fn cmd_pipe(args: &[String]) -> Result<()> {
     let Some(raw) = args.first() else {
         bail!("usage: warren __pipe NAME");
     };
-    let name = crate::names::sanitize(raw);
-    let sock = crate::paths::sock_path(&name);
+    // Checked, not sanitized: the roster hands back the names this machine's
+    // agents actually have, and trimming one to fit a limit meant for *new*
+    // names is how `…-par-2` came back holding `…-par`'s socket.
+    if !crate::names::valid(raw) {
+        bail!("'{raw}' is not an agent name");
+    }
+    let name = raw.as_str();
+    let sock = crate::paths::sock_path(name);
     let stream = UnixStream::connect(&sock)
         .with_context(|| format!("no live agent named '{name}' on this machine"))?;
     stream.set_nonblocking(true)?;

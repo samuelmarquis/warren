@@ -262,6 +262,19 @@ pub fn resolve_dir(arg: Option<&str>, base: &str) -> Result<String> {
     Ok(real.to_string_lossy().into_owned())
 }
 
+/// The agent someone is asking for, by the name it actually has.
+///
+/// Checked, never rewritten: `sanitize` is for *making* a name, and running
+/// it over one you were handed to look up maps distinct agents onto one —
+/// which is exactly how a 34-character name came to resolve to its
+/// 32-character neighbour's socket.
+fn named(raw: &str) -> Result<&str> {
+    if !crate::names::valid(raw) {
+        bail!("'{raw}' is not an agent name");
+    }
+    Ok(raw)
+}
+
 /// Where a relative path is measured from on the command line.
 pub fn shell_dir() -> String {
     std::env::var("PWD")
@@ -290,7 +303,7 @@ pub fn cmd_restore(args: &[String]) -> Result<()> {
     let wanted: Option<&String> = args.iter().find(|a| !a.starts_with('-'));
     let mut found = restorable(&live);
     if let Some(name) = wanted {
-        let name = crate::names::sanitize(name);
+        let name = named(name)?;
         found.ready.retain(|n| n.name == name);
         found.orphaned.retain(|n| n.name == name);
         if found.ready.is_empty() && found.orphaned.is_empty() {
@@ -449,8 +462,8 @@ pub fn cmd_kill(args: &[String]) -> Result<()> {
     let Some(raw) = args.first() else {
         bail!("usage: warren kill NAME");
     };
-    let name = crate::names::sanitize(raw);
-    let sock = crate::paths::sock_path(&name);
+    let name = named(raw)?;
+    let sock = crate::paths::sock_path(name);
     let mut stream =
         UnixStream::connect(&sock).with_context(|| format!("no live agent named '{name}'"))?;
     stream.set_write_timeout(Some(Duration::from_millis(500)))?;
@@ -489,8 +502,8 @@ pub fn cmd_power(args: &[String], wake: bool) -> Result<()> {
     let Some(raw) = args.first() else {
         bail!("usage: warren {verb} NAME");
     };
-    let name = crate::names::sanitize(raw);
-    let sock = crate::paths::sock_path(&name);
+    let name = named(raw)?;
+    let sock = crate::paths::sock_path(name);
     let (_, state) =
         query_agent(&sock).with_context(|| format!("no live agent named '{name}'"))?;
 
@@ -544,8 +557,8 @@ pub fn cmd_attach(args: &[String]) -> Result<()> {
     let Some(raw) = args.first() else {
         bail!("usage: warren attach NAME");
     };
-    let name = crate::names::sanitize(raw);
-    let sock = crate::paths::sock_path(&name);
+    let name = named(raw)?;
+    let sock = crate::paths::sock_path(name);
     let mut stream =
         UnixStream::connect(&sock).with_context(|| format!("no live agent named '{name}'"))?;
     stream.set_nonblocking(true)?;
