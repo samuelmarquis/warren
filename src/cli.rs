@@ -93,7 +93,7 @@ pub fn cmd_new(args: &[String]) -> Result<()> {
 
     let Some(raw) = pos.first() else {
         bail!(
-            "usage: warren new NAME [DIR] [COLOR 0-255] [new|resume|continue] [session-id] \
+            "usage: warren new NAME [DIR] [COLOR 0-255] [new|resume|continue|fork] [session-id] \
              [--kind=claude|omp] [--sys=SYSTEM-PROMPT] [--extra=EXTRA-AGENT-ARGS]"
         );
     };
@@ -105,8 +105,11 @@ pub fn cmd_new(args: &[String]) -> Result<()> {
     let color: u8 =
         pos.get(2).map(|c| c.parse()).transpose().context("COLOR must be 0-255")?.unwrap_or(0);
     let mode = pos.get(3).cloned().cloned().unwrap_or_else(|| "new".to_string());
-    if !matches!(mode.as_str(), "new" | "resume" | "continue") {
-        bail!("mode must be new, resume, or continue");
+    if !matches!(mode.as_str(), "new" | "resume" | "continue" | "fork") {
+        bail!("mode must be new, resume, continue, or fork");
+    }
+    if mode == "fork" && !kind.can_fork() {
+        bail!("{} cannot fork a conversation — resume it instead", kind.as_str());
     }
     let sid = pos.get(4).map(|s| s.to_string());
 

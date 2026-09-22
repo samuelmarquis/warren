@@ -46,9 +46,25 @@ impl Kind {
                 // No id: the harness's own picker beats a wrong guess.
                 None => format!("{bin} --resume"),
             },
+            // A fork reads the conversation and then writes somewhere else:
+            // same history, new session id, so the two never tread on each
+            // other's transcript. Only the first run forks — every wake after
+            // it resumes the id the fork reported.
+            "fork" => match sid {
+                Some(sid) => format!("{bin} --resume {sid} --fork-session"),
+                None => format!("{bin} --resume --fork-session"),
+            },
             "continue" => format!("{bin} --continue"),
             _ => bin.to_string(),
         }
+    }
+
+    /// Can this harness open a conversation *twice* — take its history and
+    /// carry on separately? Claude Code has `--fork-session`; OMP has no
+    /// equivalent, and resuming it twice means two processes appending to one
+    /// transcript, so warren does not offer what it cannot deliver.
+    pub fn can_fork(self) -> bool {
+        matches!(self, Kind::Claude)
     }
 
     /// The flag wiring warren's lifecycle hooks, for harnesses that have them.
@@ -133,6 +149,17 @@ mod tests {
         assert_eq!(Kind::Omp.base_command("resume", Some("abc")), "omp --resume abc");
         // No id falls through to the harness's own picker.
         assert_eq!(Kind::Claude.base_command("resume", None), "claude --resume");
+    }
+
+    #[test]
+    fn a_fork_resumes_into_a_new_session_where_the_harness_can() {
+        assert_eq!(
+            Kind::Claude.base_command("fork", Some("abc")),
+            "claude --resume abc --fork-session"
+        );
+        assert!(Kind::Claude.can_fork());
+        // OMP has no fork flag, so nothing may offer it one.
+        assert!(!Kind::Omp.can_fork());
     }
 
     #[test]

@@ -1884,3 +1884,170 @@ fn a_machine_heading_underlines_its_name_and_not_the_space_before_it() {
     let name = heading.0.iter().find(|s| s.text.contains("faraway")).expect("the name is drawn");
     assert_ne!(name.attrs & spans::attr::UNDERLINE, 0, "the name still is: {name:?}");
 }
+
+/// Opening one conversation twice makes two agents, not one agent with two
+/// rows: nothing about the pair is shared, so either can be closed on its
+/// own. (What they *do* share is the transcript they both append to, which
+/// is why the form asks before making the pair at all.)
+#[test]
+fn two_agents_on_one_conversation_are_still_two_agents() {
+    let home = TestHome::new("twins");
+    let work = home.dir.join("Burrow");
+    std::fs::create_dir_all(&work).unwrap();
+    let sid = "11111111-2222-3333-4444-555555555555";
+    for name in ["TWIN", "TWIN-B"] {
+        let out = home
+            .warren("sleep 300")
+            .args(["new", name, work.to_str().unwrap(), "0", "resume", sid])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+    assert!(home.sock("TWIN").exists() && home.sock("TWIN-B").exists());
+
+    let out = home.warren("sleep 300").args(["kill", "TWIN"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while home.sock("TWIN").exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!home.sock("TWIN").exists(), "the one that was killed is gone");
+    // The other is untouched: still listening, still its own process.
+    assert!(home.sock("TWIN-B").exists(), "and the other is not");
+    let (_viewer, snap) = Viewer::attach(&home.sock("TWIN-B"), 40, 8);
+    assert!(matches!(snap, ToClient::Snapshot { .. }), "it still answers: {snap:?}");
+    assert!(daemon_pid("TWIN-B").is_some(), "and its daemon is still running");
+}
+
+/// A conversation only has one transcript, so resuming one that is already
+/// open means two agents writing over each other's history. The form says so
+/// before it happens — and takes the same key again as "I meant it".
+#[test]
+fn a_conversation_that_is_already_open_is_not_opened_twice_by_accident() {
+    let inner = TestHome::new("dupin");
+    let outer = TestHome::new("dupout");
+    let work = inner.dir.join("Burrow");
+    std::fs::create_dir_all(&work).unwrap();
+
+    // One resumable conversation, in a home the picker will read.
+    let fake_home = inner.dir.join("home");
+    let sid = "11111111-2222-3333-4444-555555555555";
+    let proj = fake_home.join(".claude").join("projects").join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(
+        proj.join(format!("{sid}.jsonl")),
+        format!(
+            "{{\"type\":\"user\",\"cwd\":\"{}\",\"message\":{{\"content\":\"the one conversation\"}}}}\n",
+            work.display()
+        ),
+    )
+    .unwrap();
+    // And an agent already on it.
+    let out = inner
+        .warren("sleep 300")
+        .args(["new", "FIRST", work.to_str().unwrap(), "0", "resume", sid])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let dash_cmd = format!(
+        "HOME={} WARREN_HOME={} {} up",
+        fake_home.display(),
+        inner.dir.display(),
+        BIN
+    );
+    new_agent(&outer, "dash", &dash_cmd);
+    let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 22);
+    let grid = std::cell::RefCell::new(Vec::<String>::new());
+    apply_frame(&grid, &snap);
+    let up = viewer.await_frame(20_000, |m| {
+        apply_frame(&grid, m);
+        sidebar_of(&grid).iter().any(|r| r.contains("FIRST"))
+    });
+    assert!(up.is_some(), "the first agent is up: {:?}", sidebar_of(&grid));
+
+    // ^Space n opens the form; Tab reaches Mode, `l` picks resume.
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x00n\tl")));
+    let listed = viewer.await_frame(10_000, |m| {
+        apply_frame(&grid, m);
+        grid.borrow().iter().any(|r| r.contains("the one conversation"))
+    });
+    assert!(listed.is_some(), "the picker offers it: {:?}", grid.borrow().clone());
+
+    // Enter: refused, with the name of the agent that already has it.
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"\r")));
+    let warned = viewer.await_frame(10_000, |m| {
+        apply_frame(&grid, m);
+        grid.borrow().iter().any(|r| r.contains("already on this conversation"))
+    });
+    assert!(warned.is_some(), "it warned: {:?}", grid.borrow().clone());
+    let said: String = grid
+        .borrow()
+        .iter()
+        .find(|r| r.contains("already on this conversation"))
+        .cloned()
+        .unwrap();
+    assert!(said.contains("FIRST"), "and said which agent: {said:?}");
+    assert!(said.contains("fork"), "and what to do instead: {said:?}");
+    let live = std::fs::read_dir(inner.dir.join("run")).unwrap().flatten().count();
+    assert_eq!(live, 1, "and made nothing: {said:?}");
+
+    // The same key again is how you say you meant it.
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"\r")));
+    let made = viewer.await_frame(20_000, |m| {
+        apply_frame(&grid, m);
+        // The sidebar is 23 columns; the name arrives clipped.
+        sidebar_of(&grid).iter().any(|r| r.contains("the-one-conversat"))
+    });
+    assert!(made.is_some(), "the twin was made after all: {:?}", sidebar_of(&grid));
+}
+
+/// Fork is Claude Code's `--fork-session`, so it is offered exactly where it
+/// exists: switching the form to a harness without one must not leave a mode
+/// selected that that harness cannot run.
+#[test]
+fn the_form_offers_a_fork_only_where_the_harness_has_one() {
+    let inner = TestHome::new("forkin");
+    let outer = TestHome::new("forkout");
+    new_agent_in(&inner, "svm", &inner.dir.join("Research"), "sleep 300");
+    let dash_cmd = format!("WARREN_HOME={} {} up", inner.dir.display(), BIN);
+    new_agent(&outer, "dash", &dash_cmd);
+    let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 22);
+    let grid = std::cell::RefCell::new(Vec::<String>::new());
+    apply_frame(&grid, &snap);
+
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x00n")));
+    let form = viewer.await_frame(15_000, |m| {
+        apply_frame(&grid, m);
+        grid.borrow().iter().any(|r| r.contains("Mode"))
+    });
+    assert!(form.is_some(), "the form is open: {:?}", grid.borrow().clone());
+    let mode_row = |grid: &std::cell::RefCell<Vec<String>>| -> String {
+        grid.borrow().iter().find(|r| r.contains("Mode")).cloned().unwrap_or_default()
+    };
+    assert!(mode_row(&grid).contains("fork"), "claude can fork: {:?}", mode_row(&grid));
+
+    // Land on fork, then switch the harness out from under it. Picking a
+    // chip drops the cursor back to the first field, so each step is its own
+    // Tab: new -> resume -> continue -> fork.
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"\tl\tl\tl")));
+    let forked = viewer.await_frame(10_000, |m| {
+        apply_frame(&grid, m);
+        grid.borrow().iter().any(|r| r.contains("Fork of"))
+    });
+    assert!(forked.is_some(), "fork picks a conversation too: {:?}", grid.borrow().clone());
+
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"l")));
+    let omp = viewer.await_frame(10_000, |m| {
+        apply_frame(&grid, m);
+        grid.borrow().iter().any(|r| r.contains("new omp agent"))
+    });
+    assert!(omp.is_some(), "the harness changed: {:?}", grid.borrow().clone());
+    assert!(!mode_row(&grid).contains("fork"), "omp is offered none: {:?}", mode_row(&grid));
+    assert!(
+        !grid.borrow().iter().any(|r| r.contains("Fork of")),
+        "and is not left on one: {:?}",
+        grid.borrow().clone()
+    );
+}

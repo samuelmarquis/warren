@@ -278,7 +278,10 @@ pub fn run(args: DaemonArgs) -> Result<()> {
         env,
     };
     // A `resume` spawn already knows its session id; anything else learns it
-    // from the SessionStart hook a moment from now.
+    // from the SessionStart hook a moment from now. A `fork` spawn is given
+    // one and must NOT keep it: the id it was forked from belongs to the
+    // other agent, and claiming it — even for the second before the hook
+    // corrects us — would point a sleep at someone else's conversation.
     let sid = args.sid.clone().filter(|_| args.mode == "resume");
     // Restored agents come up asleep: the burrow, the name and the colour,
     // with no harness running in it until someone types.

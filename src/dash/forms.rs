@@ -36,6 +36,10 @@ pub enum NField {
 pub const MODE_NEW: u8 = 0;
 pub const MODE_RESUME: u8 = 1;
 pub const MODE_CONTINUE: u8 = 2;
+/// Same history, new conversation. Last, so that a harness without one can
+/// simply be offered a shorter list without renumbering the others.
+pub const MODE_FORK: u8 = 3;
+const MODE_LABELS: [&str; 4] = ["new", "resume", "continue", "fork"];
 
 /// The harnesses the form offers, in the order it cycles them.
 pub const KINDS: [Kind; 2] = [Kind::Claude, Kind::Omp];
@@ -90,6 +94,9 @@ pub struct NewForm {
     /// Raw extra CLI args appended to the claude command line.
     pub extra: String,
     pub color: u16, // 0 = none, 1..=255 xterm index
+    /// The session someone has already been warned about opening twice.
+    /// Asking again is how you say you meant it.
+    pub dup_ack: Option<String>,
 }
 
 impl NewForm {
@@ -108,13 +115,17 @@ impl NewForm {
             sys: String::new(),
             extra: String::new(),
             color: 0,
+            dup_ack: None,
         }
     }
 
     /// Machine leads, when there is one to pick: it decides what every field
     /// under it means. With no hosts configured the form is what it was.
     pub fn fields(&self) -> &'static [NField] {
-        match (self.machines.is_empty(), self.mode) {
+        // Resuming and forking both start from a conversation you pick; the
+        // difference is only which of them the picked one ends up being.
+        let mode = if self.picks_session() { MODE_RESUME } else { self.mode };
+        match (self.machines.is_empty(), mode) {
             (true, MODE_RESUME) => &[
                 NField::Kind,
                 NField::Mode,
@@ -168,6 +179,20 @@ impl NewForm {
                 NField::Extra,
                 NField::Color,
             ],
+        }
+    }
+
+    /// Does this mode start from an existing conversation?
+    pub fn picks_session(&self) -> bool {
+        matches!(self.mode, MODE_RESUME | MODE_FORK)
+    }
+
+    /// The modes this form offers, which depends on the harness: only a
+    /// harness that can fork is offered a fork.
+    pub fn mode_labels(&self) -> &'static [&'static str] {
+        match self.agent_kind().can_fork() {
+            true => &MODE_LABELS,
+            false => &MODE_LABELS[..MODE_FORK as usize],
         }
     }
 
@@ -443,7 +468,7 @@ pub fn new_key(dash: &mut Dash, bytes: &[u8]) -> usize {
                     form.machine = (form.machine + step) % choices;
                     form.follow_machine();
                     form.forget_sessions(); // another machine, other sessions
-                    want_sessions = form.mode == MODE_RESUME;
+                    want_sessions = form.picks_session();
                     form.field = 0;
                 }
             }
@@ -456,19 +481,24 @@ pub fn new_key(dash: &mut Dash, bytes: &[u8]) -> usize {
                 if step != 0 {
                     form.kind = (form.kind + step) % KINDS.len();
                     form.forget_sessions(); // a different harness, different sessions
-                    want_sessions = form.mode == MODE_RESUME;
+                    // A harness that cannot fork cannot be left on fork.
+                    if form.mode as usize >= form.mode_labels().len() {
+                        form.mode = MODE_RESUME;
+                    }
+                    want_sessions = form.picks_session();
                     form.field = 0;
                 }
             }
             NField::Mode => {
+                let modes = form.mode_labels().len() as u8;
                 if matches!(key, Key::Char(b'l') | Key::Right) {
-                    form.mode = (form.mode + 1) % 3;
+                    form.mode = (form.mode + 1) % modes;
                     form.field = 0;
                 } else if matches!(key, Key::Char(b'h') | Key::Left) {
-                    form.mode = (form.mode + 2) % 3;
+                    form.mode = (form.mode + modes - 1) % modes;
                     form.field = 0;
                 }
-                want_sessions = form.mode == MODE_RESUME;
+                want_sessions = form.picks_session();
             }
             NField::Title => line_edit(&mut form.title, key),
             NField::Root => line_edit(&mut form.root, key),
@@ -494,13 +524,23 @@ pub fn new_key(dash: &mut Dash, bytes: &[u8]) -> usize {
     consumed
 }
 
+/// An agent on this machine already running the conversation `sid` names, by
+/// the label the sidebar gives it. A sleeping one counts: it wakes straight
+/// back into the same transcript.
+fn already_open(dash: &Dash, dest: Option<&str>, sid: &str) -> Option<String> {
+    dash.agents
+        .iter()
+        .find(|a| a.ident().0 == dest && a.state.session.as_deref() == Some(sid))
+        .map(|a| a.meta.display.clone())
+}
+
 fn submit_new(dash: &mut Dash) {
-    if dash.newform.mode == MODE_RESUME {
+    if dash.newform.picks_session() {
         ensure_sessions(dash);
     }
     let form = &mut dash.newform;
     let (mode_str, sid, dir, fallback_name) = match form.mode {
-        MODE_RESUME => {
+        MODE_RESUME | MODE_FORK => {
             let Some(sess) = form.sessions.as_ref().and_then(|s| s.get(form.sess_sel)) else {
                 let waiting = form.sess_job.is_some();
                 dash.flash =
@@ -508,19 +548,47 @@ fn submit_new(dash: &mut Dash) {
                 dash.status_dirty = true;
                 return;
             };
-            ("resume", Some(sess.id.clone()), sess.cwd.clone(), sess.title.clone())
+            let mode = if form.mode == MODE_FORK { "fork" } else { "resume" };
+            (mode, Some(sess.id.clone()), sess.cwd.clone(), sess.title.clone())
         }
         MODE_CONTINUE => ("continue", None, form.root.clone(), "agent".to_string()),
         _ => ("new", None, form.root.clone(), String::new()),
     };
     let raw_name = if form.title.is_empty() { fallback_name } else { form.title.clone() };
+    // Everything else the form has to say, said now: what follows needs the
+    // whole dashboard — the agents already running, and somewhere to put a
+    // refusal — and the form is part of it.
+    let dest = form.dest().map(str::to_string);
+    let color = form.color.min(255) as u8;
+    let kind = form.agent_kind();
+    let sys = form.sys.trim().to_string();
+    let extra = form.extra.trim().to_string();
+    let acked = form.dup_ack.clone();
+
     let base = crate::names::sanitize(raw_name.trim());
     if base.is_empty() {
         dash.flash = Some("give the agent a title".into());
         dash.status_dirty = true;
         return;
     }
-    let dest = form.dest().map(str::to_string);
+    // Two agents on one conversation are not two conversations: both
+    // harnesses append to the same transcript, so the pair overwrite each
+    // other's history and a `fork` is what was actually wanted. Say so once;
+    // asking again is how you say you meant it.
+    let twin = sid
+        .as_deref()
+        .filter(|_| mode_str == "resume")
+        .and_then(|sid| already_open(dash, dest.as_deref(), sid));
+    if let Some(twin) = twin.filter(|_| acked.as_deref() != sid.as_deref()) {
+        let how = match kind.can_fork() {
+            true => "fork it, or ask again to open it twice",
+            false => "ask again to open it twice",
+        };
+        dash.flash = Some(format!("'{twin}' is already on this conversation — {how}"));
+        dash.newform.dup_ack = sid.clone();
+        dash.status_dirty = true;
+        return;
+    }
     // A path means whatever it means on the machine that will open it: only
     // this one's is ours to read, and a form has no working directory of its
     // own, so a relative one is measured from home. The far side resolves
@@ -539,10 +607,6 @@ fn submit_new(dash: &mut Dash) {
         }
         Some(_) => dir,
     };
-    let color = form.color.min(255) as u8;
-    let kind = form.agent_kind();
-    let sys = form.sys.trim().to_string();
-    let extra = form.extra.trim().to_string();
     let spec = crate::cli::NewAgent {
         base: &base,
         dir: &dir,
@@ -610,7 +674,7 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
     let x0 = SIDEBAR_WIDTH + 1;
     let pane_w = dash.cols.saturating_sub(SIDEBAR_WIDTH) as usize;
     let pane_h = dash.rows.saturating_sub(1);
-    if dash.newform.mode == MODE_RESUME {
+    if dash.newform.picks_session() {
         ensure_sessions(dash);
     }
     let form = &mut dash.newform;
@@ -651,7 +715,7 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
         row,
         x0,
         "Mode",
-        &["new", "resume", "continue"],
+        form.mode_labels(),
         form.mode as usize,
         active == NField::Mode,
     );
@@ -659,11 +723,14 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
     row += 2;
 
     match form.mode {
-        MODE_RESUME => {
+        MODE_RESUME | MODE_FORK => {
             let sessions = form.sessions.as_deref().unwrap_or(&[]);
+            // The picker is the same list either way; the label is what says
+            // whether the conversation is being joined or copied.
+            let what = if form.mode == MODE_FORK { "Fork of  " } else { "Session  " };
             let _ = write!(
                 out,
-                "\x1b[{};{}H{}Session   \x1b[0m",
+                "\x1b[{};{}H{}{what}\x1b[0m",
                 row,
                 x0 + 2,
                 field_label(active == NField::List)
@@ -936,7 +1003,7 @@ pub fn form_click(dash: &mut Dash, row: u16, col: u16) {
 
 /// Wheel over the form: the resume picker is the one list here to scroll.
 pub fn form_wheel(dash: &mut Dash, down: bool) {
-    if !dash.on_newform() || dash.newform.mode != MODE_RESUME {
+    if !dash.on_newform() || !dash.newform.picks_session() {
         return;
     }
     let len = dash.newform.sessions.as_ref().map(Vec::len).unwrap_or(0);
@@ -967,11 +1034,14 @@ fn choose(dash: &mut Dash, field: NField, option: usize) {
         NField::Kind if option < KINDS.len() && option != form.kind => {
             form.kind = option;
             form.forget_sessions();
+            if form.mode as usize >= form.mode_labels().len() {
+                form.mode = MODE_RESUME;
+            }
         }
-        NField::Mode if option < 3 => form.mode = option as u8,
+        NField::Mode if option < form.mode_labels().len() => form.mode = option as u8,
         _ => return,
     }
-    if dash.newform.mode == MODE_RESUME {
+    if dash.newform.picks_session() {
         ensure_sessions(dash);
     }
 }
