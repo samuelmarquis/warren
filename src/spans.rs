@@ -146,11 +146,22 @@ pub fn nearest_xterm256(r: u8, g: u8, b: u8) -> u8 {
     best
 }
 
-/// Rec.601 luma test: should text on this background be white?
-/// (Same policy as v0 dvtm's color_is_dark.)
+/// Should text on this background be white? Whichever of white and black
+/// has the higher WCAG contrast ratio against it wins.
+///
+/// Not v0's Rec.601 luma-under-128: that weighs gamma-*encoded* values, so it
+/// badly underrates how bright green looks — `#00cd00` came out at 120,
+/// "dark", and got white text it has barely 2:1 contrast with (black: 10:1).
+/// Relative luminance linearises first, which is what the eye is comparing.
 pub fn color_is_dark(r: u8, g: u8, b: u8) -> bool {
-    let luma = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
-    luma < 128.0
+    let lin = |c: u8| {
+        let c = c as f32 / 255.0;
+        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    };
+    let lum = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+    let on_white = 1.05 / (lum + 0.05);
+    let on_black = (lum + 0.05) / 0.05;
+    on_white > on_black
 }
 
 #[cfg(test)]
@@ -172,5 +183,11 @@ mod tests {
         assert!(!color_is_dark(255, 255, 255));
         assert!(color_is_dark(0, 0, 255)); // saturated blue is dark
         assert!(!color_is_dark(255, 255, 0)); // yellow is light
+        // Greens read far brighter than their encoded values suggest: xterm's
+        // green (index 2) and the cube's mid green (34) both want black.
+        assert!(!color_is_dark(0, 205, 0));
+        assert!(!color_is_dark(0, 175, 0));
+        // A deep red keeps white.
+        assert!(color_is_dark(205, 0, 0));
     }
 }
