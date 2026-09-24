@@ -154,14 +154,30 @@ pub fn nearest_xterm256(r: u8, g: u8, b: u8) -> u8 {
 /// "dark", and got white text it has barely 2:1 contrast with (black: 10:1).
 /// Relative luminance linearises first, which is what the eye is comparing.
 pub fn color_is_dark(r: u8, g: u8, b: u8) -> bool {
-    let lin = |c: u8| {
-        let c = c as f32 / 255.0;
-        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
-    };
+    let lin = srgb_to_linear;
     let lum = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
     let on_white = 1.05 / (lum + 0.05);
     let on_black = (lum + 0.05) / 0.05;
     on_white > on_black
+}
+
+fn srgb_to_linear(c: u8) -> f32 {
+    let c = c as f32 / 255.0;
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+}
+
+/// Lightness, chroma and hue (degrees) in OKLCH — the space the colour
+/// picker is laid out in, because equal steps in it *look* equal, which
+/// the palette's own index order (a 6x6x6 cube read off in RGB) does not.
+pub fn oklch(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
+    let (r, g, b) = (srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b));
+    let l = (0.412_221_46 * r + 0.536_332_55 * g + 0.051_445_995 * b).cbrt();
+    let m = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
+    let s = (0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b).cbrt();
+    let lightness = 0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s;
+    let a = 1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s;
+    let bb = 0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s;
+    (lightness, a.hypot(bb), bb.atan2(a).to_degrees().rem_euclid(360.0))
 }
 
 #[cfg(test)]

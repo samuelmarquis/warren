@@ -437,11 +437,11 @@ pub fn new_key(dash: &mut Dash, bytes: &[u8]) -> usize {
         Key::ShiftTab => form.field = (form.field + nfields - 1) % nfields,
         // In the palette, Up/Down walk the grid; they only leave the field
         // at its edges (top row exits up, bottom row exits down).
-        Key::Up if form.active() == NField::Color && form.color >= 16 => {
-            form.color -= 16;
+        Key::Up if form.active() == NField::Color && cell_of(form.color) >= 16 => {
+            palette_key(&mut form.color, Key::Up);
         }
-        Key::Down if form.active() == NField::Color && form.color + 16 <= 255 => {
-            form.color += 16;
+        Key::Down if form.active() == NField::Color && cell_of(form.color) + 16 <= 255 => {
+            palette_key(&mut form.color, Key::Down);
         }
         Key::Up if form.active() != NField::List => {
             form.field = (form.field + nfields - 1) % nfields;
@@ -818,8 +818,12 @@ pub fn edit_key(dash: &mut Dash, bytes: &[u8]) -> usize {
     let (key, consumed) = decode_key(bytes);
     let Some(form) = dash.editform.as_mut() else { return consumed };
     match key {
-        Key::Up if form.field == 1 && form.color >= 16 => form.color -= 16,
-        Key::Down if form.field == 1 && form.color + 16 <= 255 => form.color += 16,
+        Key::Up if form.field == 1 && cell_of(form.color) >= 16 => {
+            palette_key(&mut form.color, Key::Up)
+        }
+        Key::Down if form.field == 1 && cell_of(form.color) + 16 <= 255 => {
+            palette_key(&mut form.color, Key::Down)
+        }
         Key::Tab | Key::ShiftTab | Key::Up | Key::Down => form.field ^= 1,
         Key::Esc => {
             dash.editform = None;
@@ -921,17 +925,97 @@ fn line_edit(buf: &mut String, key: Key) {
 }
 
 /// hjkl/arrows walk the 16x16 grid; '0' clears to none.
+/// Moves are made on the grid, not in index order: the grid is laid out by
+/// how colours look, so "one to the right" is the next swatch you can see.
 fn palette_key(color: &mut u16, key: Key) {
-    let c = *color as i32;
+    let c = cell_of(*color) as i32;
     let next = match key {
         Key::Char(b'h') | Key::Left => c - 1,
         Key::Char(b'l') | Key::Right => c + 1,
         Key::Char(b'k') | Key::Up => c - 16,
         Key::Char(b'j') | Key::Down => c + 16,
-        Key::Char(b'0') => 0,
+        Key::Char(b'0') => 0, // "none" is the first cell
         _ => c,
     };
-    *color = next.clamp(0, 255) as u16;
+    *color = color_at(next.clamp(0, 255) as u16);
+}
+
+/// The picker's 16x16 grid, laid out by how the colours look rather than by
+/// palette index — in index order the cube reads off as six unrelated
+/// strips, and a hue you want is scattered across all of them.
+///
+/// Columns are hue and rows are lightness, light at the top. The most muted
+/// 63 colours (every grey included) take the four columns on the left,
+/// greyest first, so the far left is a clean grey ramp that shades into
+/// tints before the vivid hues begin; the rest sweep red through violet in
+/// equal columns of sixteen. "None" keeps the top-left corner.
+struct Palette {
+    /// Grid cell (row * 16 + col) -> palette index.
+    at: [u8; 256],
+    /// Palette index -> grid cell.
+    cell: [u8; 256],
+}
+
+const MUTED_COLS: usize = 4;
+/// Where the hue sweep starts, in OKLCH degrees: just short of red, so the
+/// reds lead and the magentas close.
+const HUE_START: f32 = 20.0;
+
+fn palette() -> &'static Palette {
+    static PALETTE: std::sync::OnceLock<Palette> = std::sync::OnceLock::new();
+    PALETTE.get_or_init(|| {
+        let lch: Vec<(f32, f32, f32)> = (0..=255u8)
+            .map(|i| {
+                let (r, g, b) = spans::xterm256_to_rgb(i);
+                spans::oklch(r, g, b)
+            })
+            .collect();
+        let lightness = |i: &u8| lch[*i as usize].0;
+        let chroma = |i: &u8| lch[*i as usize].1;
+        let hue = |i: &u8| (lch[*i as usize].2 - HUE_START).rem_euclid(360.0);
+        // Ties broken on the index, so the layout never shifts between runs.
+        let lighter_first = |a: &u8, b: &u8| lightness(b).total_cmp(&lightness(a)).then(a.cmp(b));
+
+        let mut by_chroma: Vec<u8> = (1..=255).collect();
+        by_chroma.sort_by(|a, b| chroma(a).total_cmp(&chroma(b)).then(a.cmp(b)));
+        let (muted, vivid) = by_chroma.split_at(MUTED_COLS * 16 - 1);
+
+        let mut grid = [[0u8; 16]; 16];
+        let mut muted = muted.to_vec();
+        muted.sort_by(lighter_first);
+        muted.insert(0, 0);
+        for (row, band) in muted.chunks(MUTED_COLS).enumerate() {
+            let mut band = band.to_vec();
+            band.sort_by(|a, b| {
+                (*a != 0).cmp(&(*b != 0)).then(chroma(a).total_cmp(&chroma(b))).then(a.cmp(b))
+            });
+            grid[row][..MUTED_COLS].copy_from_slice(&band);
+        }
+        let mut vivid = vivid.to_vec();
+        vivid.sort_by(|a, b| hue(a).total_cmp(&hue(b)).then(a.cmp(b)));
+        for (col, column) in vivid.chunks(16).enumerate() {
+            let mut column = column.to_vec();
+            column.sort_by(lighter_first);
+            for (row, &i) in column.iter().enumerate() {
+                grid[row][MUTED_COLS + col] = i;
+            }
+        }
+
+        let mut palette = Palette { at: [0; 256], cell: [0; 256] };
+        for (cell, &i) in grid.iter().flatten().enumerate() {
+            palette.at[cell] = i;
+            palette.cell[i as usize] = cell as u8;
+        }
+        palette
+    })
+}
+
+fn color_at(cell: u16) -> u16 {
+    palette().at[cell.min(255) as usize] as u16
+}
+
+fn cell_of(color: u16) -> u16 {
+    palette().cell[color.min(255) as usize] as u16
 }
 
 fn field_label(active: bool) -> &'static str {
@@ -1057,7 +1141,7 @@ pub fn palette_click(dash: &mut Dash, row: u16, col: u16) {
     if gr >= 16 || gc >= 16 {
         return;
     }
-    let idx = gr * 16 + gc;
+    let idx = color_at(gr * 16 + gc);
     if let Some(form) = dash.editform.as_mut() {
         form.field = 1;
         form.color = idx;
@@ -1104,7 +1188,7 @@ fn draw_color_field(
         for sub in 0..box_h {
             let _ = write!(out, "\x1b[{};{}H", grid_top + gr * box_h + sub, x0 + 4);
             for gc in 0..16u16 {
-                let idx = gr * 16 + gc;
+                let idx = color_at(gr * 16 + gc);
                 let here = idx == color;
                 // Cursor brackets span the swatch's full height.
                 let body: String = if here && box_w >= 2 {
@@ -1150,6 +1234,53 @@ fn short_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_picker_holds_every_colour_once_arranged_by_how_they_look() {
+        let p = palette();
+        // A permutation: every index reachable, none twice, and each
+        // direction of the map undoing the other.
+        let mut seen = [false; 256];
+        for cell in 0..256u16 {
+            let i = color_at(cell);
+            assert!(!seen[i as usize], "{i} appears twice");
+            seen[i as usize] = true;
+            assert_eq!(cell_of(i), cell);
+        }
+        assert_eq!(p.at[0], 0, "none keeps the top-left corner");
+
+        // The far-left column is a grey ramp, light to dark.
+        let mut last = f32::MAX;
+        for row in 1..16 {
+            let (r, g, b) = spans::xterm256_to_rgb(p.at[row * 16] as u8);
+            assert!(r == g && g == b, "row {row} of the grey column is ({r},{g},{b})");
+            let l = spans::oklch(r, g, b).0;
+            assert!(l <= last, "greys darken downwards");
+            last = l;
+        }
+        // And every hue column darkens downwards too.
+        for col in MUTED_COLS..16 {
+            let lightness: Vec<f32> = (0..16)
+                .map(|row| {
+                    let (r, g, b) = spans::xterm256_to_rgb(p.at[row * 16 + col]);
+                    spans::oklch(r, g, b).0
+                })
+                .collect();
+            assert!(lightness.windows(2).all(|w| w[0] >= w[1]), "column {col}: {lightness:?}");
+        }
+    }
+
+    #[test]
+    fn the_picker_is_walked_by_what_is_next_to_what() {
+        // Right from none is the swatch drawn to its right, not index 1.
+        let mut color = 0;
+        palette_key(&mut color, Key::Right);
+        assert_eq!(color, color_at(1));
+        palette_key(&mut color, Key::Down);
+        assert_eq!(color, color_at(17));
+        palette_key(&mut color, Key::Char(b'0'));
+        assert_eq!(color, 0, "0 is still none");
+    }
 
     #[test]
     fn sessions_come_back_as_the_far_side_printed_them() {
