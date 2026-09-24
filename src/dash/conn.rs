@@ -297,6 +297,11 @@ impl AgentConn {
                 self.mouse = mouse;
             }
             ToClient::MetaChanged(meta) => {
+                // The agent's colour is painted into its pane (the rules of
+                // its UI wear it), so a new one repaints more than the row.
+                if meta.color != self.meta.color {
+                    self.full_dirty = true;
+                }
                 self.meta = meta;
                 self.have_meta = true;
                 self.meta_dirty = true;

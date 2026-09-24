@@ -2126,3 +2126,80 @@ fn an_agent_is_found_by_the_name_it_has_and_not_a_trimmed_one() {
     let _ = raw.kill();
     let _ = raw.wait();
 }
+
+/// Claude Code's `/color` knows eight names and only lands on resume; the
+/// tab's own colour is one of 255 and is on screen now. So the rules of the
+/// harness's UI — the lines around its prompt — wear the agent's warren
+/// colour, and so does the divider they meet. Anything written *into* a rule
+/// keeps its own colour, and nothing that is not a rule changes at all.
+#[test]
+fn a_coloured_agent_wears_its_colour_on_the_rules_of_its_ui() {
+    let inner = TestHome::new("rulein");
+    let outer = TestHome::new("ruleout");
+    let work = inner.dir.join("Burrow");
+    std::fs::create_dir_all(&work).unwrap();
+    let rule = "\u{2500}".repeat(30);
+    let script = format!(
+        "printf 'hello\\n{rule}\\n> prompt\\n\u{2500}\u{2500} label {rule}\\n'; sleep 300"
+    );
+    let out = inner
+        .warren(&script)
+        .args(["new", "painted", work.to_str().unwrap(), "34"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let dash_cmd = format!("WARREN_HOME={} {} up", inner.dir.display(), BIN);
+    new_agent(&outer, "dash", &dash_cmd);
+    let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 20);
+    let rows = std::cell::RefCell::new(Vec::<spans::LineSpans>::new());
+    let keep = |rows: &std::cell::RefCell<Vec<spans::LineSpans>>, m: &ToClient| match m {
+        ToClient::Snapshot { screen, .. } => *rows.borrow_mut() = screen.clone(),
+        ToClient::Damage { lines, .. } => {
+            let mut r = rows.borrow_mut();
+            for (row, line) in lines {
+                let i = *row as usize;
+                if r.len() <= i {
+                    r.resize(i + 1, spans::LineSpans::default());
+                }
+                r[i] = line.clone();
+            }
+        }
+        _ => {}
+    };
+    keep(&rows, &snap);
+    let text = |l: &spans::LineSpans| l.0.iter().map(|s| s.text.as_str()).collect::<String>();
+    let drawn = viewer.await_frame(15_000, |m| {
+        keep(&rows, m);
+        rows.borrow().iter().any(|l| text(l).contains("label"))
+    });
+    assert!(drawn.is_some(), "the agent's box is on screen");
+
+    let green = spans::Color::Indexed(34);
+    let rows = rows.borrow().clone();
+    // The spans that carry a glyph, whatever else they are next to.
+    let fg_of = |line: &spans::LineSpans, ch: char| -> Vec<spans::Color> {
+        line.0.iter().filter(|s| s.text.contains(ch)).map(|s| s.fg).collect()
+    };
+    let bare = rows
+        .iter()
+        .find(|l| text(l).contains(&rule) && !text(l).contains("label"))
+        .expect("the plain rule");
+    let rule_fgs: Vec<_> = bare.0.iter().filter(|s| s.text.contains('\u{2500}')).map(|s| s.fg).collect();
+    assert!(!rule_fgs.is_empty() && rule_fgs.iter().all(|c| *c == green), "the rule: {rule_fgs:?}");
+    assert!(fg_of(bare, '\u{251c}').iter().all(|c| *c == green), "and the junction it meets");
+
+    let labelled = rows.iter().find(|l| text(l).contains("label")).unwrap();
+    let label = labelled.0.iter().find(|s| s.text.contains("label")).unwrap();
+    assert_ne!(label.fg, green, "a label in a rule keeps its own colour: {label:?}");
+    assert!(
+        labelled.0.iter().filter(|s| s.text.contains('\u{2500}')).all(|s| s.fg == green),
+        "while the rule around it takes the agent's"
+    );
+
+    let hello = rows.iter().find(|l| text(l).contains("hello")).unwrap();
+    assert!(
+        hello.0.iter().filter(|s| s.text.contains("hello")).all(|s| s.fg != green),
+        "and text is left alone"
+    );
+}

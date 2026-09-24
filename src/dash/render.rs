@@ -204,6 +204,21 @@ fn joins_divider(c: char) -> bool {
     matches!(c, '\u{2500}' | '\u{2501}' | '\u{254c}' | '\u{2504}' | '\u{2508}' | '\u{2574}' | '\u{2576}')
 }
 
+/// Is this row one of the harness's rules — the lines around Claude Code's
+/// prompt, the tops of its dialogs? A rule starts in the first column, which
+/// is also what makes it meet the divider; the divider and the recolouring
+/// share this one test so a junction and the line it joins always agree.
+fn is_rule(line: &LineSpans) -> bool {
+    line.0.first().and_then(|s| s.text.chars().next()).map(joins_divider).unwrap_or(false)
+}
+
+/// The colour an agent's rules are painted in: its warren colour, when it
+/// has one. Claude Code's own `/color` knows eight names and only takes
+/// effect on resume; this is whichever of 255 the tab wears, immediately.
+fn rule_override(color: u8) -> Option<spans::Color> {
+    (color != 0).then_some(spans::Color::Indexed(color))
+}
+
 /// The divider column between sidebar and pane, drawn by ONE owner so
 /// junctions can't be clobbered by sidebar repaints. Where a horizontal rule
 /// in the focused agent's UI meets the column, the cell joins with '├'; the
@@ -219,13 +234,18 @@ fn draw_divider(dash: &Dash, out: &mut String) {
     let mut junctions: Vec<Option<spans::Color>> = vec![None; rows as usize];
     let mut rule_color: Option<spans::Color> = None;
     if let Some(agent) = agent {
+        let theirs = rule_override(agent.meta.color);
         for (row, line) in agent.grid.iter().enumerate().take(rows as usize) {
-            if let Some(span) = line.0.first() {
-                if span.text.chars().next().map(joins_divider).unwrap_or(false) {
-                    junctions[row] = Some(span.fg);
-                    rule_color.get_or_insert(span.fg);
-                }
+            if let (true, Some(span)) = (is_rule(line), line.0.first()) {
+                let fg = theirs.unwrap_or(span.fg);
+                junctions[row] = Some(fg);
+                rule_color.get_or_insert(fg);
             }
+        }
+        // A coloured agent's divider wears its colour even with no rule on
+        // screen to take it from.
+        if let Some(fg) = theirs {
+            rule_color = Some(fg);
         }
     }
     let base = rule_color.unwrap_or(spans::Color::Indexed(240));
@@ -255,6 +275,7 @@ fn draw_content(dash: &mut Dash, out: &mut String) {
     let frame = dash.anim_frame();
     let focus = dash.focus;
     let color = dash.focused().map(|a| a.meta.color).unwrap_or(0);
+    let rules = rule_override(color);
     let Some(agent) = dash.agents.get_mut(focus) else {
         return; // + tab focused: the form renderer owns the pane
     };
@@ -266,7 +287,7 @@ fn draw_content(dash: &mut Dash, out: &mut String) {
     if repaint {
         for row in 0..pane_h {
             let line = agent.grid.get(row as usize);
-            draw_pane_line(out, row, x0, pane_w, line, asleep);
+            draw_pane_line(out, row, x0, pane_w, line, asleep, rules);
         }
         agent.full_dirty = false;
         agent.damage_rows.clear();
@@ -275,7 +296,7 @@ fn draw_content(dash: &mut Dash, out: &mut String) {
         for row in rows {
             if row < pane_h {
                 let line = agent.grid.get(row as usize);
-                draw_pane_line(out, row, x0, pane_w, line, asleep);
+                draw_pane_line(out, row, x0, pane_w, line, asleep, rules);
             }
         }
     }
@@ -292,11 +313,19 @@ fn draw_pane_line(
     width: usize,
     line: Option<&LineSpans>,
     dim: bool,
+    rules: Option<spans::Color>,
 ) {
     let _ = write!(out, "\x1b[{};{}H\x1b[0m\x1b[K", row + 1, x0);
     let Some(line) = line else { return };
+    // On a rule, the rule glyphs take the agent's colour and anything
+    // written into the rule (a label, a hint) keeps its own.
+    let recolor = rules.filter(|_| is_rule(line));
+    let pieces: Vec<Span> = match recolor {
+        None => line.0.clone(),
+        Some(fg) => line.0.iter().flat_map(|span| split_rule(span, fg)).collect(),
+    };
     let mut budget = width;
-    for span in &line.0 {
+    for span in &pieces {
         if budget == 0 {
             break;
         }
@@ -317,6 +346,21 @@ fn draw_pane_line(
         }
     }
     let _ = write!(out, "\x1b[0m");
+}
+
+/// One span of a rule row, cut into runs so the rule glyphs can wear `fg`
+/// while any text inside the rule keeps its own colour.
+fn split_rule(span: &Span, fg: spans::Color) -> Vec<Span> {
+    let mut out: Vec<Span> = Vec::new();
+    for ch in span.text.chars() {
+        let is_glyph = joins_divider(ch);
+        let color = if is_glyph { fg } else { span.fg };
+        match out.last_mut() {
+            Some(last) if last.fg == color => last.text.push(ch),
+            _ => out.push(Span { text: ch.to_string(), fg: color, bg: span.bg, attrs: span.attrs }),
+        }
+    }
+    out
 }
 
 // ------------------------------------------------------------------- asleep
