@@ -6,8 +6,11 @@
 //!
 //!     <sessionId>\t<mtime_epoch>\t<cwd>\t<title>
 //!
-//! The session id is the file stem; cwd and title (aiTitle, falling back to
-//! the first user message) are read from the records. Lines are pre-filtered
+//! The session id is the file stem; cwd and title are read from the
+//! records. The title is the name you gave it with `/rename` (a
+//! `custom-title` record), else Claude's own `aiTitle`, else the first user
+//! message — and for either kind of title the last one written wins, as it
+//! does when Claude reads the file back. Lines are pre-filtered
 //! by a cheap substring test so large assistant records are not JSON-parsed.
 //! Semantics ported verbatim from v0's bin/warren-sessions (Python).
 
@@ -181,6 +184,7 @@ fn read_session_file(path: &Path) -> Option<(String, String)> {
     let mut reader = BufReader::new(file);
 
     let mut cwd = String::new();
+    let mut custom = String::new();
     let mut title = String::new();
     let mut first_user = String::new();
 
@@ -195,11 +199,12 @@ fn read_session_file(path: &Path) -> Option<(String, String)> {
         let ln = String::from_utf8_lossy(&raw);
 
         let want_title = ln.contains("\"aiTitle\"");
+        let want_custom = ln.contains("\"customTitle\"");
         let want_cwd = cwd.is_empty() && ln.contains("\"cwd\"");
         let want_user = first_user.is_empty()
             && title.is_empty()
             && (ln.contains("\"type\":\"user\"") || ln.contains("\"type\": \"user\""));
-        if !(want_title || want_cwd || want_user) {
+        if !(want_title || want_custom || want_cwd || want_user) {
             continue;
         }
         let Ok(d) = serde_json::from_str::<Value>(&ln) else {
@@ -217,6 +222,13 @@ fn read_session_file(path: &Path) -> Option<(String, String)> {
                 if !t.is_empty() {
                     title = t.to_string();
                 }
+            }
+        }
+        // Claude rewrites its aiTitle all session long, right alongside the
+        // name you picked; only the name is one you would recognise.
+        if want_custom && d.get("type").and_then(Value::as_str) == Some("custom-title") {
+            if let Some(t) = d.get("customTitle").and_then(Value::as_str) {
+                custom = t.trim().to_string();
             }
         }
         if want_user
@@ -244,7 +256,9 @@ fn read_session_file(path: &Path) -> Option<(String, String)> {
         }
     }
 
-    let label = if !title.is_empty() {
+    let label = if !custom.is_empty() {
+        custom
+    } else if !title.is_empty() {
         title
     } else if !first_user.is_empty() {
         first_user
@@ -288,6 +302,34 @@ mod tests {
         assert_eq!(s[0].id, "abc-123");
         assert_eq!(s[0].cwd, "/tmp/x");
         assert_eq!(s[0].title, "Fix the bug");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_session_you_renamed_is_listed_by_the_name_you_gave_it() {
+        let root = fixture_root("renamed");
+        fs::write(
+            root.join("proj/r1.jsonl"),
+            concat!(
+                r#"{"type":"user","cwd":"/w/Research","message":{"content":"look at TEEs"}}"#,
+                "\n",
+                r#"{"type":"ai-title","aiTitle":"Explore type systems and TEE partitioning","sessionId":"r1"}"#,
+                "\n",
+                r#"{"type":"custom-title","customTitle":"SPLITR","sessionId":"r1"}"#,
+                "\n",
+                r#"{"type":"agent-name","agentName":"SPLITR","sessionId":"r1"}"#,
+                "\n",
+                // Claude keeps rewriting its own title after the rename.
+                r#"{"type":"ai-title","aiTitle":"Explore type systems and TEE partitioning","sessionId":"r1"}"#,
+                "\n",
+                // And a second rename replaces the first.
+                r#"{"type":"custom-title","customTitle":"SPLITR-2","sessionId":"r1"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let s = scan_claude(&root);
+        assert_eq!(s[0].title, "SPLITR-2");
         let _ = fs::remove_dir_all(&root);
     }
 

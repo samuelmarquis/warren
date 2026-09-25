@@ -348,19 +348,39 @@ fn draw_pane_line(
     let _ = write!(out, "\x1b[0m");
 }
 
-/// One span of a rule row, cut into runs so the rule glyphs can wear `fg`
-/// while any text inside the rule keeps its own colour.
+/// One span of a rule row, cut into runs so the rule glyphs can wear `fg`.
+///
+/// Text written into a rule — Claude Code puts a renamed session's name
+/// there — becomes a chip of the same colour, the way Claude draws it under
+/// its own `/color`: the colour behind it, and black or white on top,
+/// whichever reads. A run of nothing but spaces is not a label (it is the
+/// row running out before the pane does) and is left as it was.
 fn split_rule(span: &Span, fg: spans::Color) -> Vec<Span> {
-    let mut out: Vec<Span> = Vec::new();
+    let chip_text = match fg {
+        spans::Color::Indexed(i) => {
+            let (r, g, b) = spans::xterm256_to_rgb(i);
+            spans::Color::Indexed(if spans::color_is_dark(r, g, b) { 231 } else { 16 })
+        }
+        _ => span.fg,
+    };
+    let mut runs: Vec<(bool, String)> = Vec::new();
     for ch in span.text.chars() {
-        let is_glyph = joins_divider(ch);
-        let color = if is_glyph { fg } else { span.fg };
-        match out.last_mut() {
-            Some(last) if last.fg == color => last.text.push(ch),
-            _ => out.push(Span { text: ch.to_string(), fg: color, bg: span.bg, attrs: span.attrs }),
+        let glyph = joins_divider(ch);
+        match runs.last_mut() {
+            Some((g, text)) if *g == glyph => text.push(ch),
+            _ => runs.push((glyph, ch.to_string())),
         }
     }
-    out
+    runs.into_iter()
+        .map(|(glyph, text)| {
+            let (fg, bg) = match (glyph, text.trim().is_empty()) {
+                (true, _) => (fg, span.bg),
+                (false, false) => (chip_text, fg),
+                (false, true) => (span.fg, span.bg),
+            };
+            Span { text, fg, bg, attrs: span.attrs }
+        })
+        .collect()
 }
 
 // ------------------------------------------------------------------- asleep

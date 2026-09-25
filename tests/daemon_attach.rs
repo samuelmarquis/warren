@@ -2130,8 +2130,8 @@ fn an_agent_is_found_by_the_name_it_has_and_not_a_trimmed_one() {
 /// Claude Code's `/color` knows eight names and only lands on resume; the
 /// tab's own colour is one of 255 and is on screen now. So the rules of the
 /// harness's UI — the lines around its prompt — wear the agent's warren
-/// colour, and so does the divider they meet. Anything written *into* a rule
-/// keeps its own colour, and nothing that is not a rule changes at all.
+/// colour, and so does the divider they meet. A name written into a rule
+/// becomes a chip of that colour, and nothing that is not a rule changes.
 #[test]
 fn a_coloured_agent_wears_its_colour_on_the_rules_of_its_ui() {
     let inner = TestHome::new("rulein");
@@ -2191,7 +2191,10 @@ fn a_coloured_agent_wears_its_colour_on_the_rules_of_its_ui() {
 
     let labelled = rows.iter().find(|l| text(l).contains("label")).unwrap();
     let label = labelled.0.iter().find(|s| s.text.contains("label")).unwrap();
-    assert_ne!(label.fg, green, "a label in a rule keeps its own colour: {label:?}");
+    // A label is a chip of the agent's colour, as Claude draws one under its
+    // own `/color`: the colour behind it, and text that reads on top.
+    assert_eq!(label.bg, green, "a label in a rule sits on the agent's colour: {label:?}");
+    assert_eq!(label.fg, spans::Color::Indexed(16), "in black, on a green that light: {label:?}");
     assert!(
         labelled.0.iter().filter(|s| s.text.contains('\u{2500}')).all(|s| s.fg == green),
         "while the rule around it takes the agent's"
