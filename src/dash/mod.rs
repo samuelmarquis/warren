@@ -471,6 +471,21 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
         poller.add_with_mode(&winch_rx, PollEvent::readable(KEY_SIGWINCH), PollMode::Level)?;
     }
 
+    // Agents this machine lost when it stopped come back asleep before
+    // anything is discovered, so the sidebar opens with them already in it.
+    // Every way warren ends an agent forgets its note on the way out; what
+    // is left died without being asked to — a restart, or the terminal that
+    // spawned it being torn down under it — and asleep costs nothing until
+    // you type at one.
+    let restored = crate::cli::restore_waiting(None);
+    let back = restored.iter().filter(|(_, r)| r.is_ok()).count();
+    if back > 0 {
+        dash.flash = Some(match back {
+            1 => "1 agent back from before this machine stopped, asleep".to_string(),
+            n => format!("{n} agents back from before this machine stopped, asleep"),
+        });
+    }
+
     let mut next_key = KEY_FIRST_AGENT;
     dash.hosts.reload(&poller);
     sync_form_machines(&mut dash);
@@ -482,22 +497,6 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
     if dash.agents.is_empty() {
         // Fresh dashboard lands on the new-agent form, ready to navigate.
         dash.mode = Mode::Normal;
-    }
-
-    // Agents this machine lost when it stopped leave a note behind; say so
-    // once, rather than restoring anything on our own. A note can also be
-    // left by a daemon that was killed outright, and resurrecting things
-    // nobody asked for is how a colony grows ghosts.
-    {
-        let live: HashSet<String> =
-            dash.agents.iter().filter(|a| a.host.is_none()).map(|a| a.meta.name.clone()).collect();
-        let waiting = crate::cli::restorable(&live).ready.len();
-        if waiting > 0 {
-            dash.flash = Some(match waiting {
-                1 => "1 agent from before this machine restarted — :restore".to_string(),
-                n => format!("{n} agents from before this machine restarted — :restore"),
-            });
-        }
     }
 
     // Opt-in field diagnostics, same file the daemons use (WARREN_LOG).

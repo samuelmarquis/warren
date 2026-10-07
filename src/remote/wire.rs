@@ -39,6 +39,12 @@ pub fn cmd_roster() -> Result<()> {
     );
     flush()?;
 
+    // A machine that restarted gets its agents back the moment anyone looks
+    // at it, the same as a dashboard opened on it would. On a thread: the
+    // roster has to start answering now, and restored agents turn up in it
+    // like any other as their daemons come up.
+    std::thread::spawn(|| crate::cli::restore_waiting(None));
+
     // `None` until the first block goes out: a machine with no agents has a
     // roster too, and saying nothing would be indistinguishable from a
     // machine that never answered.

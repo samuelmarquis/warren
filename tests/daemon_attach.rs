@@ -2206,3 +2206,113 @@ fn a_coloured_agent_wears_its_colour_on_the_rules_of_its_ui() {
         "and text is left alone"
     );
 }
+
+/// A harness store holding one conversation, for a `HOME` to point at:
+/// restore only offers back a note whose conversation is still there.
+fn fake_store(home: &TestHome, session: &str) -> PathBuf {
+    let fake_home = home.dir.join("store");
+    let store = fake_home.join(".claude").join("projects").join("burrow");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(
+        store.join(format!("{session}.jsonl")),
+        format!(
+            "{{\"type\":\"user\",\"cwd\":\"{}\",\"message\":{{\"role\":\"user\",\"content\":\"hi\"}}}}\n",
+            home.dir.display()
+        ),
+    )
+    .unwrap();
+    fake_home
+}
+
+/// A machine that stopped does not wait to be asked: the dashboard opened
+/// after it comes up with the colony already back in the sidebar, asleep.
+#[test]
+fn a_dashboard_opened_after_a_restart_has_its_agents_back_asleep() {
+    let near = TestHome::new("autorest");
+    let outer = TestHome::new("autoresto");
+    let fake_home = fake_store(&near, "conv-9");
+    record_note(&near, "napper", "conv-9");
+
+    let dash_cmd = format!(
+        "HOME={} WARREN_HOME={} WARREN_AGENT_CMD='sleep 300' {} up",
+        fake_home.display(),
+        near.dir.display(),
+        BIN
+    );
+    new_agent(&outer, "dash", &dash_cmd);
+    let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 22);
+    let grid = std::cell::RefCell::new(Vec::<String>::new());
+    apply_frame(&grid, &snap);
+    let shown = viewer.await_frame(10_000, |m| {
+        apply_frame(&grid, m);
+        sidebar_of(&grid).iter().any(|r| r.contains("napper"))
+    });
+    assert!(shown.is_some(), "it is in the sidebar unasked: {:?}", sidebar_of(&grid));
+
+    let (_agent, snap) = Viewer::attach(&near.sock("napper"), 80, 10);
+    let ToClient::Snapshot { state, .. } = &snap else { unreachable!() };
+    assert_eq!(state.power, Power::Asleep, "back asleep, with nothing running");
+    assert_eq!(state.session.as_deref(), Some("conv-9"));
+}
+
+/// Two warrens looking at once — a dashboard here and a roster opened from
+/// another machine, say — bring a lost agent back once, not twice.
+///
+/// The daemon's own "already running" check catches most of this by itself;
+/// what it cannot is two racers that both find the old socket stale, which
+/// the notes lock closes. That window is narrow, so this catches the lock
+/// going missing only now and then — it guards the outcome, not the cause.
+#[test]
+fn restores_that_race_bring_an_agent_back_once() {
+    let far = TestHome::new("racerest");
+    let fake_home = fake_store(&far, "conv-3");
+    record_note(&far, "only-once", "conv-3");
+    // What a restart leaves: the socket of the daemon that died, answering
+    // nothing. Every racer reads it as stale and clears it to bind its own,
+    // which is the window the daemon's own "already running" check cannot
+    // close by itself.
+    std::fs::create_dir_all(far.dir.join("run")).unwrap();
+    drop(std::os::unix::net::UnixListener::bind(far.sock("only-once")).unwrap());
+
+    // Killed however the test ends: a roster runs until its reader goes away,
+    // and /dev/null never does.
+    struct Rosters(Vec<std::process::Child>);
+    impl Drop for Rosters {
+        fn drop(&mut self) {
+            for roster in &mut self.0 {
+                let _ = roster.kill();
+                let _ = roster.wait();
+            }
+        }
+    }
+    let _rosters = Rosters(
+        (0..4)
+            .map(|_| {
+                far.warren("sleep 300")
+                    .env("HOME", &fake_home)
+                    .arg("__roster")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect(),
+    );
+    let out = far.warren("sleep 300").env("HOME", &fake_home).arg("restore").output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let sock = far.sock("only-once");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while UnixStream::connect(&sock).is_err() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(UnixStream::connect(&sock).is_ok(), "a roster alone brings it back");
+    // Long enough for a second restore to have spawned a second daemon.
+    std::thread::sleep(Duration::from_millis(1_000));
+    let daemons = Command::new("pgrep").args(["-f", "__daemon only-once "]).output().unwrap();
+    let count = String::from_utf8_lossy(&daemons.stdout).split_whitespace().count();
+    if count != 1 {
+        let _ = Command::new("pkill").args(["-f", "__daemon only-once "]).status();
+    }
+    assert_eq!(count, 1, "one agent, one daemon");
+}

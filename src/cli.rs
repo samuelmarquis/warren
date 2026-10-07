@@ -334,20 +334,40 @@ pub fn cmd_restore(args: &[String]) -> Result<()> {
         }
         return Ok(());
     }
-    let mut back = 0;
-    for note in &notes {
-        match restore_agent(note) {
-            Ok(_) => {
-                back += 1;
-                println!("warren: restored '{}' (asleep)", note.display);
-            }
+    let restored = restore_waiting(wanted.map(String::as_str));
+    for (note, outcome) in &restored {
+        match outcome {
+            Ok(()) => println!("warren: restored '{}' (asleep)", note.display),
             Err(e) => eprintln!("warren: could not restore '{}': {e:#}", note.name),
         }
     }
+    let back = restored.iter().filter(|(_, r)| r.is_ok()).count();
     if back > 0 {
         println!("warren: {back} back and asleep — type at one to resume it");
     }
     Ok(())
+}
+
+/// Restore every agent that is waiting (or just the one named), asleep.
+///
+/// Under the notes lock, and with what is live read again once it is held:
+/// whoever held it before may have just brought these same notes back, and
+/// a list made before waiting for it would restore them a second time.
+pub fn restore_waiting(
+    only: Option<&str>,
+) -> Vec<(crate::record::Record, Result<()>)> {
+    let _lock = crate::record::lock();
+    let live: std::collections::HashSet<String> =
+        discover().into_iter().map(|a| a.meta.name).collect();
+    restorable(&live)
+        .ready
+        .into_iter()
+        .filter(|n| only.is_none_or(|name| n.name == name))
+        .map(|note| {
+            let outcome = restore_agent(&note).map(|_| ());
+            (note, outcome)
+        })
+        .collect()
 }
 
 /// What a restore would bring back, and what it cannot.

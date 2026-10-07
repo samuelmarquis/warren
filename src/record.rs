@@ -84,6 +84,24 @@ pub fn all() -> Vec<Record> {
     out
 }
 
+/// Held while notes are turned back into agents. More than one warren can go
+/// looking at once — this machine's dashboard and a roster another machine
+/// opened over ssh both restore as they start — and two of them reading the
+/// same note before either daemon is up would bring one agent back twice.
+/// Released when the file is dropped.
+pub fn lock() -> Option<std::fs::File> {
+    let dir = dir();
+    std::fs::create_dir_all(&dir).ok()?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(".lock"))
+        .ok()?;
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive).ok()?;
+    Some(file)
+}
+
 /// Notes whose agent is not running: what a restore would actually bring
 /// back. An agent that is already here needs nothing.
 pub fn restorable(live: &HashSet<String>) -> Vec<Record> {
