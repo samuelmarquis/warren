@@ -239,8 +239,19 @@ impl Host {
 #[derive(Default)]
 pub struct Hosts {
     pub hosts: Vec<Host>,
-    /// Modification time of the hosts file when it was last read.
-    stamp: Option<std::time::SystemTime>,
+    /// Modification times of the hosts file when it was last read: the link
+    /// itself, then what it points at.
+    stamp: (Option<std::time::SystemTime>, Option<std::time::SystemTime>),
+}
+
+/// When `path` last changed, as two clocks: the entry itself (not following a
+/// symlink) and whatever it resolves to. A hosts file written by Nix is a
+/// symlink into the store, where every file is dated 1970 — editing it swaps
+/// the link for a new one at the same old date, so only the link's own mtime
+/// moves. A plain file has the same time in both.
+fn stamp_of(path: &std::path::Path) -> (Option<std::time::SystemTime>, Option<std::time::SystemTime>) {
+    let modified = |m: std::io::Result<std::fs::Metadata>| m.and_then(|m| m.modified()).ok();
+    (modified(std::fs::symlink_metadata(path)), modified(std::fs::metadata(path)))
 }
 
 impl Hosts {
@@ -250,7 +261,7 @@ impl Hosts {
     /// `~/.local/bin` is usually not on it). Returns true if the list moved.
     pub fn reload(&mut self, poller: &polling::Poller) -> bool {
         let path = hosts_file();
-        let stamp = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let stamp = stamp_of(&path);
         if stamp == self.stamp && !self.hosts.is_empty() {
             return false;
         }
@@ -549,6 +560,38 @@ mod tests {
         assert!(hosts.hosts.iter().all(|h| !h.reachable()));
 
         unsafe { std::env::remove_var("WARREN_HOME") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_relinked_hosts_file_counts_as_changed() {
+        // Nix's way of editing it: two store files dated the epoch, and a
+        // symlink swapped from one to the other.
+        let dir = std::env::temp_dir().join(format!("warren-stamp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let epoch = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        for (name, body) in [("old", "smq\n"), ("new", "smq\nleilan\n")] {
+            std::fs::write(dir.join(name), body).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(dir.join(name))
+                .unwrap()
+                .set_modified(epoch)
+                .unwrap();
+        }
+        let link = dir.join("hosts");
+        std::os::unix::fs::symlink(dir.join("old"), &link).unwrap();
+        let before = stamp_of(&link);
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let tmp = dir.join("hosts.tmp");
+        std::os::unix::fs::symlink(dir.join("new"), &tmp).unwrap();
+        std::fs::rename(&tmp, &link).unwrap();
+        let after = stamp_of(&link);
+
+        assert_eq!(before.1, after.1, "the targets really are dated alike");
+        assert_ne!(before, after);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
