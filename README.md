@@ -99,6 +99,18 @@ cd warren && ./install.sh        # cargo build --release → ~/.local/bin/warren
 
 Override the destination with `PREFIX=…`.
 
+Or with Nix: `nix run github:samuelmarquis/warren`, or as a flake input with
+the home-manager module, which installs it and can write `~/.warren/hosts`:
+
+```nix
+inputs.warren.url = "github:samuelmarquis/warren";
+# in a home-manager config, with warren.homeManagerModules.default imported:
+programs.warren = {
+  enable = true;
+  hosts = [ "smq" { dest = "leilan"; warren = "/etc/profiles/per-user/programchild/bin/warren"; } ];
+};
+```
+
 ## Use
 
 ```

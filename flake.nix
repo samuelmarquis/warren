@@ -52,6 +52,10 @@
         default = warren;
       });
 
+      # `programs.warren` for home-manager: the binary, plus ~/.warren/hosts.
+      homeManagerModules.default = import ./nix/hm-module.nix self;
+      homeManagerModules.warren = self.homeManagerModules.default;
+
       devShells = forEachSystem (pkgs: {
         default = pkgs.mkShell {
           packages = with pkgs; [ cargo rustc clippy rustfmt rust-analyzer ];
