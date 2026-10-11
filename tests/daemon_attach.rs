@@ -2357,3 +2357,63 @@ fn a_typed_name_is_the_name_the_agent_keeps() {
     assert_eq!(meta.display, "untitled");
     assert!(!meta.pinned);
 }
+
+/// Shift+j and shift+k carry the focused agent down and up inside its
+/// folder. A folder is everything under one directory in home, so its agents
+/// nearly all have directories of their own — the order between them is
+/// yours, not the alphabet's.
+#[test]
+fn shift_j_and_k_move_an_agent_within_its_folder() {
+    let inner = TestHome::new("reorder");
+    let dev = inner.dir.join("Developer");
+    // Three checkouts under one folder, deliberately not in name order.
+    new_agent_in(&inner, "zeta", &dev.join("zeta"), "sleep 300");
+    new_agent_in(&inner, "alpha", &dev.join("alpha"), "sleep 300");
+    new_agent_in(&inner, "mid", &dev.join("mid"), "sleep 300");
+    // And a neighbour in a folder of its own, which nothing here may disturb.
+    new_agent_in(&inner, "other", &inner.dir.join("Research"), "sleep 300");
+
+    let outer = TestHome::new("reorderout");
+    // Home as the agents see it: their directories are resolved, and /tmp
+    // is a link on macOS.
+    let home = std::fs::canonicalize(&inner.dir).unwrap();
+    let dash_cmd =
+        format!("HOME={} WARREN_HOME={} {} up", home.display(), inner.dir.display(), BIN);
+    new_agent(&outer, "dash", &dash_cmd);
+    let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 20);
+    let grid = std::cell::RefCell::new(Vec::<String>::new());
+    apply_frame(&grid, &snap);
+
+    /// The agents in the sidebar, top to bottom.
+    fn order(grid: &std::cell::RefCell<Vec<String>>) -> Vec<String> {
+        sidebar_of(grid)
+            .iter()
+            // Agent rows hang off a branch; the status line names one too.
+            .filter(|row| row.contains('├') || row.contains('└'))
+            .filter_map(|row| {
+                ["zeta", "alpha", "mid", "other"].into_iter().find(|n| row.contains(n))
+            })
+            .map(String::from)
+            .collect()
+    }
+    let expect = |viewer: &mut Viewer, keys: &[u8], want: [&str; 4], why: &str| {
+        if !keys.is_empty() {
+            viewer.send(&ToDaemon::Input(proto::b64_encode(keys)));
+        }
+        let got = viewer.await_frame(10_000, |m| {
+            apply_frame(&grid, m);
+            order(&grid) == want
+        });
+        assert!(got.is_some(), "{why}: {:?}", sidebar_of(&grid));
+    };
+
+    // As made: slot order, whatever the directories are called.
+    expect(&mut viewer, b"", ["zeta", "alpha", "mid", "other"], "they start in the order they were made");
+    // ^Space for NORMAL, `g` for the first agent.
+    expect(&mut viewer, b"\x00gJ", ["alpha", "zeta", "mid", "other"], "shift+j carries it down a row");
+    expect(&mut viewer, b"J", ["alpha", "mid", "zeta", "other"], "and the focus goes with it, so again");
+    // The bottom of the folder is the end of the road, not a way into the next.
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"J")));
+    std::thread::sleep(Duration::from_millis(1_200));
+    expect(&mut viewer, b"K", ["alpha", "zeta", "mid", "other"], "shift+k brings it back up, from where it stopped");
+}

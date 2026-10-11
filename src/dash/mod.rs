@@ -369,10 +369,39 @@ impl Dash {
             Some(tree::Item::Live(index)) => *index,
             _ => return,
         };
+        drop(sections);
+        self.swap_slots(target);
+    }
+
+    /// Shift+j / shift+k: move the focused agent one row down or up inside
+    /// its folder. It stops at the folder's edges — which folder an agent is
+    /// in is where it runs, and no key changes that.
+    pub fn move_in_folder(&mut self, down: bool) {
+        if self.on_newform() {
+            return;
+        }
+        let focus = self.focus;
+        let sections = self.sections();
+        let Some((folder, at)) = sections.iter().flat_map(|s| s.folders.iter()).find_map(|f| {
+            f.items.iter().position(|i| *i == tree::Item::Live(focus)).map(|at| (f, at))
+        }) else {
+            return;
+        };
+        let next = if down { at.checked_add(1) } else { at.checked_sub(1) };
+        let target = match next.and_then(|n| folder.items.get(n)) {
+            Some(tree::Item::Live(index)) => *index,
+            _ => return,
+        };
+        drop(sections);
+        self.swap_slots(target);
+    }
+
+    /// Trade places with another agent. Slots live in daemon meta, so this
+    /// is two SetMeta messages, and the focus follows the agent it was on.
+    fn swap_slots(&mut self, target: usize) {
         if target == self.focus {
             return;
         }
-        drop(sections);
         let a_slot = self.agents[self.focus].meta.slot;
         let b_slot = self.agents[target].meta.slot;
         self.agents[target].send(&ToDaemon::SetMeta {
@@ -861,17 +890,14 @@ fn sort_agents(dash: &mut Dash) {
         rank: &HashMap<(Option<&str>, &str), (u8, u64)>,
         hosts: &[String],
         homes: &HashMap<Option<&str>, &str>,
-    ) -> (usize, (u8, u64), &'a str, u8, u64) {
+    ) -> (usize, (u8, u64), u8, u64) {
         let key = (agent.host.as_deref(), folder_of(agent, homes));
         let folder = rank.get(&key).copied().unwrap_or((u8::MAX, u64::MAX));
-        // Within a folder, one directory's agents still sit together.
-        (
-            machine_of(agent, hosts),
-            folder,
-            agent.meta.cwd.as_str(),
-            agent.meta.slot,
-            agent.meta.created,
-        )
+        // Within a folder the slot is the whole order. Sorting by directory
+        // first looked tidy and made the order unmovable: a folder is
+        // everything under `~/Developer`, nearly every agent in it has a
+        // directory of its own, and a swap of slots moved nothing.
+        (machine_of(agent, hosts), folder, agent.meta.slot, agent.meta.created)
     }
     let hosts: Vec<String> = dash.hosts.hosts.iter().map(|h| h.dest.clone()).collect();
     {
@@ -914,7 +940,7 @@ fn sort_agents(dash: &mut Dash) {
     let owned = |a: &AgentConn| {
         let folder =
             rank.get(&(a.host.clone(), folder_owned(a))).copied().unwrap_or((u8::MAX, u64::MAX));
-        (machine_of(a, &hosts), folder, a.meta.cwd.clone(), a.meta.slot, a.meta.created)
+        (machine_of(a, &hosts), folder, a.meta.slot, a.meta.created)
     };
     let focused_name = dash.focused().map(|a| a.meta.name.clone());
     let mut zipped: Vec<(AgentConn, usize)> =

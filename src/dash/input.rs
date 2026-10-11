@@ -125,6 +125,9 @@ fn normal_key(dash: &mut Dash, bytes: &[u8]) -> (usize, Option<Outcome>) {
         CTRL_BACKSLASH => return (1, Some(Outcome::Quit)),
         b'j' => dash.focus_next(),
         b'k' => dash.focus_prev(),
+        // Shifted, the same two keys carry the agent with them.
+        b'J' => dash.move_in_folder(true),
+        b'K' => dash.move_in_folder(false),
         b'g' => dash.focus_first(),
         b'G' => dash.focus_last(),
         // A digit names a folder; the next one names an agent inside it.

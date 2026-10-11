@@ -138,6 +138,7 @@ color-coded (CLAUDE orange, NORMAL green, EDIT purple):
 |---|---|
 | `j`/`k`, arrows | focus next / previous (skipping folded folders) |
 | digit, digit | jump: folder, then the agent inside it (`^Space 1 2`) |
+| `J` / `K` | move the focused agent down / up one row *within its folder* |
 | `Shift+digit` | move the focused agent to position N *of its folder* |
 | `g` / `G` | first / last agent |
 | `n` | new-agent form |
