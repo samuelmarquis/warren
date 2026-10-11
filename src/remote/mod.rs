@@ -166,6 +166,10 @@ impl Host {
         if let Some(extra) = spec.extra {
             args.push(format!("--extra={extra}"));
         }
+        // A far side too old to know this flag skips it like any other.
+        if let Some(title) = spec.title {
+            args.push(format!("--title={title}"));
+        }
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let child = self
             .ssh(&refs)

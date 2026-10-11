@@ -98,6 +98,9 @@ pub struct DaemonArgs {
     /// conversation it names. What `warren restore` brings back after the
     /// machine that was running it stopped.
     pub asleep: bool,
+    /// The name someone typed for this agent, as they typed it — `name` is
+    /// that made safe for a socket path, or a title warren came up with.
+    pub title: Option<String>,
 }
 
 impl DaemonArgs {
@@ -109,6 +112,11 @@ impl DaemonArgs {
             None => Kind::default(),
         };
         let asleep = rest.iter().any(|a| a == "--asleep");
+        let title = rest
+            .iter()
+            .find_map(|a| a.strip_prefix("--title="))
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty());
         let pos: Vec<&String> = rest.iter().filter(|a| !a.starts_with("--")).collect();
         if pos.len() < 5 {
             bail!("usage: warren __daemon NAME SLOT COLOR MODE DIR [SESSION-ID] [--kind=…] [--sys=…] [--extra=…]");
@@ -122,7 +130,7 @@ impl DaemonArgs {
             dir: pos[4].clone(),
             sid: pos.get(5).map(|s| s.to_string()),
             sys,
-            extra, asleep,
+            extra, asleep, title,
         })
     }
 }
@@ -135,6 +143,10 @@ struct Spawn {
     dir: String,
     sys: Option<String>,
     extra: Option<String>,
+    /// A name to start the session under, for the first run only: it is
+    /// written into the conversation, so a wake resumes into it — and a
+    /// later `/rename` is not undone by the next one.
+    title: Option<String>,
     /// WARREN_AGENT_CMD (tests and tooling): used verbatim for every spawn,
     /// with no hooks wiring and no resume rewriting.
     custom: Option<String>,
@@ -154,6 +166,10 @@ impl Spawn {
             // Single-quote for the shell, escaping embedded quotes.
             let escaped = sys.replace('\'', r"'\''");
             cmd.push_str(&format!(" --system-prompt '{escaped}'"));
+        }
+        if let Some(flag) = self.title.as_deref().and_then(|t| self.kind.name_flag(t)) {
+            cmd.push(' ');
+            cmd.push_str(&flag);
         }
         if let Some(extra) = &self.extra {
             // User-authored args, passed through verbatim.
@@ -273,6 +289,7 @@ pub fn run(args: DaemonArgs) -> Result<()> {
         dir: args.dir.clone(),
         sys: args.sys.clone(),
         extra: args.extra.clone(),
+        title: args.title.clone(),
         custom: std::env::var("WARREN_AGENT_CMD").ok().filter(|c| !c.is_empty()),
         shell: std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
         env,
@@ -307,7 +324,9 @@ pub fn run(args: DaemonArgs) -> Result<()> {
     let mut daemon = Daemon {
         term: term::AgentTerm::new(80, 24, scrollback()),
         pty,
-        spawn,
+        // The first run has gone out carrying the name; every one after it
+        // resumes a conversation that already has it.
+        spawn: Spawn { title: None, ..spawn },
         power: if args.asleep { Power::Asleep } else { Power::Awake },
         sid,
         sleep_deadline: None,
@@ -325,9 +344,14 @@ pub fn run(args: DaemonArgs) -> Result<()> {
         next_key: KEY_FIRST_CLIENT,
         meta: Meta {
             name: args.name.clone(),
-            display: args.name.clone(),
+            // A typed name is the row's from the first frame. Where the
+            // harness was told it too, its title will say the same and the
+            // row keeps following it, so a `/rename` inside still shows;
+            // where it could not be told, the name is held against whatever
+            // the harness decides to call itself.
+            display: args.title.clone().unwrap_or_else(|| args.name.clone()),
             color: args.color,
-            pinned: false,
+            pinned: args.title.as_deref().is_some_and(|t| args.kind.name_flag(t).is_none()),
             slot: args.slot,
             cwd: args.dir,
             created,
@@ -1337,6 +1361,7 @@ mod tests {
             dir: "/w".into(),
             sys: None,
             extra: None,
+            title: None,
             custom: None,
             shell: "/bin/sh".into(),
             env: HashMap::new(),
@@ -1363,6 +1388,13 @@ mod tests {
         let mut quoted = spawn_for(Kind::Omp);
         quoted.sys = Some("don't stop".into());
         assert_eq!(quoted.command("new", None).unwrap(), r"omp --system-prompt 'don'\''t stop'");
+
+        // A typed name starts the session under it where the harness can be
+        // told, as one shell word whatever was typed. OMP cannot be told.
+        assert_eq!(Kind::Claude.name_flag("Sam's EQ").as_deref(), Some(r"-n 'Sam'\''s EQ'"));
+        let mut named = spawn_for(Kind::Omp);
+        named.title = Some("EQ".into());
+        assert_eq!(named.command("new", None).unwrap(), "omp");
 
         // WARREN_AGENT_CMD wins verbatim, for tests and tooling — and a wake
         // reruns exactly it, which is why such agents sleep without a session.

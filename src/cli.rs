@@ -85,6 +85,7 @@ pub fn cmd_new(args: &[String]) -> Result<()> {
     // Flag-style options can appear anywhere; the rest are positional.
     let sys = args.iter().find_map(|a| a.strip_prefix("--sys="));
     let extra = args.iter().find_map(|a| a.strip_prefix("--extra="));
+    let title = args.iter().find_map(|a| a.strip_prefix("--title="));
     let kind = match args.iter().find_map(|a| a.strip_prefix("--kind=")) {
         Some(k) => Kind::parse(k).with_context(|| format!("unknown agent kind '{k}'"))?,
         None => Kind::default(),
@@ -94,7 +95,8 @@ pub fn cmd_new(args: &[String]) -> Result<()> {
     let Some(raw) = pos.first() else {
         bail!(
             "usage: warren new NAME [DIR] [COLOR 0-255] [new|resume|continue|fork] [session-id] \
-             [--kind=claude|omp] [--sys=SYSTEM-PROMPT] [--extra=EXTRA-AGENT-ARGS]"
+             [--kind=claude|omp] [--title=SESSION-NAME] [--sys=SYSTEM-PROMPT] \
+             [--extra=EXTRA-AGENT-ARGS]"
         );
     };
     let base = crate::names::sanitize(raw);
@@ -128,6 +130,7 @@ pub fn cmd_new(args: &[String]) -> Result<()> {
             sys,
             extra,
             asleep: false,
+            title,
         },
         &live,
     )?;
@@ -159,6 +162,9 @@ pub struct NewAgent<'a> {
     /// Come up asleep, with no harness running: how a restored agent waits
     /// for you to want it.
     pub asleep: bool,
+    /// The name as someone typed it, when someone did: the session starts
+    /// under it rather than under whatever the harness would call itself.
+    pub title: Option<&'a str>,
 }
 
 /// Pick a unique name and free slot against `live` (name, slot) pairs and
@@ -198,6 +204,9 @@ fn spawn_daemon(name: &str, slot: u8, spec: &NewAgent) -> Result<()> {
     }
     if let Some(extra) = extra {
         cmd.arg(format!("--extra={extra}"));
+    }
+    if let Some(title) = spec.title {
+        cmd.arg(format!("--title={title}"));
     }
     unsafe {
         cmd.pre_exec(|| {
@@ -416,6 +425,8 @@ pub fn restore_agent(note: &crate::record::Record) -> Result<String> {
         sys: note.sys.as_deref(),
         extra: note.extra.as_deref(),
         asleep: true,
+        // Its name is already in the conversation it resumes.
+        title: None,
     };
     // Its own name and its own slot: a restored colony comes back in the
     // order it was in, not in the order the notes were read.

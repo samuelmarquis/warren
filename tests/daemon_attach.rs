@@ -2316,3 +2316,44 @@ fn restores_that_race_bring_an_agent_back_once() {
     }
     assert_eq!(count, 1, "one agent, one daemon");
 }
+
+/// A name typed for a new agent is the agent's name: on the row as it was
+/// typed — spaces and all, where the socket's name has to be tamer — and
+/// handed to the harness so the session itself starts under it. Where the
+/// harness cannot be told (OMP has no flag for it), the row is pinned so
+/// the harness's own idea of a title does not replace it.
+#[test]
+fn a_typed_name_is_the_name_the_agent_keeps() {
+    let home = TestHome::new("typedname");
+    let meta_of = |name: &str| {
+        let (_viewer, snap) = Viewer::attach(&home.sock(name), 80, 10);
+        let ToClient::Snapshot { meta, .. } = snap else { unreachable!() };
+        meta
+    };
+
+    let out = home
+        .warren("sleep 300")
+        .args(["new", "open-eq", home.dir.to_str().unwrap(), "0", "new", "--title=Open EQ: v2"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let meta = meta_of("open-eq");
+    assert_eq!(meta.display, "Open EQ: v2", "as typed, from the first frame");
+    assert!(!meta.pinned, "claude is told the name, so the row can go on following it");
+
+    let out = home
+        .warren("sleep 300")
+        .args(["new", "omp-eq", home.dir.to_str().unwrap(), "0", "new", "--kind=omp", "--title=OMP EQ"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let meta = meta_of("omp-eq");
+    assert_eq!(meta.display, "OMP EQ");
+    assert!(meta.pinned, "omp cannot be told, so the row holds the name itself");
+
+    // No name typed: nothing changes — the row follows the harness's title.
+    new_agent(&home, "untitled", "sleep 300");
+    let meta = meta_of("untitled");
+    assert_eq!(meta.display, "untitled");
+    assert!(!meta.pinned);
+}

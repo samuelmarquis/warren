@@ -554,7 +554,10 @@ fn submit_new(dash: &mut Dash) {
         MODE_CONTINUE => ("continue", None, form.root.clone(), "agent".to_string()),
         _ => ("new", None, form.root.clone(), String::new()),
     };
-    let raw_name = if form.title.is_empty() { fallback_name } else { form.title.clone() };
+    // Only a name someone typed is handed to the harness as the session's
+    // own: a fallback is the conversation's existing title, or nothing.
+    let typed = Some(form.title.trim().to_string()).filter(|t| !t.is_empty());
+    let raw_name = typed.clone().unwrap_or(fallback_name);
     // Everything else the form has to say, said now: what follows needs the
     // whole dashboard — the agents already running, and somewhere to put a
     // refusal — and the form is part of it.
@@ -617,6 +620,7 @@ fn submit_new(dash: &mut Dash) {
         sys: (!sys.is_empty()).then_some(sys.as_str()),
         extra: (!extra.is_empty()).then_some(extra.as_str()),
         asleep: false,
+        title: typed.as_deref(),
     };
 
     let outcome = match &dest {

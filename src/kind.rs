@@ -67,6 +67,19 @@ impl Kind {
         matches!(self, Kind::Claude)
     }
 
+    /// The flag that starts a session already carrying the name it was given
+    /// — what `/rename` does once you are inside. Without it Claude Code
+    /// titles the session itself a turn or two in, and that title is what
+    /// its terminal reports, what the sidebar mirrors and what the resume
+    /// picker lists. OMP has no such flag; warren pins the row's name there
+    /// instead, which holds the sidebar but cannot reach OMP's own picker.
+    pub fn name_flag(self, title: &str) -> Option<String> {
+        match self {
+            Kind::Claude => Some(format!("-n '{}'", title.replace('\'', r"'\''"))),
+            Kind::Omp => None,
+        }
+    }
+
     /// The flag wiring warren's lifecycle hooks, for harnesses that have them.
     ///
     /// Claude Code gets a generated settings file whose hooks push exact
