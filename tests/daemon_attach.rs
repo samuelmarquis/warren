@@ -808,7 +808,7 @@ fn a_second_machine_shares_the_sidebar() {
     new_agent_in(&near, "svm", &near.dir.join("Research"), "sleep 300");
 
     // The near machine is told where the far one is.
-    std::fs::write(near.dir.join("hosts"), format!("smq  {BIN}\n")).unwrap();
+    std::fs::write(near.dir.join("hosts"), format!("faraway  {BIN}\n")).unwrap();
 
     // ssh, for the purposes of this test: drop the destination, run the rest
     // here against the far machine's home.
@@ -869,9 +869,9 @@ fn a_second_machine_shares_the_sidebar() {
     assert!(up.is_some(), "both machines' agents arrived: {:?}", sidebar(&grid));
 
     let rows = sidebar(&grid);
-    let smq = rows.iter().position(|r| r.trim() == "smq").expect("a heading for the far machine");
+    let faraway = rows.iter().position(|r| r.trim() == "faraway").expect("a heading for the far machine");
     let here = rows.iter().position(|r| r.contains("Research/")).unwrap();
-    assert!(here < smq, "this machine comes first: {rows:?}");
+    assert!(here < faraway, "this machine comes first: {rows:?}");
     // Folder numbers run straight through, so two digits still reach any of
     // them — 1 is local, 2 and 3 are one machine away.
     assert!(rows.iter().any(|r| r.trim() == "1 Research/"), "{rows:?}");
@@ -879,7 +879,7 @@ fn a_second_machine_shares_the_sidebar() {
     assert!(rows.iter().any(|r| r.trim() == "3 Courses/"), "{rows:?}");
     // And the sidebar says nothing about which machine an agent is on beyond
     // the heading it sits under.
-    assert!(!rows.iter().any(|r| r.contains("smq:")), "no host tags on rows: {rows:?}");
+    assert!(!rows.iter().any(|r| r.contains("faraway:")), "no host tags on rows: {rows:?}");
 
     // ^Space 2 1 reaches an agent on the other machine.
     viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x0021")));
@@ -1132,7 +1132,7 @@ fn the_form_creates_an_agent_on_another_machine() {
     new_agent_in(&near, "svm", &near.dir.join("Research"), "sleep 300");
     let burrow = far.dir.join("Burrow");
     std::fs::create_dir_all(&burrow).unwrap();
-    std::fs::write(near.dir.join("hosts"), format!("smq  {BIN}\n")).unwrap();
+    std::fs::write(near.dir.join("hosts"), format!("faraway  {BIN}\n")).unwrap();
 
     let shim = fake_ssh(&near, &far);
     let dash_cmd =
@@ -1158,7 +1158,7 @@ fn the_form_creates_an_agent_on_another_machine() {
     viewer.send(&ToDaemon::Input(proto::b64_encode(b"l")));
     let picked = viewer.await_frame(10_000, |m| {
         apply_frame(&grid, m);
-        grid.borrow().iter().any(|r| r.contains("new claude agent on smq"))
+        grid.borrow().iter().any(|r| r.contains("new claude agent on faraway"))
     });
     assert!(picked.is_some(), "the form says where it will run: {:?}", grid.borrow().clone());
 
@@ -1177,9 +1177,9 @@ fn the_form_creates_an_agent_on_another_machine() {
     assert!(made.is_some(), "the agent arrived from over there: {:?}", sidebar_of(&grid));
 
     let rows = sidebar_of(&grid);
-    let smq = rows.iter().position(|r| r.trim() == "smq").expect("a heading for the far machine");
+    let faraway = rows.iter().position(|r| r.trim() == "faraway").expect("a heading for the far machine");
     let made_at = rows.iter().position(|r| r.contains("remote-made")).unwrap();
-    assert!(made_at > smq, "it belongs to the far machine: {rows:?}");
+    assert!(made_at > faraway, "it belongs to the far machine: {rows:?}");
     assert!(rows.iter().any(|r| r.contains("Burrow/")), "in the directory asked for: {rows:?}");
 
     // And it really is over there: this machine's run dir never saw it.
@@ -1204,7 +1204,7 @@ fn the_new_agent_form_answers_the_mouse() {
 
     new_agent_in(&far, "spork", &far.dir.join("Games"), "sleep 300");
     new_agent_in(&near, "svm", &near.dir.join("Research"), "sleep 300");
-    std::fs::write(near.dir.join("hosts"), format!("smq  {BIN}\n")).unwrap();
+    std::fs::write(near.dir.join("hosts"), format!("faraway  {BIN}\n")).unwrap();
 
     let shim = fake_ssh(&near, &far);
     let dash_cmd =
@@ -1223,16 +1223,16 @@ fn the_new_agent_form_answers_the_mouse() {
     viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x00n")));
     let form = viewer.await_frame(10_000, |m| {
         apply_frame(&grid, m);
-        grid.borrow().iter().any(|r| r.contains("[ smq ]"))
+        grid.borrow().iter().any(|r| r.contains("[ faraway ]"))
     });
     assert!(form.is_some(), "the machine chips are drawn: {:?}", grid.borrow().clone());
 
     // Click the far machine's chip, wherever the form happened to draw it.
-    let (row, col) = find_in_grid(&grid, "[ smq ]").expect("the smq chip is on screen");
+    let (row, col) = find_in_grid(&grid, "[ faraway ]").expect("the faraway chip is on screen");
     click(&mut viewer, row + 1, col + 2); // inside the chip, 1-based
     let picked = viewer.await_frame(10_000, |m| {
         apply_frame(&grid, m);
-        grid.borrow().iter().any(|r| r.contains("new claude agent on smq"))
+        grid.borrow().iter().any(|r| r.contains("new claude agent on faraway"))
     });
     assert!(picked.is_some(), "clicking a chip picks it: {:?}", grid.borrow().clone());
 
@@ -2416,4 +2416,89 @@ fn shift_j_and_k_move_an_agent_within_its_folder() {
     viewer.send(&ToDaemon::Input(proto::b64_encode(b"J")));
     std::thread::sleep(Duration::from_millis(1_200));
     expect(&mut viewer, b"K", ["alpha", "zeta", "mid", "other"], "shift+k brings it back up, from where it stopped");
+}
+
+/// What an agent is launched with can change without making it again: the
+/// daemon takes it, the note follows, and the next wake uses it. The case
+/// this is for — a directory renamed under a sleeping agent — is also the
+/// one a wake must refuse rather than paper over: an agent resumed in a
+/// fresh, empty directory finds no conversation there.
+#[test]
+fn set_changes_how_an_agent_next_starts() {
+    let home = TestHome::new("setlaunch");
+    let old = home.dir.join("this-is-my-research-institute");
+    std::fs::create_dir_all(&old).unwrap();
+    let old = std::fs::canonicalize(&old).unwrap();
+    new_agent_in(&home, "mentor", &old, "pwd; sleep 300");
+    let sock = home.sock("mentor");
+    // A conversation, so the agent is written down.
+    let mut hook = Command::new(BIN)
+        .env("WARREN_SOCK", &sock)
+        .args(["hook", "waiting"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin.take().unwrap().write_all(br#"{"session_id":"conv-m"}"#).unwrap();
+    assert!(hook.wait().unwrap().success());
+    let note = home.dir.join("notes").join("mentor.json");
+    let read_note = || std::fs::read_to_string(&note).unwrap_or_default();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !read_note().contains("conv-m") && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Extra args land in the note at once — a hand edit there would not.
+    let set = |args: &[&str]| home.warren("unused").arg("set").arg("mentor").args(args).output().unwrap();
+    let out = set(&["--extra=--mcp-config /x/mcp.json"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("extra args: --mcp-config /x/mcp.json"));
+    assert!(read_note().contains("--mcp-config /x/mcp.json"), "{}", read_note());
+
+    // A directory that is not there is not a place to move an agent to.
+    let out = set(&["--dir=/nowhere/at/all"]);
+    assert!(!out.status.success(), "a missing directory is refused");
+
+    // Asleep, its directory renamed out from under it.
+    let mut viewer = Viewer::attach(&sock, 80, 10).0;
+    viewer.send(&ToDaemon::Sleep);
+    viewer
+        .await_frame(10_000, |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep))
+        .expect("asleep");
+    let new = home.dir.join("IAI");
+    std::fs::rename(&old, &new).unwrap();
+    let new = std::fs::canonicalize(&new).unwrap();
+
+    // Waking now would start it somewhere empty; it says so instead.
+    let out = home.warren("unused").args(["wake", "mentor"]).output().unwrap();
+    assert!(!out.status.success(), "the command line refuses");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("warren set mentor --dir="));
+    viewer.send(&ToDaemon::Wake);
+    let said = viewer.await_frame(5_000, |m| match m {
+        ToClient::Damage { lines, .. } => lines
+            .iter()
+            .any(|(_, l)| screen_text(std::slice::from_ref(l)).contains("could not wake")),
+        _ => false,
+    });
+    assert!(said.is_some(), "and so does the agent, on its own screen");
+    assert!(!old.exists(), "without making the old directory again");
+
+    // Told where it went, it wakes there.
+    let out = set(&[&format!("--dir={}", new.display())]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(read_note().contains(&*new.to_string_lossy()), "{}", read_note());
+    assert!(read_note().contains("--mcp-config"), "what was set before is kept");
+    let out = home.warren("unused").args(["wake", "mentor"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let woke_there = viewer.await_frame(10_000, |m| match m {
+        ToClient::Damage { lines, .. } => lines
+            .iter()
+            .any(|(_, l)| screen_text(std::slice::from_ref(l)).contains("/IAI")),
+        _ => false,
+    });
+    assert!(woke_there.is_some(), "it runs in the directory it was given");
+
+    // And an empty value clears.
+    let out = set(&["--extra="]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(read_note().contains("\"extra\": null"), "{}", read_note());
 }

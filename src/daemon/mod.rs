@@ -188,11 +188,20 @@ impl Spawn {
     /// Spawn claude on a fresh pty of the given size.
     fn pty(&self, mode: &str, sid: Option<&str>, cols: u16, rows: u16) -> Result<tty::Pty> {
         // The directory can go away between making an agent and starting it,
-        // or while it sleeps. Put it back if we can, and refuse to start if
-        // we cannot: the pty spawn ignores a working directory it cannot
-        // enter, so the alternative is an agent running in `/` while its row
-        // goes on naming somewhere else.
+        // or while it sleeps. A new conversation can have it back, empty. One
+        // being picked up again cannot: both harnesses file a conversation
+        // under the directory it ran in, so a resume in a fresh, empty one
+        // finds nothing — and the usual reason it is gone is that it was
+        // renamed, which only someone who knows the new name can fix. (Not
+        // starting at all matters either way: the pty spawn ignores a
+        // directory it cannot enter, and the agent would run in `/`.)
         if !std::path::Path::new(&self.dir).is_dir() {
+            if mode != "new" {
+                bail!(
+                    "{} is gone — if it moved, `warren set <name> --dir=<where it is now>`",
+                    self.dir
+                );
+            }
             std::fs::create_dir_all(&self.dir)
                 .with_context(|| format!("agent directory {}", self.dir))?;
         }
@@ -769,6 +778,12 @@ impl Daemon {
             Ok(pty) => pty,
             Err(e) => {
                 self.logf(&format!("wake failed to spawn: {e:#}"));
+                // Said where whoever typed at it is looking: a keystroke that
+                // wakes nothing, with no reason given, reads as a hang.
+                let said = format!("\r\n\x1b[1mwarren: could not wake — {e:#}\x1b[0m\r\n");
+                self.term.advance(said.as_bytes());
+                self.dirty = true;
+                self.flush_frame();
                 return;
             }
         };
@@ -913,6 +928,25 @@ impl Daemon {
                 }
                 let update = ToClient::MetaChanged(self.meta.clone());
                 self.broadcast(&update);
+            }
+            ToDaemon::SetLaunch { dir, extra, sys } => {
+                let given = |v: String| Some(v).filter(|v| !v.trim().is_empty());
+                if let Some(dir) = dir {
+                    self.logf(&format!("launch dir: {dir}"));
+                    self.spawn.dir = dir.clone();
+                    self.meta.cwd = dir;
+                    let update = ToClient::MetaChanged(self.meta.clone());
+                    self.broadcast(&update);
+                }
+                if let Some(extra) = extra {
+                    self.spawn.extra = given(extra);
+                }
+                if let Some(sys) = sys {
+                    self.spawn.sys = given(sys);
+                }
+                // Now, not at the end of the turn: this is the note a restart
+                // brings the agent back from, and it is the reason to ask.
+                self.remember();
             }
             ToDaemon::HookState(state) => {
                 self.hook = Some(state);

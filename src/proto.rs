@@ -186,6 +186,11 @@ pub enum ToDaemon {
     Query,
     /// Terminate the agent.
     Kill,
+    /// Change how the agent starts, from its next start on: the directory it
+    /// runs in, the extra args on its command line, its system prompt. Each
+    /// `None` is left as it is; `Some("")` clears extra args or a prompt.
+    /// Nothing restarts — a running agent picks these up when it next wakes.
+    SetLaunch { dir: Option<String>, extra: Option<String>, sys: Option<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

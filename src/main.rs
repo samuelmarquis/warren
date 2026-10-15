@@ -37,6 +37,8 @@ warren - a Claude Code agent multiplexer
   warren kill NAME       terminate an agent
   warren sleep NAME      stop the agent's claude process, keep the agent
   warren wake NAME       start it again on the same conversation
+  warren set NAME [--dir=DIR] [--extra=ARGS] [--sys=PROMPT]
+                         change how an agent starts, from its next start on
   warren attach NAME     view a single agent raw (no sidebar)
   warren restore [NAME]  bring back agents this machine lost when it stopped (asleep)
   warren sessions [KIND] list resumable sessions (claude, or omp)
@@ -58,6 +60,7 @@ fn main() {
         "kill" | "rm" => cli::cmd_kill(rest),
         "sleep" => cli::cmd_power(rest, false),
         "wake" => cli::cmd_power(rest, true),
+        "set" => cli::cmd_set(rest),
         "attach" => cli::cmd_attach(rest),
         "restore" => cli::cmd_restore(rest),
         "sessions" => sessions::cmd_sessions(rest),

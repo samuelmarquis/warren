@@ -121,6 +121,9 @@ warren ls              list agents and their states
 warren kill NAME       terminate an agent
 warren sleep NAME      stop its claude process, keep the agent (resumable)
 warren wake NAME       start it again on the same conversation
+warren set NAME [--dir=DIR] [--extra=ARGS] [--sys=PROMPT]
+                       change how an agent starts, from its next start on
+                       (an empty --extra= or --sys= clears it)
 warren attach NAME     view a single agent raw (no sidebar; Ctrl-\ detaches)
 warren restore [NAME]  bring back agents this machine lost when it stopped, asleep
 warren sessions [KIND] all resumable sessions (id, mtime, cwd, title) — claude, or omp

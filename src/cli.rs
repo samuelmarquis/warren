@@ -220,19 +220,10 @@ fn spawn_daemon(name: &str, slot: u8, spec: &NewAgent) -> Result<()> {
     Ok(())
 }
 
-/// Turn what someone typed into a directory an agent can actually run in.
-///
-/// `~` and `~/…` are this machine's home, and a relative path is relative to
-/// `base` — the shell's working directory on the command line, home on the
-/// dashboard's form, which has no meaningful one of its own. A directory
-/// that isn't there yet is created: asking for an agent in
-/// `~/Developer/new-thing` is how you say you want that directory.
-///
-/// What it will not do is invent something. A path it cannot make sense of
-/// is an error, because the alternative on the way in here was to hand the
-/// agent a directory it could not enter — which left it running in `/` while
-/// every row in the sidebar went on reporting the path that was asked for.
-pub fn resolve_dir(arg: Option<&str>, base: &str) -> Result<String> {
+/// What someone typed, as the absolute path it means here: `~` and `~/…` are
+/// this machine's home, and a relative path is relative to `base`. Says
+/// nothing about whether it exists.
+fn typed_path(arg: Option<&str>, base: &str) -> Result<PathBuf> {
     let home = std::env::var("HOME").unwrap_or_default();
     let typed = arg.unwrap_or("").trim();
     let path = match typed {
@@ -260,6 +251,23 @@ pub fn resolve_dir(arg: Option<&str>, base: &str) -> Result<String> {
     if !path.is_absolute() {
         bail!("'{}' is not a directory an agent can run in", path.display());
     }
+    Ok(path)
+}
+
+/// Turn what someone typed into a directory an agent can actually run in.
+///
+/// `~` and `~/…` are this machine's home, and a relative path is relative to
+/// `base` — the shell's working directory on the command line, home on the
+/// dashboard's form, which has no meaningful one of its own. A directory
+/// that isn't there yet is created: asking for an agent in
+/// `~/Developer/new-thing` is how you say you want that directory.
+///
+/// What it will not do is invent something. A path it cannot make sense of
+/// is an error, because the alternative on the way in here was to hand the
+/// agent a directory it could not enter — which left it running in `/` while
+/// every row in the sidebar went on reporting the path that was asked for.
+pub fn resolve_dir(arg: Option<&str>, base: &str) -> Result<String> {
+    let path = typed_path(arg, base)?;
     match std::fs::metadata(&path) {
         Ok(meta) if meta.is_dir() => {}
         Ok(_) => bail!("{} is a file, not a directory", path.display()),
@@ -535,13 +543,22 @@ pub fn cmd_power(args: &[String], wake: bool) -> Result<()> {
     };
     let name = named(raw)?;
     let sock = crate::paths::sock_path(name);
-    let (_, state) =
+    let (meta, state) =
         query_agent(&sock).with_context(|| format!("no live agent named '{name}'"))?;
 
     if wake {
         if !state.power.is_down() {
             println!("warren: '{name}' is already awake");
             return Ok(());
+        }
+        // The daemon refuses this too, but on the agent's own screen; here
+        // there is someone to tell directly.
+        if !Path::new(&meta.cwd).is_dir() {
+            bail!(
+                "{} is gone, and '{name}' would resume into nothing — if it moved: \
+                 warren set {name} --dir=<where it is now>",
+                meta.cwd
+            );
         }
     } else {
         if state.power.is_down() {
@@ -577,6 +594,107 @@ pub fn cmd_power(args: &[String], wake: bool) -> Result<()> {
         }
     }
     println!("warren: {verb} sent to '{name}' (still in progress)");
+    Ok(())
+}
+
+// ------------------------------------------------------------------------ set
+
+/// `warren set NAME [--dir=DIR] [--extra=ARGS] [--sys=PROMPT]`: change how an
+/// agent starts, from its next start on.
+///
+/// The daemon holds these, not the note: it is what a wake runs and what
+/// rewrites the note, so a note edited by hand is put back the next time
+/// the agent so much as changes its title. This is the way in. Nothing is
+/// restarted — a running agent goes on as it is and picks the change up
+/// when it next wakes, which is also when it would matter.
+///
+/// `--dir` must already exist. The usual reason to change it is that the
+/// directory was renamed under the agent, and a conversation is filed by
+/// where it ran: pointing the agent at an empty new directory would only
+/// make it resume into nothing.
+pub fn cmd_set(args: &[String]) -> Result<()> {
+    let usage = "usage: warren set NAME [--dir=DIR] [--extra=ARGS] [--sys=PROMPT]  \
+                 (an empty --extra= or --sys= clears it)";
+    let Some(raw) = args.iter().find(|a| !a.starts_with("--")) else { bail!(usage) };
+    let name = named(raw)?;
+    let flag = |f: &str| args.iter().find_map(|a| a.strip_prefix(f)).map(str::to_string);
+    let (dir, extra, sys) = (flag("--dir="), flag("--extra="), flag("--sys="));
+    if dir.is_none() && extra.is_none() && sys.is_none() {
+        bail!(usage);
+    }
+    let dir = match dir {
+        None => None,
+        Some(typed) => {
+            let path = typed_path(Some(&typed), &shell_dir())?;
+            if !path.is_dir() {
+                bail!("{} is not a directory here", path.display());
+            }
+            let real = std::fs::canonicalize(&path).unwrap_or(path);
+            Some(real.to_string_lossy().into_owned())
+        }
+    };
+
+    let sock = crate::paths::sock_path(name);
+    let (_, state) =
+        query_agent(&sock).with_context(|| format!("no live agent named '{name}'"))?;
+    let mut stream = UnixStream::connect(&sock)?;
+    stream.set_write_timeout(Some(Duration::from_millis(500)))?;
+    let msg = ToDaemon::SetLaunch { dir: dir.clone(), extra: extra.clone(), sys: sys.clone() };
+    stream.write_all(&proto::encode_frame(&msg)?)?;
+    drop(stream);
+
+    // Read it back. A daemon older than this message drops the connection
+    // without a word and carries on as it was, and "set" with nothing set
+    // is the one outcome worth refusing to report as success.
+    let given = |v: &Option<String>| v.clone().filter(|v| !v.trim().is_empty());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let landed = loop {
+        let cwd_ok = match &dir {
+            None => true,
+            Some(d) => query_agent(&sock).is_some_and(|(m, _)| &m.cwd == d),
+        };
+        // Its note says the rest, once it has one: an agent with no
+        // conversation yet is not written down.
+        let note = crate::record::all().into_iter().find(|n| n.name == name);
+        let note_ok = note.as_ref().is_none_or(|n| {
+            dir.as_ref().is_none_or(|d| &n.cwd == d)
+                && (extra.is_none() || n.extra == given(&extra))
+                && (sys.is_none() || n.sys == given(&sys))
+        });
+        if cwd_ok && note_ok {
+            break note.is_some() || dir.is_some();
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "'{name}' did not take it — its daemon may predate `warren set`; \
+                 kill it and make it again with `warren new`"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let what: Vec<String> = [
+        dir.as_ref().map(|d| format!("runs in {d}")),
+        extra.as_ref().map(|e| match given(&Some(e.clone())) {
+            Some(e) => format!("extra args: {e}"),
+            None => "no extra args".to_string(),
+        }),
+        sys.as_ref().map(|s| match given(&Some(s.clone())) {
+            Some(_) => "a new system prompt".to_string(),
+            None => "no system prompt".to_string(),
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let when = if state.power.is_down() {
+        "from its next wake"
+    } else {
+        "from its next start (it is running now; sleep and wake it to apply)"
+    };
+    println!("warren: '{name}' {} — {when}", what.join(", "));
+    if !landed {
+        println!("warren: (sent; '{name}' has no conversation yet, so there was no note to check)");
+    }
     Ok(())
 }
 
