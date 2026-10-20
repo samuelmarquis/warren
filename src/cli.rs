@@ -538,8 +538,9 @@ fn agent_busy(state: &AgentState) -> bool {
 /// to give its memory back, and start it again on the same conversation.
 pub fn cmd_power(args: &[String], wake: bool) -> Result<()> {
     let verb = if wake { "wake" } else { "sleep" };
-    let Some(raw) = args.first() else {
-        bail!("usage: warren {verb} NAME");
+    let force = !wake && args.iter().any(|a| a == "--force");
+    let Some(raw) = args.iter().find(|a| !a.starts_with("--")) else {
+        bail!("usage: warren {verb} NAME{}", if wake { "" } else { " [--force]" });
     };
     let name = named(raw)?;
     let sock = crate::paths::sock_path(name);
@@ -567,8 +568,8 @@ pub fn cmd_power(args: &[String], wake: bool) -> Result<()> {
         }
         // The two things sleep can't take back: an unfinished turn, and a
         // conversation with no id to resume it by.
-        if agent_busy(&state) {
-            bail!("'{name}' is busy — let the turn finish, or interrupt it first");
+        if agent_busy(&state) && !force {
+            bail!("'{name}' is busy — let the turn finish, or `warren sleep {name} --force` to lose it");
         }
         if !state.resumable {
             bail!("'{name}' has no session id yet — nothing to resume it from");

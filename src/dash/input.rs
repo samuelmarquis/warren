@@ -146,6 +146,7 @@ fn normal_key(dash: &mut Dash, bytes: &[u8]) -> (usize, Option<Outcome>) {
         b')' => dash.swap_with_row(10),
         b'n' => dash.open_new_form(),
         b'z' | CTRL_Z => dash.toggle_sleep(),
+        b'Z' => dash.force_sleep(),
         b'r' => {
             if let Some(agent) = dash.focused() {
                 dash.cmdline = agent.meta.display.clone();

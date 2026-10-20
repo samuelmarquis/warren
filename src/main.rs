@@ -35,7 +35,9 @@ warren - a Claude Code agent multiplexer
   warren new NAME [DIR] [COLOR 0-255] [new|resume|continue] [session-id] [--kind=claude|omp]
   warren ls              list agents and their status
   warren kill NAME       terminate an agent
-  warren sleep NAME      stop the agent's claude process, keep the agent
+  warren sleep NAME [--force]
+                         stop the agent's claude process, keep the agent
+                         (--force: even mid-turn, losing the turn)
   warren wake NAME       start it again on the same conversation
   warren set NAME [--dir=DIR] [--extra=ARGS] [--sys=PROMPT]
                          change how an agent starts, from its next start on

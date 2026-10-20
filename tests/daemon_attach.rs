@@ -1906,6 +1906,74 @@ fn a_refused_sleep_says_why_it_was_refused() {
     );
 }
 
+#[test]
+fn shift_z_sleeps_an_agent_even_mid_turn() {
+    let inner = TestHome::new("forcez");
+    new_agent_in(&inner, "stuck", &inner.dir.join("Burrow"), "printf 'thinking\\r\\n'; sleep 300");
+    let sock = inner.sock("stuck");
+    // Mid-turn, with a conversation to come back to — as a claude whose turn
+    // never ends (or whose Stop hook never arrived) would look.
+    let mut hook = Command::new(BIN)
+        .env("WARREN_SOCK", &sock)
+        .args(["hook", "working"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin.take().unwrap().write_all(br#"{"session_id":"conv-9"}"#).unwrap();
+    assert!(hook.wait().unwrap().success());
+    let (mut agent, _) = Viewer::attach(&sock, 80, 24);
+
+    let outer = TestHome::new("forcezout");
+    let dash_cmd = format!("WARREN_HOME={} {} up", inner.dir.display(), BIN);
+    new_agent(&outer, "dash", &dash_cmd);
+    let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 20);
+    let grid = std::cell::RefCell::new(Vec::<String>::new());
+    apply_frame(&grid, &snap);
+    let up = viewer.await_frame(15_000, |m| {
+        apply_frame(&grid, m);
+        grid.borrow().iter().any(|r| r.contains("thinking"))
+    });
+    assert!(up.is_some(), "the dashboard shows the agent: {:?}", grid.borrow().clone());
+
+    // `z` mid-turn is refused, and says how to insist.
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x00z")));
+    let said = viewer.await_frame(10_000, |m| {
+        apply_frame(&grid, m);
+        grid.borrow().iter().any(|r| r.contains("AGENT BUSY") && r.contains("Z sleeps it anyway"))
+    });
+    assert!(said.is_some(), "z is refused: {:?}", grid.borrow().last());
+
+    // `Z` insists.
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"Z")));
+    let asleep = agent.await_frame(10_000, |m| {
+        matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep)
+    });
+    assert!(asleep.is_some(), "Z sleeps it anyway");
+}
+
+#[test]
+fn warren_sleep_force_sleeps_a_busy_agent() {
+    let home = TestHome::new("forcecli");
+    new_agent(&home, "busy", "sleep 300");
+    let sock = home.sock("busy");
+    let mut hook = Command::new(BIN)
+        .env("WARREN_SOCK", &sock)
+        .args(["hook", "working"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin.take().unwrap().write_all(br#"{"session_id":"conv-3"}"#).unwrap();
+    assert!(hook.wait().unwrap().success());
+
+    let out = home.warren("sleep 300").args(["sleep", "busy"]).output().unwrap();
+    assert!(!out.status.success(), "a busy agent is not slept without --force");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--force"), "and says how to insist");
+
+    let out = home.warren("sleep 300").args(["sleep", "busy", "--force"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("asleep"), "{}", String::from_utf8_lossy(&out.stdout));
+}
+
 /// The gutter before a machine's name is not part of the name.
 #[test]
 fn a_machine_heading_underlines_its_name_and_not_the_space_before_it() {

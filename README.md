@@ -120,6 +120,7 @@ warren new NAME [DIR] [COLOR 0-255] [new|resume|continue] [session-id]
 warren ls              list agents and their states
 warren kill NAME       terminate an agent
 warren sleep NAME      stop its claude process, keep the agent (resumable)
+                       --force: even mid-turn
 warren wake NAME       start it again on the same conversation
 warren set NAME [--dir=DIR] [--extra=ARGS] [--sys=PROMPT]
                        change how an agent starts, from its next start on
@@ -149,6 +150,7 @@ color-coded (CLAUDE orange, NORMAL green, EDIT purple):
 | `r` | rename (pins the name against Claude's title sync) |
 | `e` / `c` | edit form: title + 256-color picker |
 | `z` | sleep the agent (or wake a sleeping one) |
+| `Z` | sleep it even mid-turn, losing the turn (restart a stuck or updated claude) |
 | `x` | close agent (y/n confirm) |
 | `:` | command line — `:q` detach · `:q!` kill all · `:color #hex\|index` |
 
@@ -391,7 +393,10 @@ sleep and wake forever without ever forking its conversation.
 Two refusals, both about not losing anything you can't get back. Sleeping
 **mid-turn** is refused (`AGENT BUSY` in the status bar) — the in-flight turn
 would be lost, and the transcript would end on a tool call that never
-returned; let it finish, or interrupt it yourself first. Sleeping before the
+returned; let it finish, or interrupt it yourself first. **`Z`** sleeps it
+anyway (`warren sleep NAME --force` from a shell), for when that turn is
+expendable: a claude that is stuck, a warren that only thinks it is busy, or
+a Claude Code that needs restarting to pick up an update. Sleeping before the
 first hook has reported a session id is refused too (`NO SESSION YET`), since
 there would be nothing to resume from.
 

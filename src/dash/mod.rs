@@ -318,7 +318,7 @@ impl Dash {
         } else if let Some(why) = agent.busy_because() {
             // Say which kind of busy: one of them means wait, the other
             // means press it again.
-            Some(format!("AGENT BUSY — {why}"))
+            Some(format!("AGENT BUSY — {why} · Z sleeps it anyway"))
         } else if !agent.resumable() {
             Some("NO SESSION YET".to_string())
         } else {
@@ -332,6 +332,26 @@ impl Dash {
         let msg = if agent.asleep() { ToDaemon::Wake } else { ToDaemon::Sleep };
         if let Some(agent) = self.focused_mut() {
             agent.send(&msg);
+        }
+    }
+
+    /// NORMAL `Z`: sleep the focused agent even mid-turn — the turn is lost,
+    /// which is the point when it is stuck, or when warren only thinks it is
+    /// busy, or when claude itself needs restarting. Never wakes. The one
+    /// refusal kept is a missing session id: that sleep could not be undone
+    /// at all, and a wake would `--continue` into whatever ran here last.
+    pub fn force_sleep(&mut self) {
+        let Some(agent) = self.focused() else { return };
+        if agent.asleep() {
+            return;
+        }
+        if !agent.resumable() {
+            self.flash = Some("NO SESSION YET".to_string());
+            self.status_dirty = true;
+            return;
+        }
+        if let Some(agent) = self.focused_mut() {
+            agent.send(&ToDaemon::Sleep);
         }
     }
 
