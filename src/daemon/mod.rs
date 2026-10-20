@@ -400,6 +400,13 @@ pub fn run(args: DaemonArgs) -> Result<()> {
     Ok(())
 }
 
+/// Did the agent die of a signal, rather than choose to exit? A process the
+/// signal killed outright has no exit code (-1 here); a shell or a claude
+/// that catches it exits 128+signal (SIGTERM 143, SIGHUP 129).
+fn stopped_by_signal(status: i32) -> bool {
+    status < 0 || status > 128
+}
+
 /// Bind the agent socket; replace it only if it's stale (nothing listening).
 fn bind_or_replace(sock: &std::path::Path) -> Result<UnixListener> {
     match UnixListener::bind(sock) {
@@ -552,6 +559,17 @@ impl Daemon {
             // leaves the tab behind too; `x` closes it.
             _ if woke_recently => {
                 self.logf(&format!("wake failed: child exited with status {status}"));
+                self.finish_sleep();
+                None
+            }
+            // Stopped from outside, not ended: a machine shutting down sends
+            // every process SIGTERM at once, and claude answers it by exiting
+            // cleanly with 128+signal — often before its daemon has taken
+            // its own SIGTERM. Ending here would forget the note, and with
+            // it the agent, which is exactly what a restart must not cost.
+            // `/exit` exits 0; a kill we were asked for is caught above.
+            _ if stopped_by_signal(status) => {
+                self.logf(&format!("stopped from outside: child exited with status {status}"));
                 self.finish_sleep();
                 None
             }

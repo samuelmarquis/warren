@@ -424,6 +424,80 @@ fn sleep_stops_the_process_and_keeps_the_agent() {
 }
 
 #[test]
+fn an_agent_stopped_from_outside_sleeps_and_keeps_its_note() {
+    let home = TestHome::new("sigterm");
+    // Like claude on SIGTERM: exits cleanly, with 128+signal.
+    new_agent(&home, "shutdown", "trap 'exit 143' TERM; printf 'awake as %s\\n' $$; while :; do sleep 1; done");
+    let sock = home.sock("shutdown");
+
+    // A conversation to come back to, so the agent is written down at all.
+    let mut hook = Command::new(BIN)
+        .env("WARREN_SOCK", &sock)
+        .args(["hook", "waiting"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin.take().unwrap().write_all(br#"{"session_id":"conv-7"}"#).unwrap();
+    assert!(hook.wait().unwrap().success());
+    let note = home.dir.join("notes").join("shutdown.json");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !std::fs::read_to_string(&note).unwrap_or_default().contains("conv-7") && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(note.exists(), "the agent is written down");
+
+    let (mut viewer, _) = Viewer::attach(&sock, 80, 24);
+    let frame = viewer
+        .await_frame(5_000, |m| match m {
+            ToClient::Damage { lines, .. } => {
+                lines.iter().any(|(_, l)| screen_text(std::slice::from_ref(l)).contains("awake as"))
+            }
+            _ => false,
+        });
+    let text = match frame {
+        Some(ToClient::Damage { lines, .. }) => {
+            lines.iter().map(|(_, l)| screen_text(std::slice::from_ref(l))).collect::<String>()
+        }
+        _ => {
+            let (_, snap) = Viewer::attach(&sock, 80, 24);
+            let ToClient::Snapshot { screen, .. } = snap else { unreachable!() };
+            screen_text(&screen)
+        }
+    };
+    let pid: String = text
+        .split("awake as ")
+        .nth(1)
+        .expect("pid on screen")
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+
+    // The machine is going down: the agent's process is told to stop, and
+    // its daemon has not been told yet.
+    assert!(Command::new("kill").args(["-TERM", &pid]).status().unwrap().success());
+    let asleep = viewer.await_frame(10_000, |m| {
+        matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep)
+    });
+    assert!(asleep.is_some(), "a stopped agent goes to sleep");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(sock.exists(), "and keeps its tab");
+    assert!(note.exists(), "and its note, so a restart brings it back");
+}
+
+#[test]
+fn an_agent_that_exits_by_itself_is_over() {
+    let home = TestHome::new("selfexit");
+    // `/exit`: the agent chooses to end.
+    new_agent(&home, "done", "sleep 1; exit 0");
+    let sock = home.sock("done");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while sock.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!sock.exists(), "an agent that exits on its own takes its tab with it");
+}
+
+#[test]
 fn keys_typed_at_a_sleeping_agent_land_in_the_resumed_one() {
     let home = TestHome::new("buffer");
     new_agent(&home, "dozy", "cat");
