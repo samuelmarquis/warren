@@ -68,6 +68,8 @@ pub struct Dash {
     pub pending_focus: Option<(Option<String>, String)>,
     /// A `warren new` running on another machine, waiting to be reaped.
     pub spawn_job: Option<forms::Job>,
+    /// A `:set` — `warren set`, here or one hop away — waiting to be reaped.
+    pub set_job: Option<forms::Job>,
     /// Folders folded away, by working directory. Viewer-local, like every
     /// other thing the dashboard knows: fold state is not worth a protocol.
     pub collapsed: HashSet<String>,
@@ -497,6 +499,7 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
         editform: None,
         pending_focus: None,
         spawn_job: None,
+        set_job: None,
         collapsed: HashSet::new(),
         hosts: crate::remote::Hosts::default(),
         here: local_hostname(),

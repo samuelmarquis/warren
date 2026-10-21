@@ -327,6 +327,100 @@ fn parse_sessions(out: &str) -> Vec<Session> {
 pub fn poll_jobs(dash: &mut Dash) {
     poll_session_job(dash);
     poll_spawn_job(dash);
+    poll_set_job(dash);
+}
+
+/// `:set KEY VALUE` (or `KEY=VALUE`) on the focused agent: its directory, extra args or
+/// system prompt, from its next start. Runs `warren set` rather than sending
+/// SetLaunch itself, on whichever machine the agent lives — a directory can
+/// only be checked against the disk it is on, and only `warren set` reads the
+/// change back and says so when an old daemon ignores it.
+pub fn start_set(dash: &mut Dash, arg: &str) {
+    dash.status_dirty = true;
+    let Some(agent) = dash.focused() else { return };
+    // `dir ~/x` or `dir=~/x`: whichever separator comes first. A value may
+    // hold either itself — an extra arg is often `--flag=value`.
+    let split = arg.find(|c: char| c == '=' || c.is_whitespace());
+    let Some((key, value)) = split.map(|i| (&arg[..i], arg[i + 1..].trim_start())) else {
+        dash.flash = Some(format!(
+            "runs in {} · :set dir PATH / extra ARGS / sys PROMPT (empty clears)",
+            agent.meta.cwd
+        ));
+        return;
+    };
+    let value = match key.trim() {
+        // Relative to where the agent is, not to wherever warren was opened.
+        "dir" if !value.starts_with('/') && !value.starts_with('~') => {
+            format!("{}/{value}", agent.meta.cwd.trim_end_matches('/'))
+        }
+        "dir" | "extra" | "sys" => value.to_string(),
+        other => {
+            dash.flash = Some(format!("can't :set {other} (dir, extra or sys)"));
+            return;
+        }
+    };
+    if dash.set_job.is_some() {
+        dash.flash = Some("still setting the last one".into());
+        return;
+    }
+    let flag = format!("--{}={value}", key.trim());
+    let (host, name) = agent.ident();
+    let (host, name) = (host.map(str::to_string), name.to_string());
+    let started = match &host {
+        None => std::env::current_exe().map_err(anyhow::Error::from).and_then(|exe| {
+            std::process::Command::new(exe)
+                .args(["set", &name, &flag])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(anyhow::Error::from)
+        }),
+        Some(dest) => match dash.hosts.get(dest) {
+            None => Err(anyhow::anyhow!("{dest} is not in the hosts file")),
+            Some(h) if !h.reachable() => Err(anyhow::anyhow!("{} is not answering", h.label)),
+            Some(h) => h.set_launch(&name, &flag),
+        },
+    };
+    match started {
+        Ok(child) => {
+            dash.set_job = Some(Job::new(child, host.unwrap_or_else(|| "here".into())));
+            dash.flash = Some(format!("setting {} for '{name}'…", key.trim()));
+        }
+        Err(e) => dash.flash = Some(format!("set failed: {e}")),
+    }
+}
+
+fn poll_set_job(dash: &mut Dash) {
+    let Some(job) = dash.set_job.as_mut() else { return };
+    if job.expired() {
+        let dest = job.dest.clone();
+        job.kill();
+        dash.set_job = None;
+        dash.flash = Some(format!("{dest} did not answer"));
+        dash.status_dirty = true;
+        return;
+    }
+    match job.child.try_wait() {
+        Ok(Some(_)) => {}
+        Ok(None) => return,
+        Err(_) => {
+            dash.set_job = None;
+            return;
+        }
+    }
+    // A line or two either way; nothing that can fill a pipe.
+    let job = dash.set_job.take().expect("just had one");
+    let Ok(out) = job.child.wait_with_output() else { return };
+    let said = if out.status.success() { out.stdout } else { out.stderr };
+    let said = String::from_utf8_lossy(&said);
+    let line = said.lines().find(|l| !l.trim().is_empty()).unwrap_or(if out.status.success() {
+        "set"
+    } else {
+        "set failed"
+    });
+    dash.flash = Some(line.trim().trim_start_matches("warren: ").trim_start_matches("Error: ").to_string());
+    dash.status_dirty = true;
 }
 
 fn poll_session_job(dash: &mut Dash) {

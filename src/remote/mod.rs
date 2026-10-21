@@ -141,6 +141,19 @@ impl Host {
         cmd
     }
 
+    /// `ssh … warren set NAME --KEY=VALUE` on that machine, which checks a
+    /// directory against its own disk and reads the change back from its own
+    /// daemon — neither of which can be done from here.
+    pub fn set_launch(&self, name: &str, flag: &str) -> Result<Child> {
+        let child = self
+            .ssh(&["set", name, flag])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        Ok(child)
+    }
+
     /// `ssh … warren new …` on that machine: the far side picks the name and
     /// the slot against its own agents, exactly as it would for someone
     /// typing the command over there. Nothing is waited on here — the child

@@ -94,7 +94,7 @@ hasn't soaked there yet.
 
 ```sh
 git clone https://github.com/samuelmarquis/warren
-cd warren && ./install.sh        # cargo build --release → ~/.local/bin/warren
+cd warren && ./install.sh        # cargo build --release → ~/.local/bin/warren, + man page
 ```
 
 Override the destination with `PREFIX=…`.
@@ -131,6 +131,13 @@ warren sessions [KIND] all resumable sessions (id, mtime, cwd, title) — claude
 warren help
 ```
 
+`man warren` has all of it; both `install.sh` and the Nix package install
+the page.
+
+To move an agent to another directory, `:set dir ~/new/place` on it in the
+dashboard (or `warren set NAME --dir=…`), then sleep and wake it. Claude
+finds the conversation by its id wherever the agent now runs.
+
 ### Inside the dashboard
 
 Modal, like vim. **CLAUDE** mode (default) sends every key verbatim to the
@@ -152,7 +159,7 @@ color-coded (CLAUDE orange, NORMAL green, EDIT purple):
 | `z` | sleep the agent (or wake a sleeping one) |
 | `Z` | sleep it even mid-turn, losing the turn (restart a stuck or updated claude) |
 | `x` | close agent (y/n confirm) |
-| `:` | command line — `:q` detach · `:q!` kill all · `:color #hex\|index` |
+| `:` | command line — `:q` detach · `:q!` kill all · `:color #hex\|index` · `:set dir ~/x` · `:restore` |
 
 `Ctrl-\` detaches from anywhere, and `Ctrl-Z` sleeps the focused agent from
 anywhere — it is never forwarded, because a terminal's own `^Z` is SUSP and
@@ -349,15 +356,22 @@ the agent ends on purpose**. A daemon killed with its machine never gets to
 clean up, so what is left in `notes/` afterwards is exactly the set of
 agents that were still running when the lights went out.
 
-`warren restore` brings them back — **asleep**. Not twelve harnesses
+The dashboard brings them back on launch — **asleep** (`warren restore`
+does the same from a shell). Not twelve harnesses
 relaunching at boot and eating what they ate before, but twelve burrows with
 their names, colours and directories, each waking into `claude --resume` the
 moment you type at it. Sleep mode already knew how to do that; restore is
-the same tab, arrived at from the other direction. The dashboard says so
-once on launch (`3 agents from before this machine restarted — :restore`)
-and waits to be asked: a note can also be left by a daemon that was killed
-outright, and resurrecting things nobody asked for is how a colony grows
-ghosts.
+the same tab, arrived at from the other direction.
+
+A shutdown does not kill a daemon before its agent, though. It signals
+every process at once, and claude, told to stop, exits cleanly — usually
+before its own daemon has heard anything. So an agent whose harness dies of
+a signal goes to sleep rather than ending, and keeps its note; only one that
+exits by itself (`/exit`), or is closed with `x` or `warren kill`, is over.
+
+Claude Code deletes transcripts older than `cleanupPeriodDays` (30 by
+default) when it starts, and an agent left asleep past that has nothing to
+wake into. Raise it in `~/.claude/settings.json` if agents sleep for long.
 
 An agent whose conversation is no longer in its harness's store is not
 offered, because `claude --resume` on an id that names nothing exits 1 and

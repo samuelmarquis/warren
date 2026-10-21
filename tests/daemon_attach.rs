@@ -424,6 +424,29 @@ fn sleep_stops_the_process_and_keeps_the_agent() {
 }
 
 #[test]
+fn a_wake_sent_while_still_falling_asleep_is_not_dropped() {
+    let home = TestHome::new("wakemid");
+    // Takes its time over SIGTERM, as claude does running its SessionEnd
+    // hooks: the window `warren sleep; warren wake` used to fall into.
+    new_agent(&home, "slow", "trap 'sleep 1; exit 143' TERM; printf 'up\\r\\n'; while :; do sleep 0.1; done");
+    let sock = home.sock("slow");
+    let (mut viewer, _) = Viewer::attach(&sock, 80, 24);
+
+    viewer.send(&ToDaemon::Sleep);
+    viewer
+        .await_frame(5_000, |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Sleeping))
+        .expect("falling asleep");
+    viewer.send(&ToDaemon::Wake);
+    viewer
+        .await_frame(10_000, |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep))
+        .expect("the sleep completes");
+    let woke = viewer.await_frame(10_000, |m| {
+        matches!(m, ToClient::StateChanged(s) if matches!(s.power, Power::Waking | Power::Awake))
+    });
+    assert!(woke.is_some(), "and the wake that came early happens then");
+}
+
+#[test]
 fn an_agent_stopped_from_outside_sleeps_and_keeps_its_note() {
     let home = TestHome::new("sigterm");
     // Like claude on SIGTERM: exits cleanly, with 128+signal.
@@ -1949,6 +1972,50 @@ fn shift_z_sleeps_an_agent_even_mid_turn() {
         matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep)
     });
     assert!(asleep.is_some(), "Z sleeps it anyway");
+}
+
+#[test]
+fn colon_set_moves_the_focused_agent() {
+    let inner = TestHome::new("colonset");
+    let burrow = inner.dir.join("Burrow");
+    new_agent_in(&inner, "mover", &burrow, "printf 'here\\r\\n'; sleep 300");
+    let moved = burrow.join("deeper");
+    std::fs::create_dir_all(&moved).unwrap();
+    let (mut agent, _) = Viewer::attach(&inner.sock("mover"), 80, 24);
+
+    let outer = TestHome::new("colonsetout");
+    let dash_cmd = format!("WARREN_HOME={} {} up", inner.dir.display(), BIN);
+    new_agent(&outer, "dash", &dash_cmd);
+    let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 20);
+    let grid = std::cell::RefCell::new(Vec::<String>::new());
+    apply_frame(&grid, &snap);
+    let up = viewer.await_frame(15_000, |m| {
+        apply_frame(&grid, m);
+        grid.borrow().iter().any(|r| r.contains("here"))
+    });
+    assert!(up.is_some(), "the dashboard shows the agent: {:?}", grid.borrow().clone());
+
+    // No name: it is the agent you are looking at. A space, not `=`, and a
+    // path relative to where the agent already is.
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x00:set dir deeper\r")));
+    let real = std::fs::canonicalize(&moved).unwrap().to_string_lossy().into_owned();
+    let changed = agent.await_frame(10_000, |m| {
+        matches!(m, ToClient::MetaChanged(meta) if meta.cwd == real)
+    });
+    assert!(changed.is_some(), "the agent now runs in {real}");
+    let said = viewer.await_frame(10_000, |m| {
+        apply_frame(&grid, m);
+        grid.borrow().iter().any(|r| r.contains("runs in") && r.contains("deeper"))
+    });
+    assert!(said.is_some(), "and the status bar says so: {:?}", grid.borrow().last());
+
+    // A directory that is not there is refused, by the machine it is not on.
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b":set dir /nowhere/at/all\r")));
+    let refused = viewer.await_frame(10_000, |m| {
+        apply_frame(&grid, m);
+        grid.borrow().iter().any(|r| r.contains("not a directory"))
+    });
+    assert!(refused.is_some(), "a missing dir is refused: {:?}", grid.borrow().last());
 }
 
 #[test]

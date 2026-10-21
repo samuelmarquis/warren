@@ -297,6 +297,10 @@ fn run_command(dash: &mut Dash, cmd: &str) -> Option<Outcome> {
         });
         return None;
     }
+    if cmd == "set" || cmd.starts_with("set ") {
+        forms::start_set(dash, cmd["set".len()..].trim_start());
+        return None;
+    }
     if let Some(arg) = cmd.strip_prefix("color ").or_else(|| cmd.strip_prefix("c ")) {
         match parse_color(arg.trim()) {
             Some(color) => {
