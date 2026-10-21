@@ -243,6 +243,10 @@ struct Daemon {
     probe_until: Instant,
     /// Whether the current sleep has already escalated past SIGTERM.
     sigkilled: bool,
+    /// A wake that arrived while the sleep was still under way: honored the
+    /// moment it completes, rather than dropped for coming a second early
+    /// (`warren sleep` returns once the sleep has started).
+    wake_after_sleep: bool,
     /// Set by Kill while asleep: no child exit will ever end the loop for us.
     quit: Option<i32>,
     /// Kill was asked for: the next child exit ends the agent, whatever else
@@ -345,6 +349,7 @@ pub fn run(args: DaemonArgs) -> Result<()> {
         probe_at: (spawn_probe && !args.asleep).then(Instant::now),
         probe_until: Instant::now() + SESSION_PROBE_FOR,
         sigkilled: false,
+        wake_after_sleep: false,
         quit: None,
         killed: false,
         listener,
@@ -549,6 +554,9 @@ impl Daemon {
             Power::Sleeping => {
                 self.logf(&format!("slept: child exited with status {status}"));
                 self.finish_sleep();
+                if std::mem::take(&mut self.wake_after_sleep) {
+                    self.wake();
+                }
                 None
             }
             // A resume claude refuses (session id gone, claude off PATH)
@@ -723,6 +731,9 @@ impl Daemon {
     /// busy — viewers own that policy (the dashboard refuses mid-turn).
     fn start_sleep(&mut self) {
         if self.power.is_down() {
+            // Sleep, wake, sleep again before the first one finished: the
+            // last word is sleep.
+            self.wake_after_sleep = false;
             return;
         }
         // Last chance to notice the agent moved itself to another session.
@@ -983,6 +994,7 @@ impl Daemon {
                 }
             }
             ToDaemon::Sleep => self.start_sleep(),
+            ToDaemon::Wake if self.power == Power::Sleeping => self.wake_after_sleep = true,
             ToDaemon::Wake => self.wake(),
             ToDaemon::Query => {
                 let meta = ToClient::MetaChanged(self.meta.clone());

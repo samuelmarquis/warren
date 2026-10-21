@@ -22,10 +22,13 @@
             # Only what a build reads: a README or a note must not invalidate it.
             src = lib.fileset.toSource {
               root = ./.;
-              fileset = lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./src ./tests ];
+              fileset = lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./src ./tests ./man ];
             };
 
             cargoLock.lockFile = ./Cargo.lock;
+
+            nativeBuildInputs = [ pkgs.installShellFiles ];
+            postInstall = "installManPage man/warren.1";
 
             # The suite spawns real daemons around ptys and unix sockets in
             # $HOME; the build sandbox gives it none of that. Run it in the

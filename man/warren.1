@@ -1,0 +1,336 @@
+.TH WARREN 1 2026-10-21 "warren" "User Commands"
+.SH NAME
+warren \- a colony of Claude Code and OMP agents from one terminal
+.SH SYNOPSIS
+.B warren
+.br
+.B warren new
+.I NAME
+.RI [ DIR ]
+.RI [ COLOR ]
+.RB [ new | resume | continue ]
+.RI [ SESSION ]
+.RB [ \-\-kind=claude | omp ]
+.RB [ \-\-sys=\c
+.IR PROMPT ]
+.RB [ \-\-extra=\c
+.IR ARGS ]
+.RB [ \-\-title=\c
+.IR TITLE ]
+.br
+.B warren ls
+.br
+.B warren kill
+.I NAME
+.br
+.B warren sleep
+.I NAME
+.RB [ \-\-force ]
+.br
+.B warren wake
+.I NAME
+.br
+.B warren set
+.I NAME
+.RB [ \-\-dir=\c
+.IR DIR ]
+.RB [ \-\-extra=\c
+.IR ARGS ]
+.RB [ \-\-sys=\c
+.IR PROMPT ]
+.br
+.B warren attach
+.I NAME
+.br
+.B warren restore
+.RI [ NAME ]
+.br
+.B warren sessions
+.RB [ claude | omp ]
+.br
+.B warren help
+.SH DESCRIPTION
+.B warren
+runs many coding agents at once, each in its own daemon that answers to no
+terminal, and shows them in a dashboard: a sidebar of agents grouped by
+directory, and the focused agent's own TUI beside it.
+The dashboard holds no state; quitting it, or losing the SSH connection it
+ran over, leaves every agent running, and
+.B warren
+again rebuilds the same view from the daemons.
+.PP
+An agent can be put to
+.I sleep
+(its harness process stopped, its tab kept) and woken into the same
+conversation.
+Agents on other machines join the same sidebar over ssh; see
+.BR HOSTS .
+.SH COMMANDS
+.TP
+.B warren
+Open the dashboard.
+Agents this machine lost when it last stopped come back first, asleep.
+.TP
+.BI "warren new " NAME " " "\fR[\fPDIR\fR] [\fPCOLOR\fR] [\fPMODE\fR] [\fPSESSION\fR]"
+Start an agent named
+.I NAME
+in
+.I DIR
+(default: the current directory; created if missing), with sidebar colour
+.I COLOR
+(0\(en255).
+.I MODE
+is
+.B new
+(the default),
+.B resume
+(with a
+.I SESSION
+id, or for OMP a session file), or
+.BR continue .
+.B \-\-kind
+picks the harness,
+.B \-\-sys
+its system prompt,
+.B \-\-extra
+extra arguments for its command line, and
+.B \-\-title
+the name it starts under (for Claude Code, as if by
+.BR /rename ).
+.TP
+.B warren ls
+List agents: slot, name, state and directory.
+.TP
+.BI "warren kill " NAME
+End the agent.
+It is not restored after a restart.
+.TP
+.BI "warren sleep " NAME
+Stop the agent's harness process, and everything it started, to give its
+memory back; keep the agent.
+Refused while it is mid-turn, unless
+.B \-\-force
+is given, which loses that turn.
+Refused before the agent has a session id, since there would be nothing to
+resume.
+.TP
+.BI "warren wake " NAME
+Start a sleeping agent again on the same conversation.
+Refused if its directory no longer exists.
+.TP
+.BI "warren set " NAME
+Change how the agent starts, from its next start on: the directory it runs
+in
+.RB ( \-\-dir ,
+which must exist), its extra arguments
+.RB ( \-\-extra ),
+or its system prompt
+.RB ( \-\-sys ).
+An empty
+.B \-\-extra=
+or
+.B \-\-sys=
+clears it.
+Nothing restarts; sleep and wake a running agent to apply it.
+Agents whose daemon predates this command say so, and must be made again.
+.TP
+.BI "warren attach " NAME
+View one agent raw, with no sidebar.
+.B Ctrl\-\e
+detaches.
+.TP
+.BR "warren restore " [\c
+.IR NAME ]
+Bring back agents this machine lost when it stopped, asleep.
+The dashboard does this by itself on launch.
+.TP
+.BR "warren sessions " [ claude | omp ]
+List resumable sessions, tab-separated: id, time, directory, title.
+.SH THE DASHBOARD
+The dashboard is modal.
+.B CLAUDE
+mode, the default, sends every key to the focused agent.
+.B Ctrl\-Space
+toggles
+.BR NORMAL ,
+where keys drive warren.
+Editing a form is
+.B EDIT
+mode.
+.SS Anywhere
+.TP
+.B Ctrl\-Space
+Toggle NORMAL mode.
+.TP
+.B Ctrl\-\e
+Detach (leave every agent running).
+.TP
+.B Ctrl\-Z
+Sleep or wake the focused agent.
+Never passed to the agent: a harness stopped by its terminal is one warren
+cannot wake.
+.SS NORMAL mode
+.TP
+.BR j " / " k ", arrows"
+Focus the next or previous agent.
+.TP
+.IR "digit digit"
+Jump to a folder, then the agent inside it.
+.TP
+.BR g " / " G
+First or last agent.
+.TP
+.BR J " / " K
+Move the focused agent down or up within its folder.
+.TP
+.B Shift+digit
+Move the focused agent to that position in its folder.
+.TP
+.B n
+New-agent form.
+.TP
+.B r
+Rename the agent (pins the name against the harness's own title).
+.TP
+.BR e " / " c
+Edit form: title and colour.
+.TP
+.B z
+Sleep the agent, or wake it.
+Refused mid-turn.
+.TP
+.B Z
+Sleep it even mid-turn, losing the turn: for a stuck agent, a busy reading
+that is wrong, or a harness that needs restarting.
+.TP
+.B x
+Close the agent (asks first).
+.TP
+.BR i ", " a ", " l ", " Enter ", " Esc
+Back to CLAUDE mode.
+.TP
+.B :
+Command line; see below.
+.SS Commands
+.TP
+.BR :q ", " :q!
+Detach; or kill every agent and exit.
+.TP
+.BI :set " KEY VALUE"
+For the focused agent, as
+.B warren set
+would, on whichever machine it lives:
+.B dir
+(relative to where the agent is now, or
+.BR ~/ \&...),
+.BR extra ,
+or
+.BR sys .
+.B :set dir ~/Research/PLow
+moves it there from its next wake.
+.B :set extra=
+or
+.B :set sys=
+clears it.
+.B :set
+alone shows where the agent runs.
+.TP
+.BI :color " INDEX\fR|\fP#RRGGBB"
+Recolour the focused agent.
+.TP
+.B :restore
+Bring back agents lost when the machine stopped.
+.SS Mouse
+Click a sidebar row to focus it, a folder heading to fold it, a machine
+heading to reconnect.
+The wheel over the sidebar cycles agents; clicks and the wheel over the pane
+go to the agent, or scroll warren's own scrollback for a harness that does
+not take the mouse.
+Everything on a form is clickable.
+.SH SIDEBAR
+Agents are grouped into folders by the directory directly under home that
+their working directory is in.
+A bold row is ready for you, plain is working,
+.B !
+is blocked on a permission prompt,
+.B *
+finished while you were elsewhere, and
+.B z
+is asleep.
+.SH HOSTS
+.I ~/.warren/hosts
+lists other machines, one ssh destination per line, with an optional second
+column giving the path to
+.B warren
+there (an ssh command does not get your login PATH):
+.PP
+.RS
+.nf
+servo   /Users/servo\-critter/.local/bin/warren
+programchild@leilan  /etc/profiles/per\-user/programchild/bin/warren
+.fi
+.RE
+.PP
+Their agents appear under a heading per machine, over one shared ssh
+connection each, and the new-agent form can start agents there.
+Keys or an ssh agent are required: ssh runs in BatchMode.
+The command-line commands act on this machine's agents only; the dashboard
+is what spans machines.
+.SH RESTARTS
+Each agent keeps a note of itself in
+.IR ~/.warren/notes/ ,
+removed only when the agent is ended on purpose.
+After the machine restarts, the notes left behind are the agents that were
+lost, and the dashboard brings them back asleep, each waking into its
+conversation.
+An agent whose harness is stopped by a signal (as at shutdown) goes to sleep
+and keeps its note; one that exits by itself, as with
+.BR /exit ,
+ends.
+.PP
+Claude Code deletes transcripts older than
+.B cleanupPeriodDays
+(30 days by default) at startup.
+An agent left asleep longer than that has nothing to wake into; raise it in
+.IR ~/.claude/settings.json .
+.SH ENVIRONMENT
+.TP
+.B WARREN_HOME
+warren's directory (default
+.IR ~/.warren ).
+.TP
+.B WARREN_SCROLLBACK
+Lines of scrollback kept per agent for harnesses that do not keep their own
+(default 2000).
+.TP
+.B WARREN_SSH
+A command to use in place of ssh for other machines.
+.TP
+.B WARREN_LOG
+A file each daemon appends a debug log to.
+.SH FILES
+.TP
+.I ~/.warren/run/NAME.sock
+One unix socket per live agent.
+.TP
+.I ~/.warren/notes/NAME.json
+What an agent was, for restoring it.
+.TP
+.I ~/.warren/hooks.json
+Claude Code hook settings, regenerated on spawn.
+.TP
+.I ~/.warren/hosts
+Other machines.
+.TP
+.I ~/.warren/ssh/
+Shared ssh connection sockets.
+.PP
+warren only reads
+.I ~/.claude
+and
+.IR ~/.omp .
+.SH SEE ALSO
+.BR claude (1),
+.BR ssh (1)
+.PP
+https://github.com/samuelmarquis/warren
