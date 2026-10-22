@@ -1758,6 +1758,27 @@ fn an_omp_agent_lost_with_the_machine_comes_back_too() {
     assert!(said.contains("restored 'spore'"), "{said}");
 }
 
+/// An OMP title starts with an emoji. Its name must not start with a dash,
+/// or the daemon is handed what looks like a flag and never comes up.
+#[test]
+fn an_agent_titled_with_an_emoji_comes_up() {
+    let home = TestHome::new("emoji");
+    let out = home
+        .warren("sleep 300")
+        .args(["new", "🎚️ LIMIT: Review new TEAM A report", home.dir.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{said}{}", String::from_utf8_lossy(&out.stderr));
+    assert!(said.contains("'LIMIT-Review-new-TEAM-A-report'"), "{said}");
+    let sock = home.sock("LIMIT-Review-new-TEAM-A-report");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while UnixStream::connect(&sock).is_err() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(UnixStream::connect(&sock).is_ok(), "its daemon is up");
+}
+
 /// The pid of an agent's daemon, for killing it the way a shutdown would.
 fn daemon_pid(name: &str) -> Option<String> {
     let out = Command::new("pgrep").args(["-f", &format!("__daemon {name} ")]).output().ok()?;
