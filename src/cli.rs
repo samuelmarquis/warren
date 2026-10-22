@@ -961,3 +961,121 @@ pub fn cmd_join(args: &[String]) -> Result<()> {
     println!("warren: {}", crate::matrix::join(name, room.trim())?);
     Ok(())
 }
+
+// ---------------------------------------------------------------------- renew
+
+/// `warren renew NAME [--matrix=on|off] [--force]`: the same agent, on this
+/// warren. A daemon runs the binary it was started from for as long as it
+/// lives, so an upgrade reaches an agent only when its daemon is made again;
+/// this does that without losing it. The agent goes to sleep, the old daemon
+/// is stopped the way a shutdown stops it — which leaves its note — and the
+/// note is restored by the current binary, with any change asked for. An
+/// agent that was awake is woken again.
+pub fn cmd_renew(args: &[String]) -> Result<()> {
+    let usage = "usage: warren renew NAME [--matrix=on|off] [--force]";
+    let Some(raw) = args.iter().find(|a| !a.starts_with("--")) else { bail!(usage) };
+    let name = named(raw)?;
+    let force = args.iter().any(|a| a == "--force");
+    let matrix = match args.iter().find_map(|a| a.strip_prefix("--matrix=")).map(str::trim) {
+        None => None,
+        Some("on" | "yes" | "true" | "1") => Some(true),
+        Some("off" | "no" | "false" | "0") => Some(false),
+        Some(other) => bail!("--matrix is on or off, not '{other}'"),
+    };
+    if matrix == Some(true) && crate::matrix::config()?.is_none() {
+        bail!("chat is not set up on this machine: no {}", crate::matrix::config_path().display());
+    }
+
+    let sock = crate::paths::sock_path(name);
+    let (_, state) = query_agent(&sock).with_context(|| format!("no live agent named '{name}'"))?;
+    let was_awake = !state.power.is_down();
+    if was_awake {
+        if agent_busy(&state) && !force {
+            bail!("'{name}' is busy — let the turn finish, or `--force` to lose it");
+        }
+        if !state.resumable {
+            bail!("'{name}' has no session id yet — nothing to bring it back on");
+        }
+        let mut stream = UnixStream::connect(&sock)?;
+        stream.set_write_timeout(Some(Duration::from_millis(500)))?;
+        stream.write_all(&proto::encode_frame(&ToDaemon::Sleep)?)?;
+        drop(stream);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            match query_agent(&sock) {
+                Some((_, s)) if s.power == proto::Power::Asleep => break,
+                Some(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+                Some(_) => bail!("'{name}' did not fall asleep; nothing was changed"),
+                None => bail!("'{name}' went away"),
+            }
+        }
+    }
+
+    // What it will come back from. An asleep agent with a session has one;
+    // if it is missing, stop here, while the agent is still whole.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut note = loop {
+        let session = query_agent(&sock).and_then(|(_, s)| s.session);
+        let found = crate::record::all().into_iter().find(|n| n.name == name);
+        match (found, session) {
+            (Some(n), Some(sid)) if n.session == sid => break n,
+            _ if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+            _ => bail!("'{name}' has no up-to-date note to come back from; nothing was changed"),
+        }
+    };
+
+    // Held from the old daemon's end to the new one's start: a dashboard
+    // opening in between would otherwise restore this note as well.
+    let _lock = crate::record::lock();
+    let pid = daemon_pid(&sock).with_context(|| format!("could not find the process behind '{name}'"))?;
+    // SIGKILL, as a shutdown would: the daemon gets no chance to treat this
+    // as the agent ending, so its note stays.
+    if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
+        bail!("could not stop the old daemon (pid {pid}): {}", std::io::Error::last_os_error());
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while UnixStream::connect(&sock).is_ok() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = std::fs::remove_file(&sock);
+
+    if let Some(on) = matrix {
+        note.matrix = on;
+        crate::record::save(&note);
+    }
+    restore_agent(&note)?;
+    if was_awake {
+        cmd_power(&[name.to_string()], true)?;
+    }
+    println!("warren: renewed '{name}'{}", match matrix {
+        Some(true) => ", with chat",
+        Some(false) => ", without chat",
+        None => "",
+    });
+    Ok(())
+}
+
+/// The process listening on an agent's socket: its daemon.
+fn daemon_pid(sock: &Path) -> Option<i32> {
+    use std::os::fd::AsRawFd;
+    let stream = UnixStream::connect(sock).ok()?;
+    let fd = stream.as_raw_fd();
+    #[cfg(target_os = "macos")]
+    {
+        let mut pid: libc::pid_t = 0;
+        let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+        let ok = unsafe {
+            libc::getsockopt(fd, libc::SOL_LOCAL, libc::LOCAL_PEERPID, (&raw mut pid).cast(), &mut len)
+        };
+        (ok == 0 && pid > 0).then_some(pid)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let ok = unsafe {
+            libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERCRED, (&raw mut cred).cast(), &mut len)
+        };
+        (ok == 0 && cred.pid > 0).then_some(cred.pid)
+    }
+}

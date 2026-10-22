@@ -44,6 +44,11 @@ warren \- a colony of Claude Code and OMP agents from one terminal
 .B warren join
 .I NAME ROOM
 .br
+.B warren renew
+.I NAME
+.RB [ \-\-matrix=on | off ]
+.RB [ \-\-force ]
+.br
 .B warren attach
 .I NAME
 .br
@@ -155,6 +160,22 @@ or
 .IR !room-id ),
 from warren's own account, which must be in that room.
 The agent must have claimed a chat name.
+.TP
+.BI "warren renew " NAME
+Move the agent onto the warren this command runs from.
+A daemon keeps the binary it was started from for as long as it lives, so
+an upgrade reaches an agent only when its daemon is made again; this does
+that without losing it.
+The agent is put to sleep (refused mid-turn without
+.BR \-\-force ),
+its daemon is stopped as a shutdown would stop it, and it is restored from
+its note by the new binary
+\(em with chat on or off if
+.B \-\-matrix
+says so \(em then woken if it was awake.
+Use it for agents whose daemon predates
+.B warren set
+or chat.
 .TP
 .BI "warren attach " NAME
 View one agent raw, with no sidebar.

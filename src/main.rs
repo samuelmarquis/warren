@@ -43,6 +43,9 @@ warren - a Claude Code agent multiplexer
   warren set NAME [--dir=DIR] [--extra=ARGS] [--sys=PROMPT] [--matrix=on|off]
                          change how an agent starts, from its next start on
   warren join NAME ROOM  invite an agent to a Matrix room (chat; see man warren)
+  warren renew NAME [--matrix=on|off] [--force]
+                         move an agent onto this warren (its daemon keeps the
+                         binary it started from), optionally turning chat on
   warren attach NAME     view a single agent raw (no sidebar)
   warren restore [NAME]  bring back agents this machine lost when it stopped (asleep)
   warren sessions [KIND] list resumable sessions (claude, or omp)
@@ -66,6 +69,7 @@ fn main() {
         "wake" => cli::cmd_power(rest, true),
         "set" => cli::cmd_set(rest),
         "join" => cli::cmd_join(rest),
+        "renew" => cli::cmd_renew(rest),
         "attach" => cli::cmd_attach(rest),
         "restore" => cli::cmd_restore(rest),
         "sessions" => sessions::cmd_sessions(rest),

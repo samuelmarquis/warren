@@ -127,6 +127,10 @@ warren set NAME [--dir=DIR] [--extra=ARGS] [--sys=PROMPT] [--matrix=on|off]
                        change how an agent starts, from its next start on
                        (an empty --extra= or --sys= clears it)
 warren join NAME ROOM  invite an agent to a Matrix room (see Chat)
+warren renew NAME [--matrix=on|off] [--force]
+                       the same agent on a fresh daemon from this warren; a
+                       daemon keeps the binary it started from, so this is
+                       how an upgrade reaches an agent already running
 warren attach NAME     view a single agent raw (no sidebar; Ctrl-\ detaches)
 warren restore [NAME]  bring back agents this machine lost when it stopped, asleep
 warren sessions [KIND] all resumable sessions (id, mtime, cwd, title) — claude, or omp

@@ -2904,3 +2904,56 @@ fn chat_is_wired_into_each_harness() {
     assert!(!home.dir.join("matrix/chatty").exists(), "retired");
     assert_eq!(std::fs::read_dir(home.dir.join("matrix/.ended")).unwrap().count(), 1);
 }
+
+/// `warren renew` puts an agent on a new daemon — the binary it is run from
+/// — without losing anything: same name, slot, colour and conversation, chat
+/// turned on as asked, and awake again because it was awake before.
+#[test]
+fn renew_moves_an_agent_onto_a_new_daemon() {
+    let home = TestHome::new("renew");
+    std::fs::write(
+        home.dir.join("matrix.json"),
+        r#"{"channel": "/c.py", "machine": "smq", "allowedUsers": ["@sam:x"], "inviters": ["@sam:x"]}"#,
+    )
+    .unwrap();
+    let out = home
+        .warren("sleep 300")
+        .args(["new", "renewed", home.dir.join("w").to_str().unwrap(), "42", "--no-matrix"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let sock = home.sock("renewed");
+    // A conversation to come back on, as the hooks report one.
+    let mut hook = Command::new(BIN)
+        .env("WARREN_SOCK", &sock)
+        .args(["hook", "waiting"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin.take().unwrap().write_all(br#"{"session_id":"conv-7"}"#).unwrap();
+    assert!(hook.wait().unwrap().success());
+    let note_path = home.dir.join("notes/renewed.json");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !note_path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let before = daemon_pid("renewed").expect("a daemon");
+
+    let out = home.warren("sleep 300").args(["renew", "renewed", "--matrix=on"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let after = daemon_pid("renewed").expect("a daemon again");
+    assert_ne!(before, after, "a new daemon");
+
+    let note: serde_json::Value = serde_json::from_slice(&std::fs::read(&note_path).unwrap()).unwrap();
+    assert_eq!(note["matrix"], true);
+    assert_eq!(note["session"], "conv-7");
+    assert_eq!(note["color"], 42);
+    let ls = home.warren("x").arg("ls").output().unwrap();
+    let ls = String::from_utf8_lossy(&ls.stdout);
+    assert!(ls.contains("renewed") && !ls.contains("asleep"), "woken again: {ls}");
+}
