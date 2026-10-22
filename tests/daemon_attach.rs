@@ -2831,7 +2831,9 @@ fn chat_is_wired_into_each_harness() {
         home.dir.join("matrix.json"),
         r#"{"channel": "/opt/matrix_channel.py", "python": "/usr/bin/python3", "machine": "smq",
             "allowedUsers": ["@sam:x", "@*:x"], "inviters": ["@sam:x", "@warren:x"],
-            "rosterRoom": "!roster:x", "reserved": ["sam"]}"#,
+            "rosterRoom": "!roster:x", "reserved": ["sam"],
+            "agents": {"chatty": {"allowedUsers": ["@hermes:x"], "agentLoopCap": 0,
+                                  "rooms": {"!pair:x": {"requireMention": false}}}}}"#,
     )
     .unwrap();
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
@@ -2869,6 +2871,10 @@ fn chat_is_wired_into_each_harness() {
     assert_eq!(channel["rosterRoom"], "!roster:x");
     assert_eq!(channel["roomDefaults"]["requireMention"], true, "agents need a mention by default");
     assert_eq!(channel["approvers"], serde_json::json!(["@sam:x"]), "a pattern never approves");
+    // One agent's own settings, over everyone's: its partner's word, its room.
+    assert_eq!(channel["allowedUsers"], serde_json::json!(["@sam:x", "@*:x", "@hermes:x"]));
+    assert_eq!(channel["agentLoopCap"], 0);
+    assert_eq!(channel["rooms"]["!pair:x"]["requireMention"], false);
     use std::os::unix::fs::PermissionsExt;
     let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode(&home.dir.join("matrix/chatty")), 0o700);
@@ -2877,6 +2883,10 @@ fn chat_is_wired_into_each_harness() {
     // OMP: the extension, from the copy built into warren.
     new(&["ompy", work, "--kind=omp"]);
     let said = argv("ompy");
+    let ompy: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(home.dir.join("matrix/ompy/config.json")).unwrap()).unwrap();
+    assert_eq!(ompy["allowedUsers"], serde_json::json!(["@sam:x", "@*:x"]), "overrides are one agent's");
+    assert!(ompy.get("agentLoopCap").is_none());
     let ext = home.dir.join("omp-warren-matrix.ts");
     assert!(said.contains(ext.to_str().unwrap()), "{said}");
     assert_eq!(

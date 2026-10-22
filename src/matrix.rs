@@ -77,6 +77,26 @@ pub struct Config {
     /// warren's own account (access_token, homeserver): what invites agents.
     #[serde(default)]
     pub warren_account: Option<String>,
+    /// Settings for one agent, by its warren name, over the ones above: a
+    /// pair of agents working together in a room of their own needs no
+    /// mention, no loop cap, and each other's word.
+    #[serde(default)]
+    pub agents: BTreeMap<String, AgentOverride>,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentOverride {
+    /// More people (or agents elsewhere, such as a Hermes) whose messages
+    /// reach this agent as from a person: trusted, and never loop-capped.
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
+    /// Per-room options for the channel, e.g. `{"!pair:x": {"requireMention": false}}`.
+    #[serde(default)]
+    pub rooms: BTreeMap<String, Value>,
+    /// 0 turns the loop guard off for this agent.
+    #[serde(default)]
+    pub agent_loop_cap: Option<u32>,
 }
 
 fn default_python() -> String {
@@ -157,21 +177,25 @@ fn write_agent_files(cfg: &Config, name: &str) -> Result<PathBuf> {
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     private(&dir, 0o700)?;
 
-    // Approvers are people named outright; a pattern can never approve.
+    // Approvers are people named outright; a pattern can never approve, and
+    // nor can anyone an override adds.
     let approvers: Vec<&String> = cfg.allowed_users.iter().filter(|u| !u.contains('*')).collect();
+    let extra = cfg.agents.get(name).cloned().unwrap_or_default();
+    let mut allowed = cfg.allowed_users.clone();
+    allowed.extend(extra.allowed_users.iter().filter(|u| !cfg.allowed_users.contains(u)).cloned());
     let mut channel = json!({
-        "allowedUsers": cfg.allowed_users,
+        "allowedUsers": allowed,
         "approvers": approvers,
         "inviters": cfg.inviters,
         "claim": { "machine": cfg.machine, "reserved": cfg.reserved },
         "roomDefaults": { "requireMention": cfg.require_mention },
-        "rooms": {},
+        "rooms": extra.rooms,
         "relayPermissions": false,
     });
     if let Some(roster) = &cfg.roster_room {
         channel["rosterRoom"] = json!(roster);
     }
-    if let Some(cap) = cfg.agent_loop_cap {
+    if let Some(cap) = extra.agent_loop_cap.or(cfg.agent_loop_cap) {
         channel["agentLoopCap"] = json!(cap);
     }
     if let Some(hs) = &cfg.homeserver {

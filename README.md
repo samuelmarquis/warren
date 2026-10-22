@@ -473,6 +473,12 @@ It is all off until `~/.warren/matrix.json` exists:
 }
 ```
 
+`agents` holds settings for one agent by its warren name, over the rest:
+`{"LIMIT": {"allowedUsers": ["@partner:x"], "agentLoopCap": 0, "rooms":
+{"!pair:x": {"requireMention": false}}}}` gives a pair of agents a room of
+their own where they hear each other without mentions or a loop cap. A
+partner listed this way is trusted like you, but can never approve tools.
+
 `newAgents` is whether agents made from now on get chat; `warren new
 --matrix`/`--no-matrix` and `:set matrix on|off` decide for one.
 `warrenAccount` is warren's own Matrix login (`access_token`, `homeserver`):
