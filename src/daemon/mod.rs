@@ -799,9 +799,25 @@ impl Daemon {
         // reachable via WARREN_AGENT_CMD or a hookless agent) `--continue`
         // is the best available guess.
         let (mode, sid) = match self.sid.clone() {
+            // OMP names its session file as it starts but writes it only at
+            // the first message, so an agent slept before anyone spoke to it
+            // has nothing to resume — and nothing to lose by starting over.
+            // `--resume` on it would just fail. The tty row names the new one.
+            Some(sid)
+                if self.spawn.kind.learns_session_from_tty()
+                    && sid.starts_with('/')
+                    && !std::path::Path::new(&sid).exists() =>
+            {
+                ("new", None)
+            }
             Some(sid) => ("resume", Some(sid)),
             None => ("continue", None),
         };
+        if mode == "new" {
+            // Forget the file that was never written, so the probe goes on
+            // looking until the new run's row turns up.
+            self.sid = None;
+        }
         let (cols, rows) = (self.term.cols, self.term.rows);
         let mut pty = match self.spawn.pty(mode, sid.as_deref(), cols, rows) {
             Ok(pty) => pty,

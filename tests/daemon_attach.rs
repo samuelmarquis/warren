@@ -1727,6 +1727,37 @@ fn record_note(home: &TestHome, name: &str, session: &str) -> PathBuf {
     path
 }
 
+/// An OMP agent's note names its session by file, the way OMP's own tty row
+/// does; the store lists sessions by id. Both are the same conversation.
+#[test]
+fn an_omp_agent_lost_with_the_machine_comes_back_too() {
+    let home = TestHome::new("omprestore");
+    let omp = home.dir.join("omp");
+    let project = omp.join("agent").join("sessions").join("-Games");
+    std::fs::create_dir_all(&project).unwrap();
+    let file = project.join("2026-10-16T19-22-13-200Z_01a1462a.jsonl");
+    std::fs::write(
+        &file,
+        format!(
+            "{{\"type\":\"session\",\"version\":3,\"id\":\"01a1462a\",\"cwd\":\"{}\",\"title\":\"SPORE\"}}\n",
+            home.dir.display()
+        ),
+    )
+    .unwrap();
+    let note = record_note(&home, "spore", &file.display().to_string());
+    let body = std::fs::read_to_string(&note).unwrap().replace("\"kind\":\"claude\"", "\"kind\":\"omp\"");
+    std::fs::write(&note, body).unwrap();
+
+    let out = home
+        .warren("sleep 300")
+        .env("WARREN_OMP_HOME", &omp)
+        .arg("restore")
+        .output()
+        .unwrap();
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(said.contains("restored 'spore'"), "{said}");
+}
+
 /// The pid of an agent's daemon, for killing it the way a shutdown would.
 fn daemon_pid(name: &str) -> Option<String> {
     let out = Command::new("pgrep").args(["-f", &format!("__daemon {name} ")]).output().ok()?;

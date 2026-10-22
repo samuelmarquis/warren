@@ -410,8 +410,12 @@ pub fn restorable(live: &std::collections::HashSet<String>) -> Restorable {
             kind.sessions().into_iter().map(|s| s.id).collect()
         });
         // An empty store is "cannot tell" rather than "nothing is there":
-        // an unreadable ~/.claude must not throw a colony away.
-        if ids.is_empty() || ids.contains(&note.session) {
+        // an unreadable ~/.claude must not throw a colony away. OMP names a
+        // live agent's session by its file — that is what its tty row says,
+        // and so what the note keeps — while the store lists ids; either
+        // one still being there is the conversation still being there.
+        let on_disk = || Path::new(&note.session).is_file();
+        if ids.is_empty() || ids.contains(&note.session) || on_disk() {
             out.ready.push(note);
         } else {
             out.orphaned.push(note);
