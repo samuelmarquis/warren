@@ -17,6 +17,7 @@ warren \- a colony of Claude Code and OMP agents from one terminal
 .IR ARGS ]
 .RB [ \-\-title=\c
 .IR TITLE ]
+.RB [ \-\-matrix | \-\-no\-matrix ]
 .br
 .B warren ls
 .br
@@ -38,6 +39,10 @@ warren \- a colony of Claude Code and OMP agents from one terminal
 .IR ARGS ]
 .RB [ \-\-sys=\c
 .IR PROMPT ]
+.RB [ \-\-matrix=on | off ]
+.br
+.B warren join
+.I NAME ROOM
 .br
 .B warren attach
 .I NAME
@@ -97,6 +102,13 @@ extra arguments for its command line, and
 .B \-\-title
 the name it starts under (for Claude Code, as if by
 .BR /rename ).
+.B \-\-matrix
+and
+.B \-\-no\-matrix
+give it chat or not; without either, the
+.B newAgents
+setting decides (see
+.BR CHAT ).
 .TP
 .B warren ls
 List agents: slot, name, state and directory.
@@ -124,8 +136,10 @@ in
 .RB ( \-\-dir ,
 which must exist), its extra arguments
 .RB ( \-\-extra ),
-or its system prompt
-.RB ( \-\-sys ).
+its system prompt
+.RB ( \-\-sys ),
+or whether it has chat
+.RB ( \-\-matrix=on | off ).
 An empty
 .B \-\-extra=
 or
@@ -133,6 +147,14 @@ or
 clears it.
 Nothing restarts; sleep and wake a running agent to apply it.
 Agents whose daemon predates this command say so, and must be made again.
+.TP
+.BI "warren join " "NAME ROOM"
+Invite the agent to a Matrix room
+.RI ( #alias:server
+or
+.IR !room-id ),
+from warren's own account, which must be in that room.
+The agent must have claimed a chat name.
 .TP
 .BI "warren attach " NAME
 View one agent raw, with no sidebar.
@@ -227,13 +249,20 @@ would, on whichever machine it lives:
 or
 .BR sys .
 .B :set dir ~/Research/PLow
-moves it there from its next wake.
+moves it there from its next wake;
+.B :set matrix off
+starts it without chat.
 .B :set extra=
 or
 .B :set sys=
 clears it.
 .B :set
 alone shows where the agent runs.
+.TP
+.BI :join " ROOM"
+Invite the focused agent to a chat room, as
+.B warren join
+would.
 .TP
 .BI :color " INDEX\fR|\fP#RRGGBB"
 Recolour the focused agent.
@@ -293,6 +322,66 @@ Claude Code deletes transcripts older than
 (30 days by default) at startup.
 An agent left asleep longer than that has nothing to wake into; raise it in
 .IR ~/.claude/settings.json .
+.SH CHAT
+With
+.I ~/.warren/matrix.json
+present, agents get Matrix chat: each runs its own copy of matrix-channel,
+an MCP server that pushes messages into the session and offers
+.BR reply ,
+.BR react ,
+.BR send_file ,
+.B fetch_messages
+and
+.BR download .
+Claude Code takes it as a channel
+.RB ( \-\-dangerously\-load\-development\-channels ,
+approved at each start); OMP takes it through an extension built into
+warren, whose tools are named
+.BR matrix_reply ,
+and so on.
+.PP
+An agent has no account until it calls
+.B claim_name
+with a name it chooses, which makes
+.IR @name.machine .
+It joins no rooms by itself and accepts invites only from the
+.B inviters
+listed; it hears only
+.B allowedUsers
+and the members of the
+.BR rosterRoom ,
+which warren invites it to once it has a name.
+Messages from roster members are marked untrusted, and more than
+.B agentLoopCap
+of them in a row in one room, with nothing from a listed person between,
+are dropped.
+In rooms a message must mention the agent unless
+.B requireMention
+is false.
+.PP
+The keys:
+.B channel
+and
+.B python
+(what to run),
+.B machine
+(the last name),
+.BR env ,
+.BR homeserver ,
+.BR allowedUsers ,
+.BR inviters ,
+.BR rosterRoom ,
+.BR reserved ,
+.BR agentLoopCap ,
+.BR requireMention ,
+.B newAgents
+(do new agents get chat), and
+.B warrenAccount
+(a file with warren's own
+.B access_token
+and
+.BR homeserver ,
+used for invites).
 .SH ENVIRONMENT
 .TP
 .B WARREN_HOME
@@ -325,6 +414,17 @@ Claude Code hook settings, regenerated on spawn.
 .TP
 .I ~/.warren/hosts
 Other machines.
+.TP
+.I ~/.warren/matrix.json
+Chat setup; see
+.BR CHAT .
+.TP
+.I ~/.warren/matrix/NAME/
+One agent's chat channel: config, sync state, identity, and
+.IR channel.log .
+Archived under
+.I .ended/
+when the agent ends.
 .TP
 .I ~/.warren/ssh/
 Shared ssh connection sockets.

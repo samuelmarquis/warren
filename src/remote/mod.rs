@@ -141,12 +141,13 @@ impl Host {
         cmd
     }
 
-    /// `ssh … warren set NAME --KEY=VALUE` on that machine, which checks a
-    /// directory against its own disk and reads the change back from its own
-    /// daemon — neither of which can be done from here.
-    pub fn set_launch(&self, name: &str, flag: &str) -> Result<Child> {
+    /// `ssh … warren ARGS…` on that machine: `set`, which checks a directory
+    /// against its own disk and reads the change back from its own daemon,
+    /// and `join`, which needs that machine's chat setup — none of which can
+    /// be done from here.
+    pub fn run_warren(&self, args: &[&str]) -> Result<Child> {
         let child = self
-            .ssh(&["set", name, flag])
+            .ssh(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -182,6 +183,11 @@ impl Host {
         // A far side too old to know this flag skips it like any other.
         if let Some(title) = spec.title {
             args.push(format!("--title={title}"));
+        }
+        match spec.matrix {
+            Some(true) => args.push("--matrix".into()),
+            Some(false) => args.push("--no-matrix".into()),
+            None => {}
         }
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let child = self

@@ -101,6 +101,8 @@ pub struct DaemonArgs {
     /// The name someone typed for this agent, as they typed it — `name` is
     /// that made safe for a socket path, or a title warren came up with.
     pub title: Option<String>,
+    /// Give the agent Matrix chat (see `crate::matrix`).
+    pub matrix: bool,
 }
 
 impl DaemonArgs {
@@ -112,6 +114,7 @@ impl DaemonArgs {
             None => Kind::default(),
         };
         let asleep = rest.iter().any(|a| a == "--asleep");
+        let matrix = rest.iter().any(|a| a == "--matrix");
         let title = rest
             .iter()
             .find_map(|a| a.strip_prefix("--title="))
@@ -130,7 +133,7 @@ impl DaemonArgs {
             dir: pos[4].clone(),
             sid: pos.get(5).map(|s| s.to_string()),
             sys,
-            extra, asleep, title,
+            extra, asleep, title, matrix,
         })
     }
 }
@@ -150,6 +153,8 @@ struct Spawn {
     /// WARREN_AGENT_CMD (tests and tooling): used verbatim for every spawn,
     /// with no hooks wiring and no resume rewriting.
     custom: Option<String>,
+    /// Chat: the agent's own matrix channel, wired in on every start.
+    matrix: bool,
     shell: String,
     env: HashMap<String, String>,
 }
@@ -174,6 +179,15 @@ impl Spawn {
         if let Some(extra) = &self.extra {
             // User-authored args, passed through verbatim.
             cmd.push_str(&format!(" {extra}"));
+        }
+        if self.matrix {
+            // A start that cannot have the chat it was promised fails out
+            // loud, rather than come up quietly deaf.
+            let name = self.env.get("WARREN_AGENT").map(String::as_str).unwrap_or_default();
+            let flags = crate::matrix::launch_flags(self.kind, name)
+                .context("setting up chat (`:set matrix off` starts it without)")?;
+            cmd.push(' ');
+            cmd.push_str(&flags);
         }
         // Re-passed on every spawn: a resumed session does NOT inherit the
         // --settings of the run that created it, so the lifecycle hooks (and
@@ -304,6 +318,7 @@ pub fn run(args: DaemonArgs) -> Result<()> {
         extra: args.extra.clone(),
         title: args.title.clone(),
         custom: std::env::var("WARREN_AGENT_CMD").ok().filter(|c| !c.is_empty()),
+        matrix: args.matrix,
         shell: std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
         env,
     };
@@ -385,6 +400,9 @@ pub fn run(args: DaemonArgs) -> Result<()> {
     // Up: anything said on stderr from here on is not a reason it failed to
     // start, and the dashboard reads a non-empty file as exactly that.
     let _ = std::fs::remove_file(crate::paths::spawn_err(&args.name));
+    if args.matrix {
+        crate::matrix::watch_for_claim(args.name.clone());
+    }
     let status = daemon.event_loop()?;
     daemon.logf(&format!("agent exited with status {status}"));
 
@@ -405,6 +423,7 @@ pub fn run(args: DaemonArgs) -> Result<()> {
     // killed with its machine never reaches here, which is exactly what
     // makes the leftover notes mean what they mean.
     crate::record::forget(&args.name);
+    crate::matrix::retire(&args.name);
     Ok(())
 }
 
@@ -977,7 +996,7 @@ impl Daemon {
                 let update = ToClient::MetaChanged(self.meta.clone());
                 self.broadcast(&update);
             }
-            ToDaemon::SetLaunch { dir, extra, sys } => {
+            ToDaemon::SetLaunch { dir, extra, sys, matrix } => {
                 let given = |v: String| Some(v).filter(|v| !v.trim().is_empty());
                 if let Some(dir) = dir {
                     self.logf(&format!("launch dir: {dir}"));
@@ -991,6 +1010,13 @@ impl Daemon {
                 }
                 if let Some(sys) = sys {
                     self.spawn.sys = given(sys);
+                }
+                if let Some(on) = matrix {
+                    self.logf(&format!("chat: {}", if on { "on" } else { "off" }));
+                    self.spawn.matrix = on;
+                    if on {
+                        crate::matrix::watch_for_claim(self.meta.name.clone());
+                    }
                 }
                 // Now, not at the end of the turn: this is the note a restart
                 // brings the agent back from, and it is the reason to ask.
@@ -1165,6 +1191,7 @@ impl Daemon {
             kind: self.spawn.kind.as_str().to_string(),
             sys: self.spawn.sys.clone(),
             extra: self.spawn.extra.clone(),
+            matrix: self.spawn.matrix,
             session: self.sid.clone()?,
         })
     }
@@ -1446,6 +1473,7 @@ mod tests {
             extra: None,
             title: None,
             custom: None,
+            matrix: false,
             shell: "/bin/sh".into(),
             env: HashMap::new(),
         }

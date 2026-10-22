@@ -297,6 +297,10 @@ fn run_command(dash: &mut Dash, cmd: &str) -> Option<Outcome> {
         });
         return None;
     }
+    if cmd == "join" || cmd.starts_with("join ") {
+        forms::start_join(dash, cmd["join".len()..].trim());
+        return None;
+    }
     if cmd == "set" || cmd.starts_with("set ") {
         forms::start_set(dash, cmd["set".len()..].trim_start());
         return None;

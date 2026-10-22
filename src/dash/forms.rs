@@ -343,7 +343,7 @@ pub fn start_set(dash: &mut Dash, arg: &str) {
     let split = arg.find(|c: char| c == '=' || c.is_whitespace());
     let Some((key, value)) = split.map(|i| (&arg[..i], arg[i + 1..].trim_start())) else {
         dash.flash = Some(format!(
-            "runs in {} · :set dir PATH / extra ARGS / sys PROMPT (empty clears)",
+            "runs in {} · :set dir PATH / extra ARGS / sys PROMPT (empty clears) / matrix on|off",
             agent.meta.cwd
         ));
         return;
@@ -353,23 +353,44 @@ pub fn start_set(dash: &mut Dash, arg: &str) {
         "dir" if !value.starts_with('/') && !value.starts_with('~') => {
             format!("{}/{value}", agent.meta.cwd.trim_end_matches('/'))
         }
-        "dir" | "extra" | "sys" => value.to_string(),
+        "dir" | "extra" | "sys" | "matrix" => value.to_string(),
         other => {
-            dash.flash = Some(format!("can't :set {other} (dir, extra or sys)"));
+            dash.flash = Some(format!("can't :set {other} (dir, extra, sys or matrix)"));
             return;
         }
     };
-    if dash.set_job.is_some() {
-        dash.flash = Some("still setting the last one".into());
+    let flag = format!("--{}={value}", key.trim());
+    let name = agent.ident().1.to_string();
+    run_for_focused(dash, &["set", &name, &flag], &format!("setting {}", key.trim()));
+}
+
+/// `:join ROOM`: invite the focused agent to a chat room, from the machine it
+/// lives on — that machine holds its chat name and warren's account.
+pub fn start_join(dash: &mut Dash, room: &str) {
+    dash.status_dirty = true;
+    let Some(agent) = dash.focused() else { return };
+    if room.is_empty() {
+        dash.flash = Some(":join #room:server (or a !room-id) — invites the agent there".into());
         return;
     }
-    let flag = format!("--{}={value}", key.trim());
+    let name = agent.ident().1.to_string();
+    run_for_focused(dash, &["join", &name, room], &format!("inviting it to {room}"));
+}
+
+/// Run `warren ARGS…` on the focused agent's machine — here, or over its ssh
+/// connection — and flash what it says when it is done (`poll_set_job`).
+fn run_for_focused(dash: &mut Dash, args: &[&str], doing: &str) {
+    let Some(agent) = dash.focused() else { return };
+    if dash.set_job.is_some() {
+        dash.flash = Some("still on the last one".into());
+        return;
+    }
     let (host, name) = agent.ident();
     let (host, name) = (host.map(str::to_string), name.to_string());
     let started = match &host {
         None => std::env::current_exe().map_err(anyhow::Error::from).and_then(|exe| {
             std::process::Command::new(exe)
-                .args(["set", &name, &flag])
+                .args(args)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -379,15 +400,15 @@ pub fn start_set(dash: &mut Dash, arg: &str) {
         Some(dest) => match dash.hosts.get(dest) {
             None => Err(anyhow::anyhow!("{dest} is not in the hosts file")),
             Some(h) if !h.reachable() => Err(anyhow::anyhow!("{} is not answering", h.label)),
-            Some(h) => h.set_launch(&name, &flag),
+            Some(h) => h.run_warren(args),
         },
     };
     match started {
         Ok(child) => {
             dash.set_job = Some(Job::new(child, host.unwrap_or_else(|| "here".into())));
-            dash.flash = Some(format!("setting {} for '{name}'…", key.trim()));
+            dash.flash = Some(format!("{doing} for '{name}'…"));
         }
-        Err(e) => dash.flash = Some(format!("set failed: {e}")),
+        Err(e) => dash.flash = Some(format!("{e}")),
     }
 }
 
@@ -715,6 +736,8 @@ fn submit_new(dash: &mut Dash) {
         extra: (!extra.is_empty()).then_some(extra.as_str()),
         asleep: false,
         title: typed.as_deref(),
+        // The machine it runs on decides, from its own chat setup.
+        matrix: None,
     };
 
     let outcome = match &dest {

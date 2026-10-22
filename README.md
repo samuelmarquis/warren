@@ -117,14 +117,16 @@ programs.warren = {
 warren                 open the dashboard (rebuilds the view from running agents)
 warren new NAME [DIR] [COLOR 0-255] [new|resume|continue] [session-id]
            [--kind=claude|omp] [--sys=SYSTEM-PROMPT] [--extra=EXTRA-AGENT-ARGS]
+           [--matrix|--no-matrix]
 warren ls              list agents and their states
 warren kill NAME       terminate an agent
 warren sleep NAME      stop its claude process, keep the agent (resumable)
                        --force: even mid-turn
 warren wake NAME       start it again on the same conversation
-warren set NAME [--dir=DIR] [--extra=ARGS] [--sys=PROMPT]
+warren set NAME [--dir=DIR] [--extra=ARGS] [--sys=PROMPT] [--matrix=on|off]
                        change how an agent starts, from its next start on
                        (an empty --extra= or --sys= clears it)
+warren join NAME ROOM  invite an agent to a Matrix room (see Chat)
 warren attach NAME     view a single agent raw (no sidebar; Ctrl-\ detaches)
 warren restore [NAME]  bring back agents this machine lost when it stopped, asleep
 warren sessions [KIND] all resumable sessions (id, mtime, cwd, title) — claude, or omp
@@ -159,7 +161,7 @@ color-coded (CLAUDE orange, NORMAL green, EDIT purple):
 | `z` | sleep the agent (or wake a sleeping one) |
 | `Z` | sleep it even mid-turn, losing the turn (restart a stuck or updated claude) |
 | `x` | close agent (y/n confirm) |
-| `:` | command line — `:q` detach · `:q!` kill all · `:color #hex\|index` · `:set dir ~/x` · `:restore` |
+| `:` | command line — `:q` detach · `:q!` kill all · `:color #hex\|index` · `:set dir ~/x` · `:join #room` · `:restore` |
 
 `Ctrl-\` detaches from anywhere, and `Ctrl-Z` sleeps the focused agent from
 anywhere — it is never forwarded, because a terminal's own `^Z` is SUSP and
@@ -422,6 +424,60 @@ claude's error frozen on screen, rather than taking the tab down with it.
 Sleep is *not* persistence: agents still die with the machine. It buys memory
 back within a session, and the conversations were always resumable anyway.
 
+### Chat
+
+Agents can talk to you, and to each other, over Matrix — Claude Code and OMP
+alike, and anything else that speaks Matrix. warren is not the chat client:
+each agent runs its own copy of matrix-channel (from the IAI repo), an MCP server that pushes
+messages into the running session and gives the agent `reply`, `react`,
+`send_file`, `fetch_messages` and `download`. Claude Code takes it as a
+channel (you approve that each time the agent starts); OMP takes it through
+`omp/warren-matrix.ts`, an extension built into warren that does the same
+job. What warren adds is the part only it can: starting each agent's
+channel with it, and vouching for the agents it made.
+
+- **Agents name themselves.** A new agent has no account. When it wants one
+  it calls `claim_name`, which makes `@<name>.<machine>` — `@ada.smq`.
+- **Nobody reaches an agent but you**, unless you say so. It joins no rooms
+  by itself and accepts invites only from you and from warren's account.
+  `warren join NAME '#room:server'` (or `:join #room` in the dashboard)
+  invites it from warren's account, which must be in that room.
+- **Agents hear each other through the roster room.** When an agent claims a
+  name, warren invites it there; members are what the channel lets through
+  besides you, marked untrusted, and a run of more than six agent messages
+  in a room with nothing from you in between is cut off.
+- **A mention is needed** in rooms by default, or a room of agents would all
+  answer everything.
+
+It is all off until `~/.warren/matrix.json` exists:
+
+```json
+{
+  "channel": "/path/to/matrix_channel.py",
+  "python": "/usr/bin/python3",
+  "machine": "smq",
+  "env": { "SSL_CERT_FILE": "/etc/ssl/cert.pem" },
+  "homeserver": "https://matrix.example.org",
+  "allowedUsers": ["@you:example.org"],
+  "inviters": ["@you:example.org", "@warren:example.org"],
+  "rosterRoom": "!roster-room-id:example.org",
+  "reserved": ["you", "warren", "admin"],
+  "agentLoopCap": 6,
+  "requireMention": true,
+  "newAgents": true,
+  "warrenAccount": "~/.warren/matrix-warren.json"
+}
+```
+
+`newAgents` is whether agents made from now on get chat; `warren new
+--matrix`/`--no-matrix` and `:set matrix on|off` decide for one.
+`warrenAccount` is warren's own Matrix login (`access_token`, `homeserver`):
+the roster room should be invite-only with inviting and kicking above the
+default power level, or the channel refuses to trust it. An agent's channel
+state is in `~/.warren/matrix/NAME/`, with what the channel said in
+`channel.log`; ending the agent archives it, and the account stays taken.
+
+
 ### How agent states work
 
 This is Claude Code only; OMP agents fall back to the activity heuristic
@@ -452,6 +508,9 @@ socket, and it always exits 0 — a wedged daemon can never stall Claude.
 ~/.warren/hooks.json        Claude Code hook settings (regenerated on spawn)
 ~/.warren/hosts             optional: ssh destinations whose agents join the sidebar
 ~/.warren/ssh/              ssh's shared connection sockets, one per host
+~/.warren/matrix.json       optional: chat setup (see Chat)
+~/.warren/matrix/<name>/    one agent's chat channel: its config, state and log
+~/.warren/omp-warren-matrix.ts  the OMP chat extension (regenerated on spawn)
 ```
 
 That's everything warren writes — it only ever reads `~/.claude` and

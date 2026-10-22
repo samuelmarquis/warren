@@ -18,6 +18,7 @@ mod daemon;
 mod dash;
 mod hooks;
 mod kind;
+mod matrix;
 mod names;
 mod paths;
 mod proto;
@@ -39,8 +40,9 @@ warren - a Claude Code agent multiplexer
                          stop the agent's claude process, keep the agent
                          (--force: even mid-turn, losing the turn)
   warren wake NAME       start it again on the same conversation
-  warren set NAME [--dir=DIR] [--extra=ARGS] [--sys=PROMPT]
+  warren set NAME [--dir=DIR] [--extra=ARGS] [--sys=PROMPT] [--matrix=on|off]
                          change how an agent starts, from its next start on
+  warren join NAME ROOM  invite an agent to a Matrix room (chat; see man warren)
   warren attach NAME     view a single agent raw (no sidebar)
   warren restore [NAME]  bring back agents this machine lost when it stopped (asleep)
   warren sessions [KIND] list resumable sessions (claude, or omp)
@@ -63,6 +65,7 @@ fn main() {
         "sleep" => cli::cmd_power(rest, false),
         "wake" => cli::cmd_power(rest, true),
         "set" => cli::cmd_set(rest),
+        "join" => cli::cmd_join(rest),
         "attach" => cli::cmd_attach(rest),
         "restore" => cli::cmd_restore(rest),
         "sessions" => sessions::cmd_sessions(rest),

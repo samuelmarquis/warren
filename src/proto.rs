@@ -190,7 +190,14 @@ pub enum ToDaemon {
     /// runs in, the extra args on its command line, its system prompt. Each
     /// `None` is left as it is; `Some("")` clears extra args or a prompt.
     /// Nothing restarts — a running agent picks these up when it next wakes.
-    SetLaunch { dir: Option<String>, extra: Option<String>, sys: Option<String> },
+    /// `matrix` turns the agent's chat on or off; absent from older senders.
+    SetLaunch {
+        dir: Option<String>,
+        extra: Option<String>,
+        sys: Option<String>,
+        #[serde(default)]
+        matrix: Option<bool>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

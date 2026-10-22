@@ -2810,3 +2810,97 @@ fn the_form_gives_up_on_an_agent_that_cannot_start() {
     });
     assert!(said.is_some(), "the status bar says why: {:#?}", grid.borrow());
 }
+
+/// Chat is wired into the harness's own command line, not faked: a pretend
+/// `claude` and `omp` on PATH write down what they were started with. With a
+/// chat setup on the machine, a new agent gets its own channel — its config,
+/// who may reach it, the MCP file that runs it — and Claude Code is told to
+/// take it as a channel; OMP gets the extension instead.
+#[test]
+fn chat_is_wired_into_each_harness() {
+    let home = TestHome::new("chat");
+    let bin = home.dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for h in ["claude", "omp"] {
+        let script = bin.join(h);
+        std::fs::write(&script, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$WARREN_HOME/argv-$WARREN_AGENT\"\nexec sleep 300\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::write(
+        home.dir.join("matrix.json"),
+        r#"{"channel": "/opt/matrix_channel.py", "python": "/usr/bin/python3", "machine": "smq",
+            "allowedUsers": ["@sam:x", "@*:x"], "inviters": ["@sam:x", "@warren:x"],
+            "rosterRoom": "!roster:x", "reserved": ["sam"]}"#,
+    )
+    .unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let new = |args: &[&str]| {
+        let out = Command::new(BIN)
+            .env("WARREN_HOME", &home.dir)
+            .env("PATH", &path)
+            .env_remove("WARREN_AGENT_CMD")
+            .arg("new")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    };
+    let argv = |name: &str| {
+        let file = home.dir.join(format!("argv-{name}"));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !file.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::fs::read_to_string(&file).unwrap_or_default()
+    };
+    let work = home.dir.join("work");
+    let work = work.to_str().unwrap();
+
+    // Claude Code: its own MCP file, and that server loaded as a channel.
+    new(&["chatty", work]);
+    let said = argv("chatty");
+    let mcp = home.dir.join("matrix/chatty/mcp.json");
+    assert!(said.contains(mcp.to_str().unwrap()), "{said}");
+    assert!(said.contains("server:warren-matrix"), "{said}");
+    let channel: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(home.dir.join("matrix/chatty/config.json")).unwrap()).unwrap();
+    assert_eq!(channel["claim"]["machine"], "smq");
+    assert_eq!(channel["rosterRoom"], "!roster:x");
+    assert_eq!(channel["roomDefaults"]["requireMention"], true, "agents need a mention by default");
+    assert_eq!(channel["approvers"], serde_json::json!(["@sam:x"]), "a pattern never approves");
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&home.dir.join("matrix/chatty")), 0o700);
+    assert_eq!(mode(&home.dir.join("matrix/chatty/config.json")), 0o600);
+
+    // OMP: the extension, from the copy built into warren.
+    new(&["ompy", work, "--kind=omp"]);
+    let said = argv("ompy");
+    let ext = home.dir.join("omp-warren-matrix.ts");
+    assert!(said.contains(ext.to_str().unwrap()), "{said}");
+    assert_eq!(
+        std::fs::read_to_string(&ext).unwrap(),
+        include_str!("../omp/warren-matrix.ts")
+    );
+
+    // Off for one agent, and nothing of chat on its command line.
+    new(&["quiet", work, "--no-matrix"]);
+    let said = argv("quiet");
+    assert!(!said.contains("warren-matrix") && !said.contains("mcp-config"), "{said}");
+
+    // No name claimed yet: nothing to invite.
+    let out = home.warren("x").args(["join", "chatty", "#lab:x"]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no chat name yet"));
+
+    // Ending the agent retires its chat state, so a later agent given the
+    // same warren name does not wake up as this one.
+    kill_via_socket(&home.sock("chatty")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while home.dir.join("matrix/chatty").exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!home.dir.join("matrix/chatty").exists(), "retired");
+    assert_eq!(std::fs::read_dir(home.dir.join("matrix/.ended")).unwrap().count(), 1);
+}

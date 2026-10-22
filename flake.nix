@@ -22,7 +22,7 @@
             # Only what a build reads: a README or a note must not invalidate it.
             src = lib.fileset.toSource {
               root = ./.;
-              fileset = lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./src ./tests ./man ];
+              fileset = lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./src ./tests ./man ./omp ];
             };
 
             cargoLock.lockFile = ./Cargo.lock;

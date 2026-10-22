@@ -29,6 +29,9 @@ pub struct Record {
     pub kind: String,
     pub sys: Option<String>,
     pub extra: Option<String>,
+    /// Had chat on. Older notes have no such key, and those agents had none.
+    #[serde(default)]
+    pub matrix: bool,
     /// The conversation to come back to. An agent with none is not written
     /// down at all: there would be nothing to restore but a name.
     pub session: String,

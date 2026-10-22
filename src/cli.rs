@@ -86,6 +86,14 @@ pub fn cmd_new(args: &[String]) -> Result<()> {
     let sys = args.iter().find_map(|a| a.strip_prefix("--sys="));
     let extra = args.iter().find_map(|a| a.strip_prefix("--extra="));
     let title = args.iter().find_map(|a| a.strip_prefix("--title="));
+    // Neither: whatever this machine's chat setup says new agents get.
+    let matrix = if args.iter().any(|a| a == "--matrix") {
+        Some(true)
+    } else if args.iter().any(|a| a == "--no-matrix") {
+        Some(false)
+    } else {
+        None
+    };
     let kind = match args.iter().find_map(|a| a.strip_prefix("--kind=")) {
         Some(k) => Kind::parse(k).with_context(|| format!("unknown agent kind '{k}'"))?,
         None => Kind::default(),
@@ -96,7 +104,7 @@ pub fn cmd_new(args: &[String]) -> Result<()> {
         bail!(
             "usage: warren new NAME [DIR] [COLOR 0-255] [new|resume|continue|fork] [session-id] \
              [--kind=claude|omp] [--title=SESSION-NAME] [--sys=SYSTEM-PROMPT] \
-             [--extra=EXTRA-AGENT-ARGS]"
+             [--extra=EXTRA-AGENT-ARGS] [--matrix|--no-matrix]"
         );
     };
     let base = crate::names::sanitize(raw);
@@ -131,6 +139,7 @@ pub fn cmd_new(args: &[String]) -> Result<()> {
             extra,
             asleep: false,
             title,
+            matrix,
         },
         &live,
     )?;
@@ -168,6 +177,8 @@ pub struct NewAgent<'a> {
     /// The name as someone typed it, when someone did: the session starts
     /// under it rather than under whatever the harness would call itself.
     pub title: Option<&'a str>,
+    /// Chat on or off; None leaves it to this machine's setup.
+    pub matrix: Option<bool>,
 }
 
 /// Pick a unique name and free slot against `live` (name, slot) pairs and
@@ -210,6 +221,9 @@ fn spawn_daemon(name: &str, slot: u8, spec: &NewAgent) -> Result<()> {
     }
     if let Some(title) = spec.title {
         cmd.arg(format!("--title={title}"));
+    }
+    if spec.matrix.unwrap_or_else(crate::matrix::on_by_default) {
+        cmd.arg("--matrix");
     }
     unsafe {
         cmd.pre_exec(|| {
@@ -464,6 +478,7 @@ pub fn restore_agent(note: &crate::record::Record) -> Result<String> {
         asleep: true,
         // Its name is already in the conversation it resumes.
         title: None,
+        matrix: Some(note.matrix),
     };
     // Its own name and its own slot: a restored colony comes back in the
     // order it was in, not in the order the notes were read.
@@ -643,14 +658,23 @@ pub fn cmd_power(args: &[String], wake: bool) -> Result<()> {
 /// where it ran: pointing the agent at an empty new directory would only
 /// make it resume into nothing.
 pub fn cmd_set(args: &[String]) -> Result<()> {
-    let usage = "usage: warren set NAME [--dir=DIR] [--extra=ARGS] [--sys=PROMPT]  \
+    let usage = "usage: warren set NAME [--dir=DIR] [--extra=ARGS] [--sys=PROMPT] [--matrix=on|off]  \
                  (an empty --extra= or --sys= clears it)";
     let Some(raw) = args.iter().find(|a| !a.starts_with("--")) else { bail!(usage) };
     let name = named(raw)?;
     let flag = |f: &str| args.iter().find_map(|a| a.strip_prefix(f)).map(str::to_string);
     let (dir, extra, sys) = (flag("--dir="), flag("--extra="), flag("--sys="));
-    if dir.is_none() && extra.is_none() && sys.is_none() {
+    let matrix = match flag("--matrix=").as_deref().map(str::trim) {
+        None => None,
+        Some("on" | "yes" | "true" | "1") => Some(true),
+        Some("off" | "no" | "false" | "0") => Some(false),
+        Some(other) => bail!("--matrix is on or off, not '{other}'"),
+    };
+    if dir.is_none() && extra.is_none() && sys.is_none() && matrix.is_none() {
         bail!(usage);
+    }
+    if matrix == Some(true) && crate::matrix::config()?.is_none() {
+        bail!("chat is not set up on this machine: no {}", crate::matrix::config_path().display());
     }
     let dir = match dir {
         None => None,
@@ -669,7 +693,7 @@ pub fn cmd_set(args: &[String]) -> Result<()> {
         query_agent(&sock).with_context(|| format!("no live agent named '{name}'"))?;
     let mut stream = UnixStream::connect(&sock)?;
     stream.set_write_timeout(Some(Duration::from_millis(500)))?;
-    let msg = ToDaemon::SetLaunch { dir: dir.clone(), extra: extra.clone(), sys: sys.clone() };
+    let msg = ToDaemon::SetLaunch { dir: dir.clone(), extra: extra.clone(), sys: sys.clone(), matrix };
     stream.write_all(&proto::encode_frame(&msg)?)?;
     drop(stream);
 
@@ -690,6 +714,7 @@ pub fn cmd_set(args: &[String]) -> Result<()> {
             dir.as_ref().is_none_or(|d| &n.cwd == d)
                 && (extra.is_none() || n.extra == given(&extra))
                 && (sys.is_none() || n.sys == given(&sys))
+                && matrix.is_none_or(|m| n.matrix == m)
         });
         if cwd_ok && note_ok {
             break note.is_some() || dir.is_some();
@@ -712,6 +737,7 @@ pub fn cmd_set(args: &[String]) -> Result<()> {
             Some(_) => "a new system prompt".to_string(),
             None => "no system prompt".to_string(),
         }),
+        matrix.map(|m| if m { "chat on".to_string() } else { "chat off".to_string() }),
     ]
     .into_iter()
     .flatten()
@@ -921,4 +947,17 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
+}
+
+// ----------------------------------------------------------------------- join
+
+/// `warren join NAME ROOM`: invite the agent to a chat room, from warren's
+/// own account. The agent must have claimed a name first.
+pub fn cmd_join(args: &[String]) -> Result<()> {
+    let (Some(raw), Some(room)) = (args.first(), args.get(1)) else {
+        bail!("usage: warren join NAME ROOM  (a #alias:server or a !room-id)");
+    };
+    let name = named(raw)?;
+    println!("warren: {}", crate::matrix::join(name, room.trim())?);
+    Ok(())
 }
