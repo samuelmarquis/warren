@@ -30,12 +30,19 @@ let instructions = "";
 let nextId = 1;
 const waiting = new Map<number, Pending>();
 
+/** The agent's channel profile, worked out as warren's `matrix::profile`
+ *  does: the channel takes only lowercase names. */
+function profile(agent: string): string {
+	const p = agent.toLowerCase().replace(/[^a-z0-9._-]/g, "-");
+	return /^[a-z0-9]/.test(p) ? p : `w${p}`;
+}
+
 function readSpec(): Spec | undefined {
 	const agent = process.env.WARREN_AGENT;
 	if (!agent) return undefined;
 	const home = process.env.WARREN_HOME || join(homedir(), ".warren");
 	try {
-		const mcp = JSON.parse(readFileSync(join(home, "matrix", agent, "mcp.json"), "utf8"));
+		const mcp = JSON.parse(readFileSync(join(home, "matrix", profile(agent), "mcp.json"), "utf8"));
 		return mcp?.mcpServers?.[SERVER];
 	} catch {
 		return undefined;

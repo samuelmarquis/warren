@@ -110,9 +110,25 @@ pub fn on_by_default() -> bool {
     matches!(config(), Ok(Some(c)) if c.new_agents)
 }
 
+/// The channel's name for an agent's state: its profile. The channel takes
+/// only lowercase letters, digits, `.`, `_` and `-`, starting with a letter or
+/// digit, and agent names are not so tame (DESIGN, Mentor). The OMP extension
+/// works this out the same way.
+pub fn profile(name: &str) -> String {
+    let mut out: String = name
+        .chars()
+        .map(|c| c.to_ascii_lowercase())
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '-' })
+        .collect();
+    if !out.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+        out.insert(0, 'w');
+    }
+    out
+}
+
 /// One agent's channel state: its config, sync token, identity, log.
 pub fn agent_dir(name: &str) -> PathBuf {
-    crate::paths::home().join("matrix").join(name)
+    crate::paths::home().join("matrix").join(profile(name))
 }
 
 /// The command-line flags that give this agent its channel, writing the
@@ -177,7 +193,7 @@ fn write_agent_files(cfg: &Config, name: &str) -> Result<PathBuf> {
                 "command": "/bin/sh",
                 "args": [
                     "-c", r#"exec "$0" -I "$1" --profile "$2" 2>>"$3""#,
-                    cfg.python, cfg.channel, name,
+                    cfg.python, cfg.channel, profile(name),
                     dir.join("channel.log").display().to_string(),
                 ],
                 "env": env,
@@ -241,7 +257,7 @@ pub fn retire(name: &str) {
         .unwrap_or(0);
     let ended = crate::paths::home().join("matrix").join(".ended");
     if std::fs::create_dir_all(&ended).is_ok() {
-        let _ = std::fs::rename(&dir, ended.join(format!("{name}-{stamp}")));
+        let _ = std::fs::rename(&dir, ended.join(format!("{}-{stamp}", profile(name))));
     }
 }
 
@@ -404,6 +420,14 @@ mod tests {
     fn room_ids_and_aliases_are_one_path_segment() {
         assert_eq!(encode("!abc:immanence.institute"), "%21abc%3Aimmanence.institute");
         assert_eq!(encode("#open-plugins:x"), "%23open-plugins%3Ax");
+    }
+
+    #[test]
+    fn every_agent_name_makes_a_profile_the_channel_takes() {
+        assert_eq!(profile("DESIGN"), "design");
+        assert_eq!(profile("SPORK-Terrain"), "spork-terrain");
+        assert_eq!(profile("open-eq"), "open-eq");
+        assert_eq!(profile("_x"), "w_x");
     }
 
     #[test]
