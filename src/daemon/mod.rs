@@ -382,6 +382,9 @@ pub fn run(args: DaemonArgs) -> Result<()> {
         noted: None,
     };
 
+    // Up: anything said on stderr from here on is not a reason it failed to
+    // start, and the dashboard reads a non-empty file as exactly that.
+    let _ = std::fs::remove_file(crate::paths::spawn_err(&args.name));
     let status = daemon.event_loop()?;
     daemon.logf(&format!("agent exited with status {status}"));
 

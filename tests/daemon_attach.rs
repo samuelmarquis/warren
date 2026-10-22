@@ -2763,3 +2763,50 @@ fn set_changes_how_an_agent_next_starts() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(read_note().contains("\"extra\": null"), "{}", read_note());
 }
+
+/// A daemon that dies before it is listening says why, instead of leaving
+/// `warren new` (or the form) waiting on a socket that will never answer. A
+/// directory squatting on the socket's path is a start that cannot work.
+#[test]
+fn a_daemon_that_cannot_start_says_why() {
+    let home = TestHome::new("nostart");
+    std::fs::create_dir_all(home.sock("doomed").join("in-the-way")).unwrap();
+    let started = Instant::now();
+    let out = home.warren("sleep 300").args(["new", "doomed", home.dir.to_str().unwrap()]).output().unwrap();
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(said.contains("did not start") && said.contains("binding"), "{said}");
+    assert!(started.elapsed() < Duration::from_secs(2), "it did not wait out the clock");
+    assert!(!home.dir.join("run").join("doomed.err").exists(), "the reason is read once");
+}
+
+/// The form does the same: "creating agent…" turns into the reason, rather
+/// than staying up for an agent that is never coming.
+#[test]
+fn the_form_gives_up_on_an_agent_that_cannot_start() {
+    let inner = TestHome::new("formdoom");
+    new_agent_in(&inner, "keeper", &inner.dir.join("Burrow"), "printf 'here\\r\\n'; sleep 300");
+    std::fs::create_dir_all(inner.sock("doomed").join("in-the-way")).unwrap();
+
+    let outer = TestHome::new("formdoomout");
+    let dash_cmd = format!("WARREN_HOME={} {} up", inner.dir.display(), BIN);
+    new_agent(&outer, "dash", &dash_cmd);
+    let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 20);
+    let grid = std::cell::RefCell::new(Vec::<String>::new());
+    apply_frame(&grid, &snap);
+    let up = viewer.await_frame(15_000, |m| {
+        apply_frame(&grid, m);
+        grid.borrow().iter().any(|r| r.contains("here"))
+    });
+    assert!(up.is_some(), "the dashboard is up: {:?}", grid.borrow().clone());
+
+    // ^Space n, Tab past Kind and Mode to Title, name it, Tab to Root, Enter.
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x00n")));
+    std::thread::sleep(Duration::from_millis(300));
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"\t\tdoomed\t\r")));
+    let said = viewer.await_frame(10_000, |m| {
+        apply_frame(&grid, m);
+        grid.borrow().iter().any(|r| r.contains("did not start") && r.contains("binding"))
+    });
+    assert!(said.is_some(), "the status bar says why: {:#?}", grid.borrow());
+}

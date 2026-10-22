@@ -313,6 +313,10 @@ A file each daemon appends a debug log to.
 .I ~/.warren/run/NAME.sock
 One unix socket per live agent.
 .TP
+.I ~/.warren/run/NAME.err
+Why an agent's daemon died before it was listening; read and removed by
+whoever was waiting for it.
+.TP
 .I ~/.warren/notes/NAME.json
 What an agent was, for restoring it.
 .TP

@@ -65,7 +65,7 @@ pub struct Dash {
     /// The agent the form just asked for — (machine, name) — to focus the
     /// moment it shows up. A name alone would be ambiguous now that two
     /// machines can each have one.
-    pub pending_focus: Option<(Option<String>, String)>,
+    pub pending_focus: Option<Pending>,
     /// A `warren new` running on another machine, waiting to be reaped.
     pub spawn_job: Option<forms::Job>,
     /// A `:set` — `warren set`, here or one hop away — waiting to be reaped.
@@ -694,6 +694,7 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
 
         reap_agents(&mut dash, &poller);
         forms::poll_jobs(&mut dash);
+        give_up_on_pending(&mut dash);
         update_busy_transitions(&mut dash);
         update_write_interest(&dash, &poller);
 
@@ -737,7 +738,7 @@ pub fn focus_when_it_arrives(dash: &mut Dash, host: Option<String>, name: String
             dash.agents[idx].full_dirty = true;
             dash.enter_insert();
         }
-        None => dash.pending_focus = Some((host, name)),
+        None => dash.pending_focus = Some(Pending { host, name, since: Instant::now() }),
     }
 }
 
@@ -745,13 +746,51 @@ impl Dash {
     /// Was this agent the one the form was waiting for? Clears the wait.
     fn claim_pending(&mut self, host: Option<&str>, name: &str) -> bool {
         match &self.pending_focus {
-            Some((h, n)) if h.as_deref() == host && n == name => {
+            Some(p) if p.host.as_deref() == host && p.name == name => {
                 self.pending_focus = None;
                 true
             }
             _ => false,
         }
     }
+}
+
+/// An agent the form asked for and has not seen yet.
+pub struct Pending {
+    pub host: Option<String>,
+    pub name: String,
+    pub since: Instant,
+}
+
+/// How long the form waits for an agent it asked for before it gives up and
+/// says so. Every daemon is listening well inside a second; this is slack for
+/// a loaded machine or a slow roster over ssh.
+const PENDING_PATIENCE: Duration = Duration::from_secs(15);
+
+/// Give up on an agent that is not coming: say why when the daemon left a
+/// reason (a local one that died starting), or that it never showed, rather
+/// than leave "creating agent…" up forever.
+pub fn give_up_on_pending(dash: &mut Dash) {
+    let Some(p) = dash.pending_focus.as_ref() else { return };
+    let died = match p.host {
+        None => crate::cli::start_failure(&p.name),
+        Some(_) => None,
+    };
+    let why = match died {
+        Some(why) => format!("'{}' did not start: {why}", p.name),
+        None if p.since.elapsed() < PENDING_PATIENCE => return,
+        None => match &p.host {
+            None => format!("'{}' never came up (WARREN_LOG=file to see why)", p.name),
+            Some(dest) => format!("'{}' never showed up on {}", p.name, host_label(dash, dest)),
+        },
+    };
+    dash.pending_focus = None;
+    dash.flash = Some(why);
+    dash.status_dirty = true;
+}
+
+fn host_label(dash: &Dash, dest: &str) -> String {
+    dash.hosts.get(dest).map(|h| h.label.clone()).unwrap_or_else(|| dest.to_string())
 }
 
 /// Connect any run-dir socket we aren't already attached to.

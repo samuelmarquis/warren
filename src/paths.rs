@@ -49,6 +49,12 @@ pub fn sock_path(name: &str) -> PathBuf {
     run_dir().join(format!("{name}.sock"))
 }
 
+/// Where a daemon's stderr goes until its socket is up: a daemon that dies
+/// before that leaves its reason here, and nowhere else.
+pub fn spawn_err(name: &str) -> PathBuf {
+    run_dir().join(format!("{name}.err"))
+}
+
 pub fn hooks_json() -> PathBuf {
     home().join("hooks.json")
 }

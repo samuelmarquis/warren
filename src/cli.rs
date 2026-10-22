@@ -143,6 +143,9 @@ pub fn cmd_new(args: &[String]) -> Result<()> {
             println!("warren: created agent '{name}'");
             return Ok(());
         }
+        if let Some(why) = start_failure(&name) {
+            bail!("agent '{name}' did not start: {why}");
+        }
         std::thread::sleep(Duration::from_millis(25));
     }
     bail!("agent '{name}' did not come up (set WARREN_LOG=/tmp/warren.log and retry to debug)");
@@ -190,7 +193,7 @@ fn spawn_daemon(name: &str, slot: u8, spec: &NewAgent) -> Result<()> {
         .arg(dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(start_log(name))
         .current_dir("/");
     if let Some(sid) = sid {
         cmd.arg(sid);
@@ -218,6 +221,28 @@ fn spawn_daemon(name: &str, slot: u8, spec: &NewAgent) -> Result<()> {
     }
     cmd.spawn().context("spawning agent daemon")?;
     Ok(())
+}
+
+/// Somewhere for a daemon to say why it could not start. It removes the file
+/// once its socket is up, so a file with words in it means a daemon that died.
+fn start_log(name: &str) -> std::process::Stdio {
+    let made = crate::paths::ensure_run_dir()
+        .and_then(|_| Ok(std::fs::File::create(crate::paths::spawn_err(name))?));
+    match made {
+        Ok(file) => file.into(),
+        Err(_) => std::process::Stdio::null(),
+    }
+}
+
+/// Why the daemon for `name` died before its socket came up, if it did. The
+/// reason is read once: the file goes with it.
+pub fn start_failure(name: &str) -> Option<String> {
+    let path = crate::paths::spawn_err(name);
+    let said = std::fs::read_to_string(&path).ok()?;
+    let why = said.lines().rev().map(str::trim).find(|l| !l.is_empty())?;
+    let why = why.strip_prefix("warren: ").unwrap_or(why).to_string();
+    let _ = std::fs::remove_file(&path);
+    Some(why)
 }
 
 /// What someone typed, as the absolute path it means here: `~` and `~/…` are
