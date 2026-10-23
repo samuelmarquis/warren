@@ -4122,7 +4122,11 @@ fn an_agent_started_from_inside_claude_code_is_not_a_child_session() {
         .args(["new", "kid", home.dir.join("w").to_str().unwrap()])
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let deadline = Instant::now() + Duration::from_secs(5);
     while !seen.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));

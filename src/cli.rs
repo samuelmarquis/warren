@@ -267,10 +267,19 @@ fn spawn_daemon(name: &str, slot: u8, spec: &NewAgent) -> Result<()> {
             if libc::setsid() == -1 {
                 return Err(std::io::Error::last_os_error());
             }
-            Ok(())
+            // And out from under whatever ran this: the daemon is a
+            // grandchild, so a supervisor that kills our process tree on
+            // its way out (a Claude Code task being stopped) leaves it be.
+            // The middle process goes at once; the daemon goes on to exec.
+            match libc::fork() {
+                -1 => Err(std::io::Error::last_os_error()),
+                0 => Ok(()),
+                _ => libc::_exit(0),
+            }
         });
     }
-    cmd.spawn().context("spawning agent daemon")?;
+    let mut child = cmd.spawn().context("spawning agent daemon")?;
+    let _ = child.wait(); // the middle process, gone already
     Ok(())
 }
 
