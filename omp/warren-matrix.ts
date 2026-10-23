@@ -158,7 +158,7 @@ export default function warrenMatrix(pi: ExtensionAPI) {
 			systemPromptAppend:
 				`\n# Matrix chat\n${instructions}\n` +
 				"In this session the chat tools are named matrix_claim_name, matrix_reply, matrix_react, " +
-				"matrix_send_file, matrix_fetch_messages, matrix_download and matrix_set_avatar.\n",
+				"matrix_send_file, matrix_fetch_messages, matrix_download, matrix_set_avatar and matrix_search.\n",
 		};
 	});
 
@@ -227,6 +227,19 @@ export default function warrenMatrix(pi: ExtensionAPI) {
 		z.object({
 			path: z.string().describe("Local image file (png, jpeg, gif, webp, ...)").optional(),
 			mxc: z.string().describe("An mxc://server/id URI").optional(),
+		}),
+	);
+	tool(
+		"search",
+		"Full-text search of message history in the rooms this channel listens in (and the roster room), newest " +
+			"first. Each hit has its event_id, so you can cite it or reply_to it.",
+		z.object({
+			query: z.string().describe("Words to search for"),
+			room: z.string().describe("Only this room (id, alias or bare name); default: all of them").optional(),
+			sender: z.string().describe("Only messages from this user id (@name:server)").optional(),
+			since: z.string().describe("ISO date or datetime (UTC if no offset), inclusive").optional(),
+			until: z.string().describe("ISO date or datetime; a bare date includes that whole day").optional(),
+			limit: z.number().int().min(1).max(50).optional(),
 		}),
 	);
 }
