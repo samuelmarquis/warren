@@ -80,6 +80,20 @@ const SESSION_PROBE_EVERY: Duration = Duration::from_millis(300);
 const SESSION_PROBE_FOR: Duration = Duration::from_secs(20);
 /// How often an awake agent is checked for work left running after its turn.
 const BACKGROUND_EVERY: Duration = Duration::from_secs(3);
+/// Claude Code repaints at least every second all through a turn (the
+/// spinner and its timer run even while a tool is silent). A "working" hook
+/// with the screen this still for this long is a report that outlived its
+/// turn: some hook landed after the Stop that ended it.
+const STALE_WORKING: Duration = Duration::from_secs(15);
+
+/// STALE_WORKING, or WARREN_STALE_WORKING_MS (tests).
+fn stale_working() -> Duration {
+    std::env::var("WARREN_STALE_WORKING_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(STALE_WORKING)
+}
 
 /// Keystrokes buffered for a sleeping agent (typing at one wakes it, and the
 /// bytes land in the resumed prompt). Bounded: a stuck wake must not grow a
@@ -1336,6 +1350,12 @@ impl Daemon {
         let Some(at) = self.background_at else { return };
         if Instant::now() < at {
             return;
+        }
+        if self.hook == Some(HookState::Working) && self.last_output.elapsed() >= stale_working() {
+            self.logf("hook: working, but the screen has been still; taking the turn as over");
+            self.hook = Some(HookState::Waiting);
+            let update = ToClient::StateChanged(self.state());
+            self.broadcast(&update);
         }
         let now = if self.power == Power::Awake && self.pty.is_some() {
             self.background_at = Some(Instant::now() + BACKGROUND_EVERY);

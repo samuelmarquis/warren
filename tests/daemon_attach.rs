@@ -4024,3 +4024,41 @@ fn work_left_running_after_a_turn_shows_in_ls_and_the_sidebar() {
         sidebar_of(&grid)
     );
 }
+
+#[test]
+fn a_working_report_on_a_still_screen_goes_stale() {
+    let home = TestHome::new("stale");
+    let out = home
+        .warren("sleep 300")
+        .env("WARREN_STALE_WORKING_MS", "1000")
+        .args(["new", "late", home.dir.join("w").to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // A "working" that lands after the turn's Stop, and then nothing.
+    let mut hook = Command::new(BIN)
+        .env("WARREN_SOCK", home.sock("late"))
+        .args(["hook", "working"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"session_id":"conv-3"}"#)
+        .unwrap();
+    assert!(hook.wait().unwrap().success());
+    let ls = || {
+        String::from_utf8_lossy(&home.warren("x").arg("ls").output().unwrap().stdout).into_owned()
+    };
+    assert!(ls().contains("working"), "{}", ls());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while ls().contains("working") && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(ls().contains("waiting"), "taken as over: {}", ls());
+}
