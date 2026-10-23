@@ -98,14 +98,66 @@ pub fn name(pid: i32) -> String {
         .unwrap_or_default()
 }
 
+/// Whether a Claude session's transcript says its last turn is over: an
+/// end-of-turn record (the Stop hook's summary, or the turn's duration)
+/// after the last message. A turn stopped on a permission prompt or a
+/// question has a tool call with nothing after it, and is not over. No
+/// transcript, or one that can't be read, is not evidence either way, so
+/// it says no.
+pub fn turn_ended(session: &str) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Some(path) = transcript(session) else {
+        return false;
+    };
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(256 * 1024);
+    let mut tail = Vec::new();
+    if f.seek(SeekFrom::Start(start)).is_err() || f.read_to_end(&mut tail).is_err() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&tail);
+    let mut lines = text.lines();
+    if start > 0 {
+        lines.next(); // cut mid-record
+    }
+    for line in lines.collect::<Vec<_>>().into_iter().rev() {
+        let Ok(rec) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        match (
+            rec.get("type").and_then(|v| v.as_str()),
+            rec.get("subtype").and_then(|v| v.as_str()),
+        ) {
+            (Some("system"), Some("stop_hook_summary" | "turn_duration")) => return true,
+            (Some("user" | "assistant"), _) => return false,
+            _ => continue,
+        }
+    }
+    false
+}
+
+fn claude_projects() -> PathBuf {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude"))
+        .join("projects")
+}
+
+fn transcript(session: &str) -> Option<PathBuf> {
+    std::fs::read_dir(claude_projects())
+        .ok()?
+        .flatten()
+        .map(|p| p.path().join(format!("{session}.jsonl")))
+        .find(|p| p.is_file())
+}
+
 /// Claude Code writes each subagent's transcript under
 /// `projects/<project>/<session>/subagents/` as it goes.
 fn subagent_live(session: &str) -> bool {
-    let root = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude"))
-        .join("projects");
-    let Ok(projects) = std::fs::read_dir(root) else {
+    let Ok(projects) = std::fs::read_dir(claude_projects()) else {
         return false;
     };
     let now = SystemTime::now();

@@ -4026,39 +4026,86 @@ fn work_left_running_after_a_turn_shows_in_ls_and_the_sidebar() {
 }
 
 #[test]
-fn a_working_report_on_a_still_screen_goes_stale() {
+fn a_working_report_on_a_still_screen_goes_stale_once_the_turn_is_over() {
     let home = TestHome::new("stale");
-    let out = home
-        .warren("sleep 300")
-        .env("WARREN_STALE_WORKING_MS", "1000")
-        .args(["new", "late", home.dir.join("w").to_str().unwrap()])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    // A "working" that lands after the turn's Stop, and then nothing.
-    let mut hook = Command::new(BIN)
-        .env("WARREN_SOCK", home.sock("late"))
-        .args(["hook", "working"])
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    hook.stdin
-        .take()
-        .unwrap()
-        .write_all(br#"{"session_id":"conv-3"}"#)
-        .unwrap();
-    assert!(hook.wait().unwrap().success());
-    let ls = || {
-        String::from_utf8_lossy(&home.warren("x").arg("ls").output().unwrap().stdout).into_owned()
+    let claude = home.dir.join("claude");
+    let project = claude.join("projects").join("-w");
+    std::fs::create_dir_all(&project).unwrap();
+    // One turn that ended (a Stop after the last message), one stopped on a
+    // permission prompt (a tool call with nothing after it).
+    std::fs::write(
+        project.join("conv-done.jsonl"),
+        concat!(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#,
+            "\n",
+            r#"{"type":"system","subtype":"stop_hook_summary"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"turn_duration"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("conv-asking.jsonl"),
+        concat!(
+            r#"{"type":"system","subtype":"turn_duration"}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"go"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    for (name, sid) in [("done", "conv-done"), ("asking", "conv-asking")] {
+        let out = home
+            .warren("sleep 300")
+            .env("WARREN_STALE_WORKING_MS", "1000")
+            .env("CLAUDE_CONFIG_DIR", &claude)
+            .args(["new", name, home.dir.join("w").to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // A "working", and then a still screen.
+        let mut hook = Command::new(BIN)
+            .env("WARREN_SOCK", home.sock(name))
+            .args(["hook", "working"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        hook.stdin
+            .take()
+            .unwrap()
+            .write_all(format!(r#"{{"session_id":"{sid}"}}"#).as_bytes())
+            .unwrap();
+        assert!(hook.wait().unwrap().success());
+    }
+    let row = |name: &str| {
+        let out = home.warren("x").arg("ls").output().unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find(|l| l.contains(name))
+            .unwrap_or_default()
+            .to_string()
     };
-    assert!(ls().contains("working"), "{}", ls());
     let deadline = Instant::now() + Duration::from_secs(10);
-    while ls().contains("working") && Instant::now() < deadline {
+    while row(" done").contains("working") && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(200));
     }
-    assert!(ls().contains("waiting"), "taken as over: {}", ls());
+    assert!(
+        row(" done").contains("waiting"),
+        "taken as over: {}",
+        row(" done")
+    );
+    // Well past the threshold, the one on a prompt is still mid-turn.
+    std::thread::sleep(Duration::from_secs(4));
+    assert!(
+        row("asking").contains("working"),
+        "still mid-turn: {}",
+        row("asking")
+    );
 }

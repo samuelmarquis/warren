@@ -82,8 +82,8 @@ const SESSION_PROBE_FOR: Duration = Duration::from_secs(20);
 const BACKGROUND_EVERY: Duration = Duration::from_secs(3);
 /// Claude Code repaints at least every second all through a turn (the
 /// spinner and its timer run even while a tool is silent). A "working" hook
-/// with the screen this still for this long is a report that outlived its
-/// turn: some hook landed after the Stop that ended it.
+/// with the screen this still for this long, and a transcript that ends its
+/// turn, is a report that outlived the turn: some hook landed after the Stop.
 const STALE_WORKING: Duration = Duration::from_secs(15);
 
 /// STALE_WORKING, or WARREN_STALE_WORKING_MS (tests).
@@ -1351,7 +1351,12 @@ impl Daemon {
         if Instant::now() < at {
             return;
         }
-        if self.hook == Some(HookState::Working) && self.last_output.elapsed() >= stale_working() {
+        // Only with the transcript's word that the turn is over: a turn
+        // waiting on a permission prompt or a question is still too.
+        if self.hook == Some(HookState::Working)
+            && self.last_output.elapsed() >= stale_working()
+            && self.sid.as_deref().is_some_and(crate::procs::turn_ended)
+        {
             self.logf("hook: working, but the screen has been still; taking the turn as over");
             self.hook = Some(HookState::Waiting);
             let update = ToClient::StateChanged(self.state());
