@@ -86,6 +86,26 @@ const BACKGROUND_EVERY: Duration = Duration::from_secs(3);
 /// turn, is a report that outlived the turn: some hook landed after the Stop.
 const STALE_WORKING: Duration = Duration::from_secs(15);
 
+/// A variable a Claude Code session sets for the processes it runs, which
+/// an agent must not inherit when warren is started from inside one (a `!`
+/// command, a Bash tool): with CLAUDE_CODE_CHILD_SESSION set, claude runs as
+/// a child session and saves no transcript, so there would be nothing to
+/// resume. Settings someone sets on purpose (CLAUDE_CONFIG_DIR,
+/// CLAUDE_CODE_FORCE_SESSION_PERSISTENCE, ...) are left alone.
+pub fn inherited_session_var(key: &str) -> bool {
+    if matches!(key, "CLAUDECODE" | "CLAUDE_PID" | "CLAUDE_EFFORT") {
+        return true;
+    }
+    let Some(rest) = key.strip_prefix("CLAUDE_CODE_") else {
+        return false;
+    };
+    rest != "FORCE_SESSION_PERSISTENCE"
+        && (rest.contains("SESSION")
+            || rest.starts_with("MESSAGING_")
+            || rest.starts_with("BRIDGE_")
+            || matches!(rest, "ENTRYPOINT" | "EXECPATH" | "SSE_PORT"))
+}
+
 /// STALE_WORKING, or WARREN_STALE_WORKING_MS (tests).
 fn stale_working() -> Duration {
     std::env::var("WARREN_STALE_WORKING_MS")
@@ -334,6 +354,12 @@ struct Daemon {
 pub fn run(args: DaemonArgs) -> Result<()> {
     // A dead viewer's socket must never kill us with SIGPIPE.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+    // Still one thread: nothing else is reading the environment yet.
+    for (key, _) in std::env::vars_os() {
+        if key.to_str().is_some_and(inherited_session_var) {
+            unsafe { std::env::remove_var(&key) };
+        }
+    }
 
     let run_dir = crate::paths::ensure_run_dir()?;
     let sock = run_dir.join(format!("{}.sock", args.name));
@@ -1712,4 +1738,32 @@ fn escape_bytes(bytes: &[u8]) -> String {
             _ => format!("\\x{b:02x}"),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod env_tests {
+    use super::inherited_session_var;
+
+    #[test]
+    fn a_claude_session_s_own_variables_are_not_passed_on() {
+        for k in [
+            "CLAUDECODE",
+            "CLAUDE_CODE_CHILD_SESSION",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_CODE_ENTRYPOINT",
+            "CLAUDE_CODE_MESSAGING_SOCKET",
+            "CLAUDE_CODE_BRIDGE_SESSION_ID",
+            "CLAUDE_PID",
+        ] {
+            assert!(inherited_session_var(k), "{k}");
+        }
+        for k in [
+            "CLAUDE_CONFIG_DIR",
+            "CLAUDE_CODE_FORCE_SESSION_PERSISTENCE",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "HOME",
+        ] {
+            assert!(!inherited_session_var(k), "{k}");
+        }
+    }
 }

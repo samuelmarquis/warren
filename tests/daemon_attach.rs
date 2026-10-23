@@ -4109,3 +4109,27 @@ fn a_working_report_on_a_still_screen_goes_stale_once_the_turn_is_over() {
         row("asking")
     );
 }
+
+#[test]
+fn an_agent_started_from_inside_claude_code_is_not_a_child_session() {
+    let home = TestHome::new("childenv");
+    let seen = home.dir.join("env.txt");
+    let out = home
+        .warren(&format!("env > '{}'; sleep 300", seen.display()))
+        .env("CLAUDE_CODE_CHILD_SESSION", "1")
+        .env("CLAUDECODE", "1")
+        .env("CLAUDE_CONFIG_DIR", "/kept")
+        .args(["new", "kid", home.dir.join("w").to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !seen.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    let env = std::fs::read_to_string(&seen).unwrap();
+    assert!(!env.contains("CLAUDE_CODE_CHILD_SESSION"), "{env}");
+    assert!(!env.contains("CLAUDECODE="), "{env}");
+    assert!(env.contains("CLAUDE_CONFIG_DIR=/kept"), "{env}");
+}

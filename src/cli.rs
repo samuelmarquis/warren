@@ -234,6 +234,15 @@ fn spawn_daemon(name: &str, slot: u8, spec: &NewAgent) -> Result<()> {
         .stdout(std::process::Stdio::null())
         .stderr(start_log(name))
         .current_dir("/");
+    // The daemon drops these itself too; an older one would not.
+    for (key, _) in std::env::vars_os() {
+        if key
+            .to_str()
+            .is_some_and(crate::daemon::inherited_session_var)
+        {
+            cmd.env_remove(&key);
+        }
+    }
     if let Some(sid) = sid {
         cmd.arg(sid);
     }
