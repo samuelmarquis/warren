@@ -12,7 +12,7 @@
 
 use super::render::SIDEBAR_WIDTH;
 use super::tree::{self, Row};
-use super::{forms, Dash, Mode, Sub};
+use super::{Dash, Mode, Sub, forms};
 use crate::proto::{MouseKind, ToDaemon};
 
 pub enum Outcome {
@@ -305,7 +305,10 @@ fn run_command(dash: &mut Dash, cmd: &str) -> Option<Outcome> {
         forms::start_set(dash, cmd["set".len()..].trim_start());
         return None;
     }
-    if let Some(arg) = cmd.strip_prefix("color ").or_else(|| cmd.strip_prefix("c ")) {
+    if let Some(arg) = cmd
+        .strip_prefix("color ")
+        .or_else(|| cmd.strip_prefix("c "))
+    {
         match parse_color(arg.trim()) {
             Some(color) => {
                 if let Some(agent) = dash.focused_mut() {
@@ -441,9 +444,17 @@ fn handle_mouse(dash: &mut Dash, ev: MouseReport) {
         if !ev.press {
             return;
         }
-        if ev.code & 1 == 0 { MouseKind::WheelUp } else { MouseKind::WheelDown }
+        if ev.code & 1 == 0 {
+            MouseKind::WheelUp
+        } else {
+            MouseKind::WheelDown
+        }
     } else if motion {
-        if button == 3 { MouseKind::Moved } else { MouseKind::Drag(button) }
+        if button == 3 {
+            MouseKind::Moved
+        } else {
+            MouseKind::Drag(button)
+        }
     } else if ev.press {
         MouseKind::Down(button)
     } else {
@@ -467,7 +478,12 @@ fn handle_mouse(dash: &mut Dash, ev: MouseReport) {
     let col = ev.col - SIDEBAR_WIDTH;
     let row = ev.row;
     if let Some(agent) = dash.focused_mut() {
-        agent.send(&ToDaemon::Mouse { kind, col, row, mods });
+        agent.send(&ToDaemon::Mouse {
+            kind,
+            col,
+            row,
+            mods,
+        });
     }
 }
 

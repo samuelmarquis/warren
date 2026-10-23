@@ -56,7 +56,12 @@ pub struct Job {
 
 impl Job {
     fn new(child: Child, dest: String) -> Job {
-        Job { child, dest, buf: String::new(), started: Instant::now() }
+        Job {
+            child,
+            dest,
+            buf: String::new(),
+            started: Instant::now(),
+        }
     }
 
     /// Long enough that a slow machine still answers, short enough that a
@@ -124,7 +129,11 @@ impl NewForm {
     pub fn fields(&self) -> &'static [NField] {
         // Resuming and forking both start from a conversation you pick; the
         // difference is only which of them the picked one ends up being.
-        let mode = if self.picks_session() { MODE_RESUME } else { self.mode };
+        let mode = if self.picks_session() {
+            MODE_RESUME
+        } else {
+            self.mode
+        };
         match (self.machines.is_empty(), mode) {
             (true, MODE_RESUME) => &[
                 NField::Kind,
@@ -214,9 +223,12 @@ impl NewForm {
         let chosen = self.dest().map(str::to_string);
         self.machines = dests.to_vec();
         self.machine = match chosen {
-            Some(dest) => {
-                self.machines.iter().position(|d| *d == dest).map(|i| i + 1).unwrap_or(0)
-            }
+            Some(dest) => self
+                .machines
+                .iter()
+                .position(|d| *d == dest)
+                .map(|i| i + 1)
+                .unwrap_or(0),
             None => 0,
         };
     }
@@ -361,7 +373,11 @@ pub fn start_set(dash: &mut Dash, arg: &str) {
     };
     let flag = format!("--{}={value}", key.trim());
     let name = agent.ident().1.to_string();
-    run_for_focused(dash, &["set", &name, &flag], &format!("setting {}", key.trim()));
+    run_for_focused(
+        dash,
+        &["set", &name, &flag],
+        &format!("setting {}", key.trim()),
+    );
 }
 
 /// `:join ROOM`: invite the focused agent to a chat room, from the machine it
@@ -374,7 +390,11 @@ pub fn start_join(dash: &mut Dash, room: &str) {
         return;
     }
     let name = agent.ident().1.to_string();
-    run_for_focused(dash, &["join", &name, room], &format!("inviting it to {room}"));
+    run_for_focused(
+        dash,
+        &["join", &name, room],
+        &format!("inviting it to {room}"),
+    );
 }
 
 /// Run `warren ARGS…` on the focused agent's machine — here, or over its ssh
@@ -388,15 +408,17 @@ fn run_for_focused(dash: &mut Dash, args: &[&str], doing: &str) {
     let (host, name) = agent.ident();
     let (host, name) = (host.map(str::to_string), name.to_string());
     let started = match &host {
-        None => std::env::current_exe().map_err(anyhow::Error::from).and_then(|exe| {
-            std::process::Command::new(exe)
-                .args(args)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .map_err(anyhow::Error::from)
-        }),
+        None => std::env::current_exe()
+            .map_err(anyhow::Error::from)
+            .and_then(|exe| {
+                std::process::Command::new(exe)
+                    .args(args)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .map_err(anyhow::Error::from)
+            }),
         Some(dest) => match dash.hosts.get(dest) {
             None => Err(anyhow::anyhow!("{dest} is not in the hosts file")),
             Some(h) if !h.reachable() => Err(anyhow::anyhow!("{} is not answering", h.label)),
@@ -413,7 +435,9 @@ fn run_for_focused(dash: &mut Dash, args: &[&str], doing: &str) {
 }
 
 fn poll_set_job(dash: &mut Dash) {
-    let Some(job) = dash.set_job.as_mut() else { return };
+    let Some(job) = dash.set_job.as_mut() else {
+        return;
+    };
     if job.expired() {
         let dest = job.dest.clone();
         job.kill();
@@ -432,20 +456,36 @@ fn poll_set_job(dash: &mut Dash) {
     }
     // A line or two either way; nothing that can fill a pipe.
     let job = dash.set_job.take().expect("just had one");
-    let Ok(out) = job.child.wait_with_output() else { return };
-    let said = if out.status.success() { out.stdout } else { out.stderr };
-    let said = String::from_utf8_lossy(&said);
-    let line = said.lines().find(|l| !l.trim().is_empty()).unwrap_or(if out.status.success() {
-        "set"
+    let Ok(out) = job.child.wait_with_output() else {
+        return;
+    };
+    let said = if out.status.success() {
+        out.stdout
     } else {
-        "set failed"
-    });
-    dash.flash = Some(line.trim().trim_start_matches("warren: ").trim_start_matches("Error: ").to_string());
+        out.stderr
+    };
+    let said = String::from_utf8_lossy(&said);
+    let line = said
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or(if out.status.success() {
+            "set"
+        } else {
+            "set failed"
+        });
+    dash.flash = Some(
+        line.trim()
+            .trim_start_matches("warren: ")
+            .trim_start_matches("Error: ")
+            .to_string(),
+    );
     dash.status_dirty = true;
 }
 
 fn poll_session_job(dash: &mut Dash) {
-    let Some(job) = dash.newform.sess_job.as_mut() else { return };
+    let Some(job) = dash.newform.sess_job.as_mut() else {
+        return;
+    };
     if job.expired() {
         let dest = job.dest.clone();
         job.kill();
@@ -460,7 +500,9 @@ fn poll_session_job(dash: &mut Dash) {
     // fills the pipe, and a child blocked on a full pipe never exits.
     let mut buf = [0u8; 8192];
     let done = loop {
-        let Some(out) = job.child.stdout.as_mut() else { break true };
+        let Some(out) = job.child.stdout.as_mut() else {
+            break true;
+        };
         match out.read(&mut buf) {
             Ok(0) => break true,
             Ok(n) => job.buf.push_str(&String::from_utf8_lossy(&buf[..n])),
@@ -480,7 +522,9 @@ fn poll_session_job(dash: &mut Dash) {
 }
 
 fn poll_spawn_job(dash: &mut Dash) {
-    let Some(job) = dash.spawn_job.as_mut() else { return };
+    let Some(job) = dash.spawn_job.as_mut() else {
+        return;
+    };
     if job.expired() {
         let dest = job.dest.clone();
         job.kill();
@@ -501,7 +545,9 @@ fn poll_spawn_job(dash: &mut Dash) {
     // fill a pipe, so taking it in one go is safe here.
     let job = dash.spawn_job.take().expect("just had one");
     let dest = job.dest.clone();
-    let Ok(out) = job.child.wait_with_output() else { return };
+    let Ok(out) = job.child.wait_with_output() else {
+        return;
+    };
     if out.status.success() {
         // "warren: created agent 'NAME'" — the far side had the last word on
         // the name, and that is the one to focus when its row shows up.
@@ -658,13 +704,28 @@ fn submit_new(dash: &mut Dash) {
         MODE_RESUME | MODE_FORK => {
             let Some(sess) = form.sessions.as_ref().and_then(|s| s.get(form.sess_sel)) else {
                 let waiting = form.sess_job.is_some();
-                dash.flash =
-                    Some(if waiting { "still asking…" } else { "no session selected" }.into());
+                dash.flash = Some(
+                    if waiting {
+                        "still asking…"
+                    } else {
+                        "no session selected"
+                    }
+                    .into(),
+                );
                 dash.status_dirty = true;
                 return;
             };
-            let mode = if form.mode == MODE_FORK { "fork" } else { "resume" };
-            (mode, Some(sess.id.clone()), sess.cwd.clone(), sess.title.clone())
+            let mode = if form.mode == MODE_FORK {
+                "fork"
+            } else {
+                "resume"
+            };
+            (
+                mode,
+                Some(sess.id.clone()),
+                sess.cwd.clone(),
+                sess.title.clone(),
+            )
         }
         MODE_CONTINUE => ("continue", None, form.root.clone(), "agent".to_string()),
         _ => ("new", None, form.root.clone(), String::new()),
@@ -764,7 +825,9 @@ fn submit_new(dash: &mut Dash) {
                 Some(host) if !host.reachable() => {
                     Err(anyhow::anyhow!("{} is not answering", host.label))
                 }
-                Some(host) => host.spawn_agent(&spec).map(|child| (child, host.label.clone())),
+                Some(host) => host
+                    .spawn_agent(&spec)
+                    .map(|child| (child, host.label.clone())),
             };
             started.map(|(child, label)| {
                 dash.spawn_job = Some(Job::new(child, dest.clone()));
@@ -821,14 +884,29 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
     let mut row = 4u16;
     if !form.machines.is_empty() {
         let machines = form.machine_labels();
-        let chips =
-            draw_choice(out, row, x0, "Machine", &machines, form.machine, active == NField::Machine);
+        let chips = draw_choice(
+            out,
+            row,
+            x0,
+            "Machine",
+            &machines,
+            form.machine,
+            active == NField::Machine,
+        );
         geom.fields.push((row - 1, NField::Machine, chips));
         row += 2;
     }
     // Which harness, then how to start it.
     let kinds: Vec<&str> = KINDS.iter().map(|k| k.as_str()).collect();
-    let chips = draw_choice(out, row, x0, "Agent", &kinds, form.kind, active == NField::Kind);
+    let chips = draw_choice(
+        out,
+        row,
+        x0,
+        "Agent",
+        &kinds,
+        form.kind,
+        active == NField::Kind,
+    );
     geom.fields.push((row - 1, NField::Kind, chips));
     row += 2;
     let chips = draw_choice(
@@ -848,7 +926,11 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
             let sessions = form.sessions.as_deref().unwrap_or(&[]);
             // The picker is the same list either way; the label is what says
             // whether the conversation is being joined or copied.
-            let what = if form.mode == MODE_FORK { "Fork of  " } else { "Session  " };
+            let what = if form.mode == MODE_FORK {
+                "Fork of  "
+            } else {
+                "Session  "
+            };
             let _ = write!(
                 out,
                 "\x1b[{};{}H{}{what}\x1b[0m",
@@ -860,12 +942,17 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
             // What still has to fit below: the "… N more" line, then Sys,
             // Extra and Color at two rows each.
             const BELOW_LIST: usize = 1 + 2 + 2 + 2;
-            let visible =
-                (pane_h as usize).saturating_sub(row as usize + BELOW_LIST).clamp(1, 12);
+            let visible = (pane_h as usize)
+                .saturating_sub(row as usize + BELOW_LIST)
+                .clamp(1, 12);
             let first = form.sess_sel.saturating_sub(visible - 1);
             for (i, sess) in sessions.iter().enumerate().skip(first).take(visible) {
                 let marker = if i == form.sess_sel { ">" } else { " " };
-                let style = if i == form.sess_sel { "\x1b[1m" } else { "\x1b[2m" };
+                let style = if i == form.sess_sel {
+                    "\x1b[1m"
+                } else {
+                    "\x1b[2m"
+                };
                 let mut label = format!("{marker} {} \u{b7} {}", short_path(&sess.cwd), sess.title);
                 label.truncate(pane_w.saturating_sub(4));
                 let _ = write!(out, "\x1b[{};{}H{style}{label}\x1b[0m", row, x0 + 4);
@@ -887,23 +974,75 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
         }
         MODE_CONTINUE => {
             geom.fields.push((row - 1, NField::Root, Vec::new()));
-            row = draw_text_field(out, row, x0, pane_h, "Root dir", &form.root, active == NField::Root, insert);
+            row = draw_text_field(
+                out,
+                row,
+                x0,
+                pane_h,
+                "Root dir",
+                &form.root,
+                active == NField::Root,
+                insert,
+            );
         }
         _ => {
             geom.fields.push((row - 1, NField::Title, Vec::new()));
-            row = draw_text_field(out, row, x0, pane_h, "Title", &form.title, active == NField::Title, insert);
+            row = draw_text_field(
+                out,
+                row,
+                x0,
+                pane_h,
+                "Title",
+                &form.title,
+                active == NField::Title,
+                insert,
+            );
             geom.fields.push((row - 1, NField::Root, Vec::new()));
-            row = draw_text_field(out, row, x0, pane_h, "Root dir", &form.root, active == NField::Root, insert);
+            row = draw_text_field(
+                out,
+                row,
+                x0,
+                pane_h,
+                "Root dir",
+                &form.root,
+                active == NField::Root,
+                insert,
+            );
         }
     }
     geom.fields.push((row - 1, NField::Sys, Vec::new()));
-    row = draw_text_field(out, row, x0, pane_h, "Sys prompt", &form.sys, active == NField::Sys, insert);
+    row = draw_text_field(
+        out,
+        row,
+        x0,
+        pane_h,
+        "Sys prompt",
+        &form.sys,
+        active == NField::Sys,
+        insert,
+    );
     geom.fields.push((row - 1, NField::Extra, Vec::new()));
-    row = draw_text_field(out, row, x0, pane_h, "Extra args", &form.extra, active == NField::Extra, insert);
+    row = draw_text_field(
+        out,
+        row,
+        x0,
+        pane_h,
+        "Extra args",
+        &form.extra,
+        active == NField::Extra,
+        insert,
+    );
     geom.fields.push((row - 1, NField::Color, Vec::new()));
 
-    dash.palette_geom =
-        draw_color_field(out, row, x0, pane_w, pane_h, form.color, active == NField::Color);
+    dash.palette_geom = draw_color_field(
+        out,
+        row,
+        x0,
+        pane_w,
+        pane_h,
+        form.color,
+        active == NField::Color,
+    );
     dash.form_geom = geom;
 }
 
@@ -920,7 +1059,12 @@ fn draw_choice(
     selected: usize,
     active: bool,
 ) -> Vec<(u16, u16)> {
-    let _ = write!(out, "\x1b[{row};{}H{}{label:<10}\x1b[0m  ", x0 + 2, field_label(active));
+    let _ = write!(
+        out,
+        "\x1b[{row};{}H{}{label:<10}\x1b[0m  ",
+        x0 + 2,
+        field_label(active)
+    );
     // The label is padded to ten, then two spaces: chips start after that.
     let mut at = x0 + 2 + 10 + 2;
     let mut spans = Vec::with_capacity(options.len());
@@ -937,7 +1081,9 @@ fn draw_choice(
 pub fn edit_key(dash: &mut Dash, bytes: &[u8]) -> usize {
     dash.form_dirty = true;
     let (key, consumed) = decode_key(bytes);
-    let Some(form) = dash.editform.as_mut() else { return consumed };
+    let Some(form) = dash.editform.as_mut() else {
+        return consumed;
+    };
     match key {
         Key::Up if form.field == 1 && cell_of(form.color) >= 16 => {
             palette_key(&mut form.color, Key::Up)
@@ -980,15 +1126,25 @@ pub fn draw_edit_form(dash: &mut Dash, out: &mut String) {
     let x0 = SIDEBAR_WIDTH + 1;
     let pane_w = dash.cols.saturating_sub(SIDEBAR_WIDTH) as usize;
     let pane_h = dash.rows.saturating_sub(1);
-    let Some(form) = dash.editform.as_ref() else { return };
+    let Some(form) = dash.editform.as_ref() else {
+        return;
+    };
 
     for row in 0..pane_h {
         let _ = write!(out, "\x1b[{};{}H\x1b[0m\x1b[K", row + 1, x0);
     }
     let _ = write!(out, "\x1b[2;{}H\x1b[1medit agent\x1b[0m", x0 + 2);
-    let row = draw_text_field(out, 4, x0, pane_h, "Title", &form.title, form.field == 0, true);
-    dash.palette_geom =
-        draw_color_field(out, row, x0, pane_w, pane_h, form.color, form.field == 1);
+    let row = draw_text_field(
+        out,
+        4,
+        x0,
+        pane_h,
+        "Title",
+        &form.title,
+        form.field == 0,
+        true,
+    );
+    dash.palette_geom = draw_color_field(out, row, x0, pane_w, pane_h, form.color, form.field == 1);
 }
 
 // ------------------------------------------------------------ shared pieces
@@ -1108,7 +1264,10 @@ fn palette() -> &'static Palette {
         for (row, band) in muted.chunks(MUTED_COLS).enumerate() {
             let mut band = band.to_vec();
             band.sort_by(|a, b| {
-                (*a != 0).cmp(&(*b != 0)).then(chroma(a).total_cmp(&chroma(b))).then(a.cmp(b))
+                (*a != 0)
+                    .cmp(&(*b != 0))
+                    .then(chroma(a).total_cmp(&chroma(b)))
+                    .then(a.cmp(b))
             });
             grid[row][..MUTED_COLS].copy_from_slice(&band);
         }
@@ -1122,7 +1281,10 @@ fn palette() -> &'static Palette {
             }
         }
 
-        let mut palette = Palette { at: [0; 256], cell: [0; 256] };
+        let mut palette = Palette {
+            at: [0; 256],
+            cell: [0; 256],
+        };
         for (cell, &i) in grid.iter().flatten().enumerate() {
             palette.at[cell] = i;
             palette.cell[i as usize] = cell as u8;
@@ -1191,7 +1353,12 @@ pub fn form_click(dash: &mut Dash, row: u16, col: u16) {
         .fields
         .iter()
         .find(|(r, ..)| *r == row)
-        .map(|(_, field, chips)| (*field, chips.iter().position(|(a, b)| col >= *a && col <= *b)));
+        .map(|(_, field, chips)| {
+            (
+                *field,
+                chips.iter().position(|(a, b)| col >= *a && col <= *b),
+            )
+        });
     let Some((field, chip)) = hit else {
         palette_click(dash, row, col);
         return;
@@ -1216,7 +1383,11 @@ pub fn form_wheel(dash: &mut Dash, down: bool) {
         return;
     }
     let sel = dash.newform.sess_sel;
-    dash.newform.sess_sel = if down { (sel + 1).min(len - 1) } else { sel.saturating_sub(1) };
+    dash.newform.sess_sel = if down {
+        (sel + 1).min(len - 1)
+    } else {
+        sel.saturating_sub(1)
+    };
     focus_field(dash, NField::List);
     dash.form_dirty = true;
 }
@@ -1254,7 +1425,9 @@ fn choose(dash: &mut Dash, field: NField, option: usize) {
 /// Click on a palette swatch (0-based screen cell). Routes to whichever form
 /// is showing; the swatch grid geometry is recorded at draw time.
 pub fn palette_click(dash: &mut Dash, row: u16, col: u16) {
-    let Some((row0, col0, bw, bh)) = dash.palette_geom else { return };
+    let Some((row0, col0, bw, bh)) = dash.palette_geom else {
+        return;
+    };
     if row < row0 || col < col0 {
         return;
     }
@@ -1289,12 +1462,21 @@ fn draw_color_field(
     if row > pane_h {
         return None;
     }
-    let _ = write!(out, "\x1b[{};{}H{}Color     \x1b[0m  ", row, x0 + 2, field_label(active));
+    let _ = write!(
+        out,
+        "\x1b[{};{}H{}Color     \x1b[0m  ",
+        row,
+        x0 + 2,
+        field_label(active)
+    );
     if color == 0 {
         let _ = write!(out, "\x1b[2mnone\x1b[0m");
     } else {
         let (r, g, b) = spans::xterm256_to_rgb(color as u8);
-        let _ = write!(out, "\x1b[48;5;{color}m   \x1b[0m  #{r:02x}{g:02x}{b:02x} \u{b7} {color}");
+        let _ = write!(
+            out,
+            "\x1b[48;5;{color}m   \x1b[0m  #{r:02x}{g:02x}{b:02x} \u{b7} {color}"
+        );
     }
     if !active {
         return None;
@@ -1374,7 +1556,10 @@ mod tests {
         let mut last = f32::MAX;
         for row in 1..16 {
             let (r, g, b) = spans::xterm256_to_rgb(p.at[row * 16] as u8);
-            assert!(r == g && g == b, "row {row} of the grey column is ({r},{g},{b})");
+            assert!(
+                r == g && g == b,
+                "row {row} of the grey column is ({r},{g},{b})"
+            );
             let l = spans::oklch(r, g, b).0;
             assert!(l <= last, "greys darken downwards");
             last = l;
@@ -1387,7 +1572,10 @@ mod tests {
                     spans::oklch(r, g, b).0
                 })
                 .collect();
-            assert!(lightness.windows(2).all(|w| w[0] >= w[1]), "column {col}: {lightness:?}");
+            assert!(
+                lightness.windows(2).all(|w| w[0] >= w[1]),
+                "column {col}: {lightness:?}"
+            );
         }
     }
 
@@ -1423,7 +1611,11 @@ mod tests {
     fn the_chosen_machine_follows_its_name_through_a_hosts_file_edit() {
         let mut form = NewForm::reset();
         form.sync_machines(&["smq".into(), "servo".into()]);
-        assert_eq!(form.fields()[0], NField::Machine, "the field appears with hosts to offer");
+        assert_eq!(
+            form.fields()[0],
+            NField::Machine,
+            "the field appears with hosts to offer"
+        );
         form.machine = 2;
         assert_eq!(form.dest(), Some("servo"));
 

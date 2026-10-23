@@ -131,6 +131,10 @@ warren renew NAME [--matrix=on|off] [--force]
                        the same agent on a fresh daemon from this warren; a
                        daemon keeps the binary it started from, so this is
                        how an upgrade reaches an agent already running
+warren cycle [NAME...] [--renew]
+                       restart agents (default: all but this one) as each comes
+                       to rest: no turn, background shell or live subagent;
+                       --renew renews each, for after an upgrade
 warren attach NAME     view a single agent raw (no sidebar; Ctrl-\ detaches)
 warren restore [NAME]  bring back agents this machine lost when it stopped, asleep
 warren sessions [KIND] all resumable sessions (id, mtime, cwd, title) — claude, or omp

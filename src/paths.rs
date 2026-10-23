@@ -39,8 +39,7 @@ pub fn run_dir() -> PathBuf {
 
 pub fn ensure_run_dir() -> Result<PathBuf> {
     let dir = run_dir();
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     restrict_to_owner(&dir)?;
     Ok(dir)
 }
@@ -88,8 +87,7 @@ pub fn omp_terminal_sessions() -> PathBuf {
 fn restrict_to_owner(dir: &std::path::Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let perms = std::fs::Permissions::from_mode(0o700);
-    std::fs::set_permissions(dir, perms)
-        .with_context(|| format!("chmod 700 {}", dir.display()))?;
+    std::fs::set_permissions(dir, perms).with_context(|| format!("chmod 700 {}", dir.display()))?;
     Ok(())
 }
 

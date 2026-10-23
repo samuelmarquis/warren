@@ -16,7 +16,11 @@ pub const NAME_MAX: usize = 32;
 pub fn sanitize(raw: &str) -> String {
     let mut out = String::new();
     for c in raw.chars() {
-        let c = if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '-' };
+        let c = if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+            c
+        } else {
+            '-'
+        };
         if c == '-' && out.ends_with('-') {
             continue;
         }
@@ -77,7 +81,10 @@ mod tests {
         assert_eq!(sanitize("My Agent!"), "My-Agent-");
         assert_eq!(sanitize("a.b_c-d"), "a.b_c-d");
         assert_eq!(sanitize("Ünïcode"), "n-code"); // a character is one dash, not one per byte
-        assert_eq!(sanitize("🎚️ LIMIT: Review new TEAM A report"), "LIMIT-Review-new-TEAM-A-report");
+        assert_eq!(
+            sanitize("🎚️ LIMIT: Review new TEAM A report"),
+            "LIMIT-Review-new-TEAM-A-report"
+        );
         assert_eq!(sanitize(".hidden"), "hidden");
         assert_eq!(sanitize("🦠"), "", "nothing left is the caller's to refuse");
         let long = "x".repeat(40);
@@ -100,7 +107,11 @@ mod tests {
         let full = "x".repeat(NAME_MAX);
         let second = unique(&full, [full.as_str()]);
         assert_eq!(second.len(), NAME_MAX);
-        assert_ne!(sanitize(&second), sanitize(&full), "the two stay distinct once trimmed");
+        assert_ne!(
+            sanitize(&second),
+            sanitize(&full),
+            "the two stay distinct once trimmed"
+        );
         // And it keeps counting past the first collision.
         let third = unique(&full, [full.as_str(), second.as_str()]);
         assert_eq!(third.len(), NAME_MAX);
@@ -109,7 +120,10 @@ mod tests {
 
     #[test]
     fn a_name_is_checked_not_rewritten_when_it_is_looked_up() {
-        assert!(valid("Explore-type-systems-and-TEE-par-2"), "length is not a lookup's business");
+        assert!(
+            valid("Explore-type-systems-and-TEE-par-2"),
+            "length is not a lookup's business"
+        );
         assert!(valid("a.b_c-d"));
         assert!(!valid(""));
         // Nothing that could walk out of the run directory.

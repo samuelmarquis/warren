@@ -49,6 +49,10 @@ warren \- a colony of Claude Code and OMP agents from one terminal
 .RB [ \-\-matrix=on | off ]
 .RB [ \-\-force ]
 .br
+.B warren cycle
+.RI [ NAME ...]
+.RB [ \-\-renew ]
+.br
 .B warren attach
 .I NAME
 .br
@@ -176,6 +180,18 @@ says so \(em then woken if it was awake.
 Use it for agents whose daemon predates
 .B warren set
 or chat.
+.TP
+.B "warren cycle \fR[\fINAME\fR...] [\fB\-\-renew\fR]"
+Restart agents (all of this machine's but the one running the command, if
+none is named) so they pick up a change, each as soon as it is at rest: not
+mid-turn, with no shell running under its harness (a background command or
+monitor) and no Claude subagent that has written in the last 90 seconds, for
+ten seconds straight.
+It waits as long as that takes, saying who it is waiting on and why.
+Each is slept and woken, or with
+.B \-\-renew
+renewed (asleep ones too), which an upgrade of warren itself needs.
+Agents asleep are otherwise left alone: they load everything fresh on waking.
 .TP
 .BI "warren attach " NAME
 View one agent raw, with no sidebar.

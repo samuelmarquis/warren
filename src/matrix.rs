@@ -120,7 +120,8 @@ pub fn config() -> Result<Option<Config>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
-    let cfg = serde_json::from_slice(&body).with_context(|| format!("reading {}", path.display()))?;
+    let cfg =
+        serde_json::from_slice(&body).with_context(|| format!("reading {}", path.display()))?;
     Ok(Some(cfg))
 }
 
@@ -138,7 +139,13 @@ pub fn profile(name: &str) -> String {
     let mut out: String = name
         .chars()
         .map(|c| c.to_ascii_lowercase())
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     if !out.starts_with(|c: char| c.is_ascii_alphanumeric()) {
         out.insert(0, 'w');
@@ -155,7 +162,8 @@ pub fn agent_dir(name: &str) -> PathBuf {
 /// files they point at. Called on every start, so a change to the setup
 /// reaches an agent the next time it wakes.
 pub fn launch_flags(kind: Kind, name: &str) -> Result<String> {
-    let cfg = config()?.context("chat is on for this agent, but ~/.warren/matrix.json is missing")?;
+    let cfg =
+        config()?.context("chat is on for this agent, but ~/.warren/matrix.json is missing")?;
     let dir = write_agent_files(&cfg, name)?;
     let mcp = dir.join("mcp.json");
     Ok(match kind {
@@ -179,10 +187,20 @@ fn write_agent_files(cfg: &Config, name: &str) -> Result<PathBuf> {
 
     // Approvers are people named outright; a pattern can never approve, and
     // nor can anyone an override adds.
-    let approvers: Vec<&String> = cfg.allowed_users.iter().filter(|u| !u.contains('*')).collect();
+    let approvers: Vec<&String> = cfg
+        .allowed_users
+        .iter()
+        .filter(|u| !u.contains('*'))
+        .collect();
     let extra = cfg.agents.get(name).cloned().unwrap_or_default();
     let mut allowed = cfg.allowed_users.clone();
-    allowed.extend(extra.allowed_users.iter().filter(|u| !cfg.allowed_users.contains(u)).cloned());
+    allowed.extend(
+        extra
+            .allowed_users
+            .iter()
+            .filter(|u| !cfg.allowed_users.contains(u))
+            .cloned(),
+    );
     let mut channel = json!({
         "allowedUsers": allowed,
         "approvers": approvers,
@@ -201,7 +219,10 @@ fn write_agent_files(cfg: &Config, name: &str) -> Result<PathBuf> {
     if let Some(hs) = &cfg.homeserver {
         channel["homeserver"] = json!(hs);
     }
-    write_private(&dir.join("config.json"), &serde_json::to_vec_pretty(&channel)?)?;
+    write_private(
+        &dir.join("config.json"),
+        &serde_json::to_vec_pretty(&channel)?,
+    )?;
 
     // Through sh, only so the channel's stderr lands in a file: Claude Code
     // keeps none of it, and it is the only place the channel says what went
@@ -345,7 +366,9 @@ fn invite(cfg: &Config, user: &str, room: &str) -> Result<()> {
     let creds: Value = serde_json::from_slice(
         &std::fs::read(&account).with_context(|| format!("reading {}", account.display()))?,
     )?;
-    let token = creds["access_token"].as_str().context("warren's account has no access_token")?;
+    let token = creds["access_token"]
+        .as_str()
+        .context("warren's account has no access_token")?;
     let hs = creds["homeserver"]
         .as_str()
         .or(cfg.homeserver.as_deref())
@@ -354,11 +377,19 @@ fn invite(cfg: &Config, user: &str, room: &str) -> Result<()> {
     let api = format!("{hs}/_matrix/client/v3");
 
     let room_id = if room.starts_with('#') {
-        let (status, body) = curl(token, "GET", &format!("{api}/directory/room/{}", encode(room)), None)?;
+        let (status, body) = curl(
+            token,
+            "GET",
+            &format!("{api}/directory/room/{}", encode(room)),
+            None,
+        )?;
         if status != 200 {
             bail!("no room {room} ({})", matrix_error(&body));
         }
-        body["room_id"].as_str().context("the homeserver gave no room id")?.to_string()
+        body["room_id"]
+            .as_str()
+            .context("the homeserver gave no room id")?
+            .to_string()
     } else {
         room.to_string()
     };
@@ -400,12 +431,31 @@ fn expand_home(path: &str) -> PathBuf {
 /// `ps` would show.
 fn curl(token: &str, method: &str, url: &str, body: Option<Value>) -> Result<(u16, Value)> {
     let mut cmd = Command::new("curl");
-    cmd.args(["-sS", "-m", "30", "--retry", "4", "--retry-all-errors", "-K", "-", "-X", method])
-        .args(["-w", "\n%{http_code}", "-H", "Content-Type: application/json"]);
+    cmd.args([
+        "-sS",
+        "-m",
+        "30",
+        "--retry",
+        "4",
+        "--retry-all-errors",
+        "-K",
+        "-",
+        "-X",
+        method,
+    ])
+    .args([
+        "-w",
+        "\n%{http_code}",
+        "-H",
+        "Content-Type: application/json",
+    ]);
     if let Some(body) = &body {
         cmd.args(["-d", &body.to_string()]);
     }
-    cmd.arg(url).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.arg(url)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = cmd.spawn().context("running curl")?;
     child
         .stdin
@@ -442,7 +492,10 @@ mod tests {
 
     #[test]
     fn room_ids_and_aliases_are_one_path_segment() {
-        assert_eq!(encode("!abc:immanence.institute"), "%21abc%3Aimmanence.institute");
+        assert_eq!(
+            encode("!abc:immanence.institute"),
+            "%21abc%3Aimmanence.institute"
+        );
         assert_eq!(encode("#open-plugins:x"), "%23open-plugins%3Ax");
     }
 
@@ -460,7 +513,10 @@ mod tests {
             r#"{"channel":"/c.py","machine":"smq","allowedUsers":["@sam:x"],"inviters":["@sam:x"]}"#,
         )
         .unwrap();
-        assert!(cfg.require_mention, "rooms of agents need a mention by default");
+        assert!(
+            cfg.require_mention,
+            "rooms of agents need a mention by default"
+        );
         assert!(cfg.new_agents);
         assert_eq!(cfg.python, "python3");
         assert!(cfg.roster_room.is_none() && cfg.warren_account.is_none());

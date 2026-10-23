@@ -36,11 +36,20 @@ pub struct AgentTerm {
 
 impl AgentTerm {
     pub fn new(cols: u16, rows: u16, scrollback: usize) -> Self {
-        let config = Config { scrolling_history: scrollback, ..Config::default() };
+        let config = Config {
+            scrolling_history: scrollback,
+            ..Config::default()
+        };
         let proxy = EventProxy::default();
         let size = TermSize::new(cols as usize, rows as usize);
         let term = Term::new(config, &size, proxy.clone());
-        AgentTerm { term, proxy, processor: Processor::new(), cols, rows }
+        AgentTerm {
+            term,
+            proxy,
+            processor: Processor::new(),
+            cols,
+            rows,
+        }
     }
 
     /// Feed raw pty output through the emulator.
@@ -54,7 +63,8 @@ impl AgentTerm {
         }
         self.cols = cols;
         self.rows = rows;
-        self.term.resize(TermSize::new(cols as usize, rows as usize));
+        self.term
+            .resize(TermSize::new(cols as usize, rows as usize));
     }
 
     pub fn alt_screen(&self) -> bool {
@@ -95,7 +105,9 @@ impl AgentTerm {
     /// can read different parts of one agent at once.
     pub fn snapshot_screen_at(&self, back: usize) -> Vec<LineSpans> {
         let back = back as i32;
-        (0..self.rows as i32).map(|r| self.line_spans(Line(r - back))).collect()
+        (0..self.rows as i32)
+            .map(|r| self.line_spans(Line(r - back)))
+            .collect()
     }
 
     /// Lines of scrollback held above the screen.
@@ -135,7 +147,9 @@ impl AgentTerm {
             let cell = &row[Column(i)];
             let blank = cell.c == ' '
                 && resolve_color(colors, cell.bg) == Color::Default
-                && !cell.flags.intersects(Flags::INVERSE | Flags::ALL_UNDERLINES | Flags::STRIKEOUT);
+                && !cell
+                    .flags
+                    .intersects(Flags::INVERSE | Flags::ALL_UNDERLINES | Flags::STRIKEOUT);
             if !blank {
                 last = i + 1;
             }
@@ -144,7 +158,10 @@ impl AgentTerm {
         let mut spans: Vec<Span> = Vec::new();
         for i in 0..last {
             let cell = &row[Column(i)];
-            if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+            if cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+            {
                 continue;
             }
             let fg = resolve_color(colors, cell.fg);
@@ -154,7 +171,12 @@ impl AgentTerm {
                 Some(prev) if prev.fg == fg && prev.bg == bg && prev.attrs == attrs => {
                     prev.text.push(cell.c);
                 }
-                _ => spans.push(Span { text: cell.c.to_string(), fg, bg, attrs }),
+                _ => spans.push(Span {
+                    text: cell.c.to_string(),
+                    fg,
+                    bg,
+                    attrs,
+                }),
             }
         }
         LineSpans(spans)
@@ -271,7 +293,10 @@ mod tests {
         let rows: Vec<u16> = damage.iter().map(|(r, _)| *r).collect();
         assert!(rows.contains(&2), "row 2 damaged: {rows:?}");
         assert!(!rows.contains(&1), "row 1 untouched: {rows:?}");
-        assert_eq!(damage.iter().find(|(r, _)| *r == 2).unwrap().1.0[0].text, "row2");
+        assert_eq!(
+            damage.iter().find(|(r, _)| *r == 2).unwrap().1.0[0].text,
+            "row2"
+        );
     }
 
     #[test]
@@ -307,7 +332,11 @@ mod tests {
         let mut at = AgentTerm::new(20, 2, 0);
         at.advance(b"\x1b]0;my title\x07");
         let events = at.proxy.0.borrow();
-        assert!(events.iter().any(|e| matches!(e, Event::Title(t) if t == "my title")));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Title(t) if t == "my title"))
+        );
     }
 
     #[test]

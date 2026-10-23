@@ -10,8 +10,8 @@
 //! Snapshot.
 
 use anyhow::{Result, bail};
-use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 use crate::spans::LineSpans;
 
@@ -154,11 +154,22 @@ pub enum MouseProto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToDaemon {
     /// Become a viewer: receive Snapshot now, Damage/events from then on.
-    Attach { cols: u16, rows: u16 },
+    Attach {
+        cols: u16,
+        rows: u16,
+    },
     /// Keyboard bytes for the application (base64).
     Input(String),
-    Resize { cols: u16, rows: u16 },
-    Mouse { kind: MouseKind, col: u16, row: u16, mods: u8 },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
+    Mouse {
+        kind: MouseKind,
+        col: u16,
+        row: u16,
+        mods: u8,
+    },
     SetMeta {
         name: Option<String>,
         color: Option<u8>,
@@ -222,13 +233,18 @@ pub enum ToClient {
         cursor: (u16, u16),
         cursor_visible: bool,
     },
-    ModeChanged { alt_screen: bool, mouse: MouseProto },
+    ModeChanged {
+        alt_screen: bool,
+        mouse: MouseProto,
+    },
     MetaChanged(Meta),
     StateChanged(AgentState),
     /// OSC 52 payload (already base64), forwarded for the focused agent.
     Clipboard(String),
     /// The application exited; the daemon unlinks its socket and quits.
-    Exited { status: i32 },
+    Exited {
+        status: i32,
+    },
 }
 
 // ------------------------------------------------------------------- framing
@@ -282,12 +298,24 @@ pub fn b64_encode(data: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
         out.push(TABLE[(n >> 18) as usize & 63] as char);
         out.push(TABLE[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -345,11 +373,24 @@ mod tests {
     #[test]
     fn roundtrip_to_daemon() {
         let msgs = vec![
-            ToDaemon::Attach { cols: 120, rows: 40 },
+            ToDaemon::Attach {
+                cols: 120,
+                rows: 40,
+            },
             ToDaemon::Input(b64_encode(b"hello\x1b[A")),
             ToDaemon::Resize { cols: 80, rows: 24 },
-            ToDaemon::Mouse { kind: MouseKind::Drag(0), col: 5, row: 9, mods: 0 },
-            ToDaemon::SetMeta { name: Some("x".into()), color: None, pinned: Some(true), slot: None },
+            ToDaemon::Mouse {
+                kind: MouseKind::Drag(0),
+                col: 5,
+                row: 9,
+                mods: 0,
+            },
+            ToDaemon::SetMeta {
+                name: Some("x".into()),
+                color: None,
+                pinned: Some(true),
+                slot: None,
+            },
             ToDaemon::HookState(HookState::Attention),
             ToDaemon::Session("0199b4c1-7f3e-4b2a-9d18-2c6f5a0e77bd".into()),
             ToDaemon::Query,
@@ -371,7 +412,12 @@ mod tests {
     #[test]
     fn roundtrip_to_client() {
         let line = LineSpans(vec![
-            Span { text: "warren".into(), fg: Color::Indexed(213), bg: Color::Default, attrs: 1 },
+            Span {
+                text: "warren".into(),
+                fg: Color::Indexed(213),
+                bg: Color::Default,
+                attrs: 1,
+            },
             Span::plain(" v1"),
         ]);
         let msgs = vec![
@@ -397,7 +443,10 @@ mod tests {
                 cursor: (1, 0),
                 cursor_visible: false,
             },
-            ToClient::ModeChanged { alt_screen: true, mouse: MouseProto::Motion },
+            ToClient::ModeChanged {
+                alt_screen: true,
+                mouse: MouseProto::Motion,
+            },
             ToClient::MetaChanged(sample_meta()),
             ToClient::StateChanged(AgentState {
                 hook: None,

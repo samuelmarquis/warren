@@ -11,8 +11,8 @@ mod input;
 mod render;
 mod tree;
 
-use std::collections::HashSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io::{ErrorKind, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
@@ -112,7 +112,10 @@ impl Dash {
     }
 
     fn pane_size(&self) -> (u16, u16) {
-        (self.cols.saturating_sub(SIDEBAR_WIDTH).max(2), self.rows.saturating_sub(1).max(1))
+        (
+            self.cols.saturating_sub(SIDEBAR_WIDTH).max(2),
+            self.rows.saturating_sub(1).max(1),
+        )
     }
 
     pub fn send_input(&mut self, bytes: &[u8]) {
@@ -194,7 +197,11 @@ impl Dash {
     pub fn home_for(&self, host: Option<&str>) -> &str {
         match host {
             None => &self.here_home,
-            Some(dest) => self.hosts.get(dest).and_then(|h| h.home.as_deref()).unwrap_or(""),
+            Some(dest) => self
+                .hosts
+                .get(dest)
+                .and_then(|h| h.home.as_deref())
+                .unwrap_or(""),
         }
     }
 
@@ -331,7 +338,11 @@ impl Dash {
             self.status_dirty = true;
             return;
         }
-        let msg = if agent.asleep() { ToDaemon::Wake } else { ToDaemon::Sleep };
+        let msg = if agent.asleep() {
+            ToDaemon::Wake
+        } else {
+            ToDaemon::Sleep
+        };
         if let Some(agent) = self.focused_mut() {
             agent.send(&msg);
         }
@@ -404,12 +415,23 @@ impl Dash {
         }
         let focus = self.focus;
         let sections = self.sections();
-        let Some((folder, at)) = sections.iter().flat_map(|s| s.folders.iter()).find_map(|f| {
-            f.items.iter().position(|i| *i == tree::Item::Live(focus)).map(|at| (f, at))
-        }) else {
+        let Some((folder, at)) = sections
+            .iter()
+            .flat_map(|s| s.folders.iter())
+            .find_map(|f| {
+                f.items
+                    .iter()
+                    .position(|i| *i == tree::Item::Live(focus))
+                    .map(|at| (f, at))
+            })
+        else {
             return;
         };
-        let next = if down { at.checked_add(1) } else { at.checked_sub(1) };
+        let next = if down {
+            at.checked_add(1)
+        } else {
+            at.checked_sub(1)
+        };
         let target = match next.and_then(|n| folder.items.get(n)) {
             Some(tree::Item::Live(index)) => *index,
             _ => return,
@@ -520,7 +542,11 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
     let winch_rx = install_sigwinch()?;
     unsafe {
         poller.add_with_mode(stdin, PollEvent::readable(KEY_STDIN), PollMode::Level)?;
-        poller.add_with_mode(&winch_rx, PollEvent::readable(KEY_SIGWINCH), PollMode::Level)?;
+        poller.add_with_mode(
+            &winch_rx,
+            PollEvent::readable(KEY_SIGWINCH),
+            PollMode::Level,
+        )?;
     }
 
     // Agents this machine lost when it stopped come back asleep before
@@ -553,7 +579,11 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
 
     // Opt-in field diagnostics, same file the daemons use (WARREN_LOG).
     let mut log = std::env::var("WARREN_LOG").ok().and_then(|p| {
-        std::fs::OpenOptions::new().create(true).append(true).open(p).ok()
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(p)
+            .ok()
     });
     let log_t0 = Instant::now();
     macro_rules! dlog {
@@ -714,7 +744,13 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
                     .hosts
                     .iter()
                     .map(|h| {
-                        format!("{}={:?} key={:?} roster={}", h.label, h.state, h.key, h.roster.len())
+                        format!(
+                            "{}={:?} key={:?} roster={}",
+                            h.label,
+                            h.state,
+                            h.key,
+                            h.roster.len()
+                        )
                     })
                     .collect();
                 dlog!("hosts: [{}] dialled={dialled:?}", states.join(" | "));
@@ -730,7 +766,10 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
 /// remote one is still a row its machine has not reported yet — so this both
 /// focuses what is here and remembers what is not.
 pub fn focus_when_it_arrives(dash: &mut Dash, host: Option<String>, name: String) {
-    let here = dash.agents.iter().position(|a| a.ident() == (host.as_deref(), name.as_str()));
+    let here = dash
+        .agents
+        .iter()
+        .position(|a| a.ident() == (host.as_deref(), name.as_str()));
     match here {
         Some(idx) => {
             dash.pending_focus = None;
@@ -738,7 +777,13 @@ pub fn focus_when_it_arrives(dash: &mut Dash, host: Option<String>, name: String
             dash.agents[idx].full_dirty = true;
             dash.enter_insert();
         }
-        None => dash.pending_focus = Some(Pending { host, name, since: Instant::now() }),
+        None => {
+            dash.pending_focus = Some(Pending {
+                host,
+                name,
+                since: Instant::now(),
+            })
+        }
     }
 }
 
@@ -771,7 +816,9 @@ const PENDING_PATIENCE: Duration = Duration::from_secs(15);
 /// reason (a local one that died starting), or that it never showed, rather
 /// than leave "creating agent…" up forever.
 pub fn give_up_on_pending(dash: &mut Dash) {
-    let Some(p) = dash.pending_focus.as_ref() else { return };
+    let Some(p) = dash.pending_focus.as_ref() else {
+        return;
+    };
     let died = match p.host {
         None => crate::cli::start_failure(&p.name),
         Some(_) => None,
@@ -790,12 +837,17 @@ pub fn give_up_on_pending(dash: &mut Dash) {
 }
 
 fn host_label(dash: &Dash, dest: &str) -> String {
-    dash.hosts.get(dest).map(|h| h.label.clone()).unwrap_or_else(|| dest.to_string())
+    dash.hosts
+        .get(dest)
+        .map(|h| h.label.clone())
+        .unwrap_or_else(|| dest.to_string())
 }
 
 /// Connect any run-dir socket we aren't already attached to.
 fn discover_new(dash: &mut Dash, poller: &Poller, next_key: &mut usize) {
-    let Ok(entries) = std::fs::read_dir(crate::paths::run_dir()) else { return };
+    let Ok(entries) = std::fs::read_dir(crate::paths::run_dir()) else {
+        return;
+    };
     let known: HashSet<_> = dash.agents.iter().map(|a| a.sock.clone()).collect();
     let (pw, ph) = dash.pane_size();
     for entry in entries.flatten() {
@@ -857,7 +909,9 @@ fn discover_remote(dash: &mut Dash, poller: &Poller, next_key: &mut usize) {
         }
     }
     for (dest, name) in wanted {
-        let Some(host) = dash.hosts.get(&dest) else { continue };
+        let Some(host) = dash.hosts.get(&dest) else {
+            continue;
+        };
         // One `ssh … warren __pipe` per agent, all sharing the machine's
         // single ssh connection. What comes back is an ordinary UnixStream.
         let agent = match AgentConn::attach_remote(host, &name, pw, ph) {
@@ -944,7 +998,11 @@ fn sort_agents(dash: &mut Dash) {
         // This machine first, then the others in the order the file lists.
         match &agent.host {
             None => 0,
-            Some(dest) => hosts.iter().position(|h| h == dest).map(|i| i + 1).unwrap_or(usize::MAX),
+            Some(dest) => hosts
+                .iter()
+                .position(|h| h == dest)
+                .map(|i| i + 1)
+                .unwrap_or(usize::MAX),
         }
     }
     fn order<'a>(
@@ -959,7 +1017,12 @@ fn sort_agents(dash: &mut Dash) {
         // first looked tidy and made the order unmovable: a folder is
         // everything under `~/Developer`, nearly every agent in it has a
         // directory of its own, and a swap of slots moved nothing.
-        (machine_of(agent, hosts), folder, agent.meta.slot, agent.meta.created)
+        (
+            machine_of(agent, hosts),
+            folder,
+            agent.meta.slot,
+            agent.meta.created,
+        )
     }
     let hosts: Vec<String> = dash.hosts.hosts.iter().map(|h| h.dest.clone()).collect();
     {
@@ -975,9 +1038,11 @@ fn sort_agents(dash: &mut Dash) {
                 .and_modify(|r| *r = (*r).min(key))
                 .or_insert(key);
         }
-        if dash.agents.windows(2).all(|w| {
-            order(&w[0], &rank, &hosts, &homes) <= order(&w[1], &rank, &hosts, &homes)
-        }) {
+        if dash
+            .agents
+            .windows(2)
+            .all(|w| order(&w[0], &rank, &hosts, &homes) <= order(&w[1], &rank, &hosts, &homes))
+        {
             return;
         }
     }
@@ -1000,8 +1065,10 @@ fn sort_agents(dash: &mut Dash) {
             .or_insert(key);
     }
     let owned = |a: &AgentConn| {
-        let folder =
-            rank.get(&(a.host.clone(), folder_owned(a))).copied().unwrap_or((u8::MAX, u64::MAX));
+        let folder = rank
+            .get(&(a.host.clone(), folder_owned(a)))
+            .copied()
+            .unwrap_or((u8::MAX, u64::MAX));
         (machine_of(a, &hosts), folder, a.meta.slot, a.meta.created)
     };
     let focused_name = dash.focused().map(|a| a.meta.name.clone());

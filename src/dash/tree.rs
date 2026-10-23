@@ -112,7 +112,11 @@ fn guess_home(cwd: &str) -> &str {
 }
 
 fn home_or_guess<'a>(cwd: &'a str, home: &'a str) -> &'a str {
-    if home.is_empty() { guess_home(cwd) } else { home }
+    if home.is_empty() {
+        guess_home(cwd)
+    } else {
+        home
+    }
 }
 
 /// A folder's own name: the last component of its path, `~` for home itself,
@@ -160,7 +164,11 @@ pub fn build(
     let named = !hosts.is_empty(); // a lone machine needs no heading
     sections.push(Section {
         host: None,
-        label: if named { local_label.to_string() } else { String::new() },
+        label: if named {
+            local_label.to_string()
+        } else {
+            String::new()
+        },
         status: None,
         folders: Vec::new(),
     });
@@ -176,14 +184,24 @@ pub fn build(
     let section_of = |host: Option<&str>| -> usize {
         match host {
             None => 0,
-            Some(dest) => hosts.iter().position(|h| h.dest == dest).map(|i| i + 1).unwrap_or(0),
+            Some(dest) => hosts
+                .iter()
+                .position(|h| h.dest == dest)
+                .map(|i| i + 1)
+                .unwrap_or(0),
         }
     };
 
     for entry in entries {
         let s = section_of(entry.host);
         let home = home_or_guess(entry.cwd, entry.home);
-        push_item(&mut sections[s].folders, entry.cwd, home, Item::Live(entry.index), collapsed);
+        push_item(
+            &mut sections[s].folders,
+            entry.cwd,
+            home,
+            Item::Live(entry.index),
+            collapsed,
+        );
     }
     // A machine that isn't answering shows what it had, greyed.
     for (i, host) in hosts.iter().enumerate() {
@@ -192,7 +210,13 @@ pub fn build(
         }
         for (g, ghost) in host.ghosts.iter().enumerate() {
             let home = home_or_guess(&ghost.cwd, host.home);
-            push_item(&mut sections[i + 1].folders, &ghost.cwd, home, Item::Ghost(i, g), collapsed);
+            push_item(
+                &mut sections[i + 1].folders,
+                &ghost.cwd,
+                home,
+                Item::Ghost(i, g),
+                collapsed,
+            );
         }
     }
 
@@ -240,7 +264,10 @@ pub fn disambiguate(sections: &mut [Section]) {
         std::collections::HashMap::new();
     for section in sections.iter() {
         for folder in &section.folders {
-            places.entry(folder.label.as_str()).or_default().insert(folder.rel.as_str());
+            places
+                .entry(folder.label.as_str())
+                .or_default()
+                .insert(folder.rel.as_str());
         }
     }
     let ambiguous: HashSet<String> = places
@@ -305,7 +332,11 @@ pub fn locate(sections: &[Section], folder: usize, item: usize) -> Result<usize,
         Item::Live(index) => Ok(*index),
         Item::Ghost(..) => Err(format!(
             "{} is not answering",
-            if section.label.is_empty() { "that machine" } else { &section.label }
+            if section.label.is_empty() {
+                "that machine"
+            } else {
+                &section.label
+            }
         )),
     }
 }
@@ -345,32 +376,89 @@ mod tests {
     #[test]
     fn one_machine_needs_no_heading() {
         let entries = vec![
-            Entry { index: 0, host: None, cwd: "/w/research", home: "" },
-            Entry { index: 1, host: None, cwd: "/w/research", home: "" },
-            Entry { index: 2, host: None, cwd: "/w/phylo", home: "" },
+            Entry {
+                index: 0,
+                host: None,
+                cwd: "/w/research",
+                home: "",
+            },
+            Entry {
+                index: 1,
+                host: None,
+                cwd: "/w/research",
+                home: "",
+            },
+            Entry {
+                index: 2,
+                host: None,
+                cwd: "/w/phylo",
+                home: "",
+            },
         ];
         let sections = build(&entries, &[], &HashSet::new(), "here");
         assert_eq!(
             shape(&sections),
-            ["1 research/", "  live 0", "  live 1", "2 phylo/", "  live 2", "+"]
+            [
+                "1 research/",
+                "  live 0",
+                "  live 1",
+                "2 phylo/",
+                "  live 2",
+                "+"
+            ]
         );
     }
 
     #[test]
     fn folder_numbers_run_through_the_machines() {
-        let hosts = [HostView { dest: "smq", label: "smq", home: "", status: None, ghosts: &[] }];
+        let hosts = [HostView {
+            dest: "smq",
+            label: "smq",
+            home: "",
+            status: None,
+            ghosts: &[],
+        }];
         let entries = vec![
-            Entry { index: 0, host: None, cwd: "/w/research", home: "" },
-            Entry { index: 1, host: None, cwd: "/w/phylo", home: "" },
-            Entry { index: 2, host: Some("smq"), cwd: "/r/games", home: "" },
-            Entry { index: 3, host: Some("smq"), cwd: "/r/mods", home: "" },
+            Entry {
+                index: 0,
+                host: None,
+                cwd: "/w/research",
+                home: "",
+            },
+            Entry {
+                index: 1,
+                host: None,
+                cwd: "/w/phylo",
+                home: "",
+            },
+            Entry {
+                index: 2,
+                host: Some("smq"),
+                cwd: "/r/games",
+                home: "",
+            },
+            Entry {
+                index: 3,
+                host: Some("smq"),
+                cwd: "/r/mods",
+                home: "",
+            },
         ];
         let sections = build(&entries, &hosts, &HashSet::new(), "here");
         assert_eq!(
             shape(&sections),
             [
-                "[here]", "1 research/", "  live 0", "2 phylo/", "  live 1",
-                "[smq]", "3 games/", "  live 2", "4 mods/", "  live 3", "+",
+                "[here]",
+                "1 research/",
+                "  live 0",
+                "2 phylo/",
+                "  live 1",
+                "[smq]",
+                "3 games/",
+                "  live 2",
+                "4 mods/",
+                "  live 3",
+                "+",
             ]
         );
         // Folders 3 and 4 are the remote ones, and two digits still reach them.
@@ -389,11 +477,25 @@ mod tests {
             status: Some("reconnecting…".into()),
             ghosts: &ghosts,
         }];
-        let entries = vec![Entry { index: 0, host: None, cwd: "/w/research", home: "" }];
+        let entries = vec![Entry {
+            index: 0,
+            host: None,
+            cwd: "/w/research",
+            home: "",
+        }];
         let sections = build(&entries, &hosts, &HashSet::new(), "here");
         assert_eq!(
             shape(&sections),
-            ["[here]", "1 research/", "  live 0", "[smq]", "2 games/", "  ghost 0.0", "  ghost 0.1", "+"]
+            [
+                "[here]",
+                "1 research/",
+                "  live 0",
+                "[smq]",
+                "2 games/",
+                "  ghost 0.0",
+                "  ghost 0.1",
+                "+"
+            ]
         );
         assert_eq!(locate(&sections, 2, 1), Err("smq is not answering".into()));
         assert_eq!(locate(&sections, 1, 1), Ok(0));
@@ -401,10 +503,26 @@ mod tests {
 
     #[test]
     fn same_named_directories_on_two_machines_stay_distinct() {
-        let hosts = [HostView { dest: "smq", label: "smq", home: "", status: None, ghosts: &[] }];
+        let hosts = [HostView {
+            dest: "smq",
+            label: "smq",
+            home: "",
+            status: None,
+            ghosts: &[],
+        }];
         let entries = vec![
-            Entry { index: 0, host: None, cwd: "/w/phylo/src", home: "" },
-            Entry { index: 1, host: Some("smq"), cwd: "/r/warren/src", home: "" },
+            Entry {
+                index: 0,
+                host: None,
+                cwd: "/w/phylo/src",
+                home: "",
+            },
+            Entry {
+                index: 1,
+                host: Some("smq"),
+                cwd: "/r/warren/src",
+                home: "",
+            },
         ];
         let mut sections = build(&entries, &hosts, &HashSet::new(), "here");
         disambiguate(&mut sections);
@@ -418,13 +536,43 @@ mod tests {
     fn folders_are_the_things_directly_inside_home() {
         let home = "/Users/sam";
         let entries = vec![
-            Entry { index: 0, host: None, cwd: "/Users/sam/Developer/warren", home },
-            Entry { index: 1, host: None, cwd: "/Users/sam/Developer/Phylogen", home },
-            Entry { index: 2, host: None, cwd: "/Users/sam/Developer/plugins/dsp/src", home },
-            Entry { index: 3, host: None, cwd: "/Users/sam/Research", home },
+            Entry {
+                index: 0,
+                host: None,
+                cwd: "/Users/sam/Developer/warren",
+                home,
+            },
+            Entry {
+                index: 1,
+                host: None,
+                cwd: "/Users/sam/Developer/Phylogen",
+                home,
+            },
+            Entry {
+                index: 2,
+                host: None,
+                cwd: "/Users/sam/Developer/plugins/dsp/src",
+                home,
+            },
+            Entry {
+                index: 3,
+                host: None,
+                cwd: "/Users/sam/Research",
+                home,
+            },
             // Home itself, and somewhere else on the machine entirely.
-            Entry { index: 4, host: None, cwd: "/Users/sam", home },
-            Entry { index: 5, host: None, cwd: "/private/tmp", home },
+            Entry {
+                index: 4,
+                host: None,
+                cwd: "/Users/sam",
+                home,
+            },
+            Entry {
+                index: 5,
+                host: None,
+                cwd: "/private/tmp",
+                home,
+            },
         ];
         let sections = build(&entries, &[], &HashSet::new(), "here");
         assert_eq!(
@@ -451,16 +599,46 @@ mod tests {
     fn a_home_no_one_reported_is_guessed_from_the_path() {
         // An older warren over there says no home; the paths still do.
         let entries = vec![
-            Entry { index: 0, host: Some("smq"), cwd: "/Users/critter/Developer/warren", home: "" },
-            Entry { index: 1, host: Some("smq"), cwd: "/home/critter/Games/spork", home: "" },
+            Entry {
+                index: 0,
+                host: Some("smq"),
+                cwd: "/Users/critter/Developer/warren",
+                home: "",
+            },
+            Entry {
+                index: 1,
+                host: Some("smq"),
+                cwd: "/home/critter/Games/spork",
+                home: "",
+            },
             // Nothing to guess from: the directory is its own folder.
-            Entry { index: 2, host: Some("smq"), cwd: "/opt/pmk/env", home: "" },
+            Entry {
+                index: 2,
+                host: Some("smq"),
+                cwd: "/opt/pmk/env",
+                home: "",
+            },
         ];
-        let hosts = [HostView { dest: "smq", label: "smq", home: "", status: None, ghosts: &[] }];
+        let hosts = [HostView {
+            dest: "smq",
+            label: "smq",
+            home: "",
+            status: None,
+            ghosts: &[],
+        }];
         let sections = build(&entries, &hosts, &HashSet::new(), "here");
         assert_eq!(
             shape(&sections),
-            ["[smq]", "1 Developer/", "  live 0", "2 Games/", "  live 1", "3 env/", "  live 2", "+"]
+            [
+                "[smq]",
+                "1 Developer/",
+                "  live 0",
+                "2 Games/",
+                "  live 1",
+                "3 env/",
+                "  live 2",
+                "+"
+            ]
         );
     }
 
@@ -470,7 +648,12 @@ mod tests {
     #[test]
     fn the_same_folder_on_two_machines_is_not_two_folders() {
         let entries = vec![
-            Entry { index: 0, host: None, cwd: "/Users/sam/Developer/warren", home: "/Users/sam" },
+            Entry {
+                index: 0,
+                host: None,
+                cwd: "/Users/sam/Developer/warren",
+                home: "/Users/sam",
+            },
             Entry {
                 index: 1,
                 host: Some("smq"),
@@ -478,20 +661,44 @@ mod tests {
                 home: "/Users/critter",
             },
         ];
-        let hosts =
-            [HostView { dest: "smq", label: "smq", home: "/Users/critter", status: None, ghosts: &[] }];
+        let hosts = [HostView {
+            dest: "smq",
+            label: "smq",
+            home: "/Users/critter",
+            status: None,
+            ghosts: &[],
+        }];
         let mut sections = build(&entries, &hosts, &HashSet::new(), "here");
         disambiguate(&mut sections);
         assert_eq!(
             shape(&sections),
-            ["[here]", "1 Developer/", "  live 0", "[smq]", "2 Developer/", "  live 1", "+"]
+            [
+                "[here]",
+                "1 Developer/",
+                "  live 0",
+                "[smq]",
+                "2 Developer/",
+                "  live 1",
+                "+"
+            ]
         );
     }
 
     #[test]
     fn folding_hides_agents_and_a_quiet_machine_disappears() {
-        let hosts = [HostView { dest: "smq", label: "smq", home: "", status: None, ghosts: &[] }];
-        let entries = vec![Entry { index: 0, host: None, cwd: "/w/a", home: "" }];
+        let hosts = [HostView {
+            dest: "smq",
+            label: "smq",
+            home: "",
+            status: None,
+            ghosts: &[],
+        }];
+        let entries = vec![Entry {
+            index: 0,
+            host: None,
+            cwd: "/w/a",
+            home: "",
+        }];
         let collapsed: HashSet<String> = ["/w/a".to_string()].into_iter().collect();
         let sections = build(&entries, &hosts, &collapsed, "here");
         // smq is answering and has nothing running: no heading for it.

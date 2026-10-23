@@ -117,7 +117,10 @@ impl Host {
                 let mut cmd = Command::new(parts.next().unwrap_or("ssh"));
                 // The stand-in execs the command itself, so its arguments
                 // arrive as written — quoting them would be quoting twice.
-                cmd.args(parts).arg(&self.dest).arg(&self.remote_bin).args(args);
+                cmd.args(parts)
+                    .arg(&self.dest)
+                    .arg(&self.remote_bin)
+                    .args(args);
                 return cmd;
             }
         }
@@ -272,9 +275,14 @@ pub struct Hosts {
 /// symlink into the store, where every file is dated 1970 — editing it swaps
 /// the link for a new one at the same old date, so only the link's own mtime
 /// moves. A plain file has the same time in both.
-fn stamp_of(path: &std::path::Path) -> (Option<std::time::SystemTime>, Option<std::time::SystemTime>) {
+fn stamp_of(
+    path: &std::path::Path,
+) -> (Option<std::time::SystemTime>, Option<std::time::SystemTime>) {
     let modified = |m: std::io::Result<std::fs::Metadata>| m.and_then(|m| m.modified()).ok();
-    (modified(std::fs::symlink_metadata(path)), modified(std::fs::metadata(path)))
+    (
+        modified(std::fs::symlink_metadata(path)),
+        modified(std::fs::metadata(path)),
+    )
 }
 
 impl Hosts {
@@ -310,7 +318,11 @@ impl Hosts {
             let bin = cols.next().unwrap_or("warren").to_string();
             wanted.push((dest.to_string(), bin));
         }
-        if wanted.iter().map(|(d, _)| d.as_str()).eq(self.hosts.iter().map(|h| h.dest.as_str())) {
+        if wanted
+            .iter()
+            .map(|(d, _)| d.as_str())
+            .eq(self.hosts.iter().map(|h| h.dest.as_str()))
+        {
             return false;
         }
         // Keep the hosts that stayed, in the file's order, so a reload does
@@ -398,8 +410,12 @@ impl Hosts {
         let mut buf = [0u8; 8192];
         let mut closed = false;
         loop {
-            let Some(child) = host.watcher.as_mut() else { break };
-            let Some(out) = child.stdout.as_mut() else { break };
+            let Some(child) = host.watcher.as_mut() else {
+                break;
+            };
+            let Some(out) = child.stdout.as_mut() else {
+                break;
+            };
             match out.read(&mut buf) {
                 Ok(0) => {
                     closed = true;
@@ -475,7 +491,9 @@ impl Hosts {
     /// answering for it. Merged by name, and kept in sidebar order so the
     /// dimmed rows sit where the live ones did.
     pub fn park(&mut self, dest: &str, ghosts: Vec<Ghost>) {
-        let Some(host) = self.hosts.iter_mut().find(|h| h.dest == dest) else { return };
+        let Some(host) = self.hosts.iter_mut().find(|h| h.dest == dest) else {
+            return;
+        };
         for ghost in ghosts {
             match host.ghosts.iter_mut().find(|g| g.name == ghost.name) {
                 Some(slot) => *slot = ghost,
@@ -486,7 +504,9 @@ impl Hosts {
         let mut rank: HashMap<String, (u8, u64)> = HashMap::new();
         for g in &host.ghosts {
             let key = (g.slot, g.created);
-            rank.entry(g.cwd.clone()).and_modify(|r| *r = (*r).min(key)).or_insert(key);
+            rank.entry(g.cwd.clone())
+                .and_modify(|r| *r = (*r).min(key))
+                .or_insert(key);
         }
         host.ghosts.sort_by(|a, b| {
             let ra = rank.get(&a.cwd).copied().unwrap_or((u8::MAX, u64::MAX));

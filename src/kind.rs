@@ -114,7 +114,12 @@ impl Kind {
     /// the pty, so the row keyed by its own slave tty is the agent's own.
     /// Tty names are recycled, so a stale row is rejected on either count:
     /// written before this process started, or for another directory.
-    pub fn live_session(self, tty: &str, cwd: &str, started: std::time::SystemTime) -> Option<String> {
+    pub fn live_session(
+        self,
+        tty: &str,
+        cwd: &str,
+        started: std::time::SystemTime,
+    ) -> Option<String> {
         match self {
             Kind::Claude => None,
             Kind::Omp => {
@@ -139,7 +144,6 @@ impl Kind {
     pub fn learns_session_from_tty(self) -> bool {
         matches!(self, Kind::Omp)
     }
-
 }
 
 #[cfg(test)]
@@ -159,7 +163,10 @@ mod tests {
         assert_eq!(Kind::Claude.base_command("new", None), "claude");
         assert_eq!(Kind::Omp.base_command("new", None), "omp");
         assert_eq!(Kind::Omp.base_command("continue", None), "omp --continue");
-        assert_eq!(Kind::Omp.base_command("resume", Some("abc")), "omp --resume abc");
+        assert_eq!(
+            Kind::Omp.base_command("resume", Some("abc")),
+            "omp --resume abc"
+        );
         // No id falls through to the harness's own picker.
         assert_eq!(Kind::Claude.base_command("resume", None), "claude --resume");
     }
@@ -192,7 +199,9 @@ mod tests {
         let before = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
         std::fs::write(rows.join("ttys004"), "/w/repo\n/s/2026_abc.jsonl\nfresh\n").unwrap();
         assert_eq!(
-            Kind::Omp.live_session("ttys004", "/w/repo", before).as_deref(),
+            Kind::Omp
+                .live_session("ttys004", "/w/repo", before)
+                .as_deref(),
             Some("/s/2026_abc.jsonl")
         );
         // Someone else's directory on a recycled tty.
@@ -201,7 +210,10 @@ mod tests {
         let after = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
         assert_eq!(Kind::Omp.live_session("ttys004", "/w/repo", after), None);
         // Claude reports its session through the hooks instead.
-        assert_eq!(Kind::Claude.live_session("ttys004", "/w/repo", before), None);
+        assert_eq!(
+            Kind::Claude.live_session("ttys004", "/w/repo", before),
+            None
+        );
 
         unsafe { std::env::remove_var("WARREN_OMP_HOME") };
         let _ = std::fs::remove_dir_all(&dir);

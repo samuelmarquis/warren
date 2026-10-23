@@ -14,6 +14,7 @@
 //!   warren __daemon …      internal: the per-agent daemon process
 
 mod cli;
+mod cycle;
 mod daemon;
 mod dash;
 mod hooks;
@@ -46,6 +47,10 @@ warren - a Claude Code agent multiplexer
   warren renew NAME [--matrix=on|off] [--force]
                          move an agent onto this warren (its daemon keeps the
                          binary it started from), optionally turning chat on
+  warren cycle [NAME...] [--renew]
+                         restart agents (default: all but this one) as each
+                         comes to rest: no turn, no background shells or
+                         subagents (--renew: renew each instead)
   warren attach NAME     view a single agent raw (no sidebar)
   warren restore [NAME]  bring back agents this machine lost when it stopped (asleep)
   warren sessions [KIND] list resumable sessions (claude, or omp)
@@ -58,7 +63,11 @@ can die and restart freely without touching them.
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let sub = args.first().map(String::as_str).unwrap_or("up");
-    let rest = if args.is_empty() { &args[..] } else { &args[1..] };
+    let rest = if args.is_empty() {
+        &args[..]
+    } else {
+        &args[1..]
+    };
 
     let result: Result<()> = match sub {
         "up" => dash::run(),
@@ -70,6 +79,7 @@ fn main() {
         "set" => cli::cmd_set(rest),
         "join" => cli::cmd_join(rest),
         "renew" => cli::cmd_renew(rest),
+        "cycle" => cycle::cmd_cycle(rest),
         "attach" => cli::cmd_attach(rest),
         "restore" => cli::cmd_restore(rest),
         "sessions" => sessions::cmd_sessions(rest),
@@ -92,4 +102,3 @@ fn main() {
         std::process::exit(1);
     }
 }
-

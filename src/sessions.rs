@@ -66,7 +66,13 @@ fn newest_first(rows: &mut [Session]) {
 
 /// Squash whitespace and cap at 80 chars, as the pickers display them.
 fn tidy(label: &str) -> String {
-    label.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(80).collect()
+    label
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(80)
+        .collect()
 }
 
 /// OMP keeps one directory per project, each holding `<timestamp>_<uuid>.jsonl`.
@@ -80,7 +86,9 @@ pub fn scan_omp(root: &Path) -> Vec<Session> {
         return rows;
     };
     for project in projects.flatten() {
-        let Ok(files) = std::fs::read_dir(project.path()) else { continue };
+        let Ok(files) = std::fs::read_dir(project.path()) else {
+            continue;
+        };
         for file in files.flatten() {
             let path = file.path();
             if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
@@ -93,7 +101,9 @@ pub fn scan_omp(root: &Path) -> Vec<Session> {
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                 .map(|d| d.as_secs_f64())
                 .unwrap_or(0.0);
-            let Ok(handle) = std::fs::File::open(&path) else { continue };
+            let Ok(handle) = std::fs::File::open(&path) else {
+                continue;
+            };
             let mut reader = BufReader::new(handle);
 
             let (mut id, mut cwd, mut title, mut pad_title) =
@@ -109,16 +119,34 @@ pub fn scan_omp(root: &Path) -> Vec<Session> {
                 if !(ln.contains("\"session\"") || ln.contains("\"title\"")) {
                     continue;
                 }
-                let Ok(d) = serde_json::from_str::<Value>(&ln) else { continue };
+                let Ok(d) = serde_json::from_str::<Value>(&ln) else {
+                    continue;
+                };
                 match d.get("type").and_then(Value::as_str) {
                     Some("session") => {
-                        id = d.get("id").and_then(Value::as_str).unwrap_or("").to_string();
-                        cwd = d.get("cwd").and_then(Value::as_str).unwrap_or("").to_string();
-                        title = d.get("title").and_then(Value::as_str).unwrap_or("").to_string();
+                        id = d
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        cwd = d
+                            .get("cwd")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        title = d
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
                     }
                     Some("title") => {
-                        pad_title =
-                            d.get("title").and_then(Value::as_str).unwrap_or("").trim().to_string();
+                        pad_title = d
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
                     }
                     _ => {}
                 }
@@ -163,13 +191,20 @@ pub fn scan_claude(root: &Path) -> Vec<Session> {
                 continue;
             };
             let Ok(meta) = file.metadata() else { continue };
-            let Ok(modified) = meta.modified() else { continue };
+            let Ok(modified) = meta.modified() else {
+                continue;
+            };
             let mtime = modified
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs_f64())
                 .unwrap_or(0.0);
             if let Some((cwd, label)) = read_session_file(&path) {
-                rows.push(Session { id: stem.to_string(), mtime, cwd, title: label });
+                rows.push(Session {
+                    id: stem.to_string(),
+                    mtime,
+                    cwd,
+                    title: label,
+                });
             }
         }
     }
@@ -277,8 +312,10 @@ mod tests {
     use std::fs;
 
     fn fixture_root(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("warren-sessions-test-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "warren-sessions-test-{}-{name}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("proj")).unwrap();
         dir
@@ -384,13 +421,20 @@ mod tests {
         )
         .unwrap();
         // A file with no session record is not an OMP session we understand.
-        fs::write(root.join("-w-repo/notes.jsonl"), "{\"type\":\"model_change\"}\n").unwrap();
+        fs::write(
+            root.join("-w-repo/notes.jsonl"),
+            "{\"type\":\"model_change\"}\n",
+        )
+        .unwrap();
 
         let s = scan_omp(&root);
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].id, "01a08858-abcd");
         assert_eq!(s[0].cwd, "/w/repo");
-        assert_eq!(s[0].title, "Remove noreply lines", "the head title wins, whitespace squashed");
+        assert_eq!(
+            s[0].title, "Remove noreply lines",
+            "the head title wins, whitespace squashed"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

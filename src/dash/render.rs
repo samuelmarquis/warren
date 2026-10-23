@@ -109,7 +109,11 @@ fn draw_sidebar(dash: &mut Dash, out: &mut String) {
                 };
                 let text: String = text.chars().take(text_w.saturating_sub(1)).collect();
                 let pad = text_w.saturating_sub(text.chars().count() + 1);
-                let style = if section.status.is_some() { "\x1b[0;2;3m" } else { "\x1b[0;1;4m" };
+                let style = if section.status.is_some() {
+                    "\x1b[0;2;3m"
+                } else {
+                    "\x1b[0;1;4m"
+                };
                 // The gutter is not part of the name: underlining it makes
                 // the heading look like it starts a column before it does.
                 let _ = write!(out, "\x1b[0m {style}{text}\x1b[0m{}", " ".repeat(pad));
@@ -117,17 +121,23 @@ fn draw_sidebar(dash: &mut Dash, out: &mut String) {
             // A working directory. Folded, it says how many it is holding.
             Row::Folder(s, f) => {
                 let folder = &sections[s].folders[f];
-                let holds_focus =
-                    folder.items.contains(&tree::Item::Live(dash.focus));
-                let tail =
-                    if folder.collapsed { format!("\u{25b8}{} ", folder.items.len()) } else { String::new() };
+                let holds_focus = folder.items.contains(&tree::Item::Live(dash.focus));
+                let tail = if folder.collapsed {
+                    format!("\u{25b8}{} ", folder.items.len())
+                } else {
+                    String::new()
+                };
                 let room = text_w.saturating_sub(tail.chars().count());
                 let head = format!(" {} {}/", row_number(folder.number), folder.label);
                 let head: String = head.chars().take(room).collect();
                 let pad = room.saturating_sub(head.chars().count());
                 // Bold while it holds the focused agent — a folded folder is
                 // then the only thing on screen saying where you are.
-                let style = if holds_focus { "\x1b[0;1m" } else { "\x1b[0;2m" };
+                let style = if holds_focus {
+                    "\x1b[0;1m"
+                } else {
+                    "\x1b[0;2m"
+                };
                 let _ = write!(out, "{style}{head}{}{tail}\x1b[0m", " ".repeat(pad));
             }
             Row::Item(s, f, i) => {
@@ -172,7 +182,11 @@ fn draw_sidebar(dash: &mut Dash, out: &mut String) {
                         if focused {
                             if color != 0 {
                                 let (r, g, b) = spans::xterm256_to_rgb(color);
-                                let fg = if spans::color_is_dark(r, g, b) { 231 } else { 16 };
+                                let fg = if spans::color_is_dark(r, g, b) {
+                                    231
+                                } else {
+                                    16
+                                };
                                 let _ = write!(style, ";48;5;{color};38;5;{fg}");
                             } else {
                                 style.push_str(";7");
@@ -201,7 +215,10 @@ fn draw_sidebar(dash: &mut Dash, out: &mut String) {
 
 /// Horizontal box-drawing leads that should joint into the divider with '├'.
 fn joins_divider(c: char) -> bool {
-    matches!(c, '\u{2500}' | '\u{2501}' | '\u{254c}' | '\u{2504}' | '\u{2508}' | '\u{2574}' | '\u{2576}')
+    matches!(
+        c,
+        '\u{2500}' | '\u{2501}' | '\u{254c}' | '\u{2504}' | '\u{2508}' | '\u{2574}' | '\u{2576}'
+    )
 }
 
 /// Is this row one of the harness's rules — the lines around Claude Code's
@@ -209,7 +226,11 @@ fn joins_divider(c: char) -> bool {
 /// is also what makes it meet the divider; the divider and the recolouring
 /// share this one test so a junction and the line it joins always agree.
 fn is_rule(line: &LineSpans) -> bool {
-    line.0.first().and_then(|s| s.text.chars().next()).map(joins_divider).unwrap_or(false)
+    line.0
+        .first()
+        .and_then(|s| s.text.chars().next())
+        .map(joins_divider)
+        .unwrap_or(false)
 }
 
 /// The colour an agent's rules are painted in: its warren colour, when it
@@ -322,7 +343,11 @@ fn draw_pane_line(
     let recolor = rules.filter(|_| is_rule(line));
     let pieces: Vec<Span> = match recolor {
         None => line.0.clone(),
-        Some(fg) => line.0.iter().flat_map(|span| split_rule(span, fg)).collect(),
+        Some(fg) => line
+            .0
+            .iter()
+            .flat_map(|span| split_rule(span, fg))
+            .collect(),
     };
     let mut budget = width;
     for span in &pieces {
@@ -359,7 +384,11 @@ fn split_rule(span: &Span, fg: spans::Color) -> Vec<Span> {
     let chip_text = match fg {
         spans::Color::Indexed(i) => {
             let (r, g, b) = spans::xterm256_to_rgb(i);
-            spans::Color::Indexed(if spans::color_is_dark(r, g, b) { 231 } else { 16 })
+            spans::Color::Indexed(if spans::color_is_dark(r, g, b) {
+                231
+            } else {
+                16
+            })
         }
         _ => span.fg,
     };
@@ -378,7 +407,12 @@ fn split_rule(span: &Span, fg: spans::Color) -> Vec<Span> {
                 (false, false) => (chip_text, fg),
                 (false, true) => (span.fg, span.bg),
             };
-            Span { text, fg, bg, attrs: span.attrs }
+            Span {
+                text,
+                fg,
+                bg,
+                attrs: span.attrs,
+            }
         })
         .collect()
 }
@@ -408,7 +442,10 @@ fn draw_sleep_badge(out: &mut String, x0: u16, pane_w: usize, pane_h: u16, color
         if pane_h >= 1 && pane_w >= len + 2 {
             let col = x0 as usize + (pane_w - len) / 2;
             let row = (pane_h / 2).max(1);
-            let _ = write!(out, "\x1b[{row};{col}H\x1b[0;1masleep\x1b[0;2m  ·  {hint}\x1b[0m");
+            let _ = write!(
+                out,
+                "\x1b[{row};{col}H\x1b[0;1masleep\x1b[0;2m  ·  {hint}\x1b[0m"
+            );
         }
         return;
     }
@@ -460,7 +497,10 @@ fn draw_sleep_badge(out: &mut String, x0: u16, pane_w: usize, pane_h: u16, color
         }
         let has_sheep = r as i32 >= sprite_top && r as i32 <= sprite_top + 2;
         let style = if has_sheep { sheep_style } else { sky_style };
-        rows.push(format!("{border}│{style}{}{border}│\x1b[0m", cell_row(iw, &pieces)));
+        rows.push(format!(
+            "{border}│{style}{}{border}│\x1b[0m",
+            cell_row(iw, &pieces)
+        ));
     }
     // The ground, with the fence post standing on it.
     let mut ground: Vec<char> = std::iter::repeat_n('▁', iw).collect();
@@ -501,7 +541,12 @@ fn center(width: usize, text: &str) -> String {
         return text.chars().take(width).collect();
     }
     let pad = (width - len) / 2;
-    format!("{}{}{}", " ".repeat(pad), text, " ".repeat(width - len - pad))
+    format!(
+        "{}{}{}",
+        " ".repeat(pad),
+        text,
+        " ".repeat(width - len - pad)
+    )
 }
 
 // Mode-chip styles: CLAUDE = Anthropic orange (#D97757), NORMAL = green,
@@ -534,7 +579,10 @@ fn draw_status(dash: &mut Dash, out: &mut String) {
             dash.cmdline
         )
     } else if matches!(dash.sub, Sub::Rename) {
-        format!(" rename> {}\u{2588}   Enter save · Esc cancel", dash.cmdline)
+        format!(
+            " rename> {}\u{2588}   Enter save · Esc cancel",
+            dash.cmdline
+        )
     } else if let Sub::Goto(folder) = dash.sub {
         let sections = dash.sections();
         let found = sections
@@ -557,7 +605,10 @@ fn draw_status(dash: &mut Dash, out: &mut String) {
             None => format!(" go to  {folder} \u{2588}   (no folder {folder})"),
         }
     } else if matches!(dash.sub, Sub::Kill) {
-        let name = dash.focused().map(|a| a.meta.display.clone()).unwrap_or_default();
+        let name = dash
+            .focused()
+            .map(|a| a.meta.display.clone())
+            .unwrap_or_default();
         format!(" close agent '{name}'?  [y] yes · [n] no")
     } else if dash.editform.is_some() {
         " Tab field · type / arrows · Enter save · Esc cancel".to_string()
@@ -590,7 +641,10 @@ fn draw_status(dash: &mut Dash, out: &mut String) {
     };
 
     let chip_text = format!(" {chip} ");
-    let body: String = body.chars().take(width.saturating_sub(chip_text.len())).collect();
+    let body: String = body
+        .chars()
+        .take(width.saturating_sub(chip_text.len()))
+        .collect();
     let pad = width.saturating_sub(chip_text.len() + body.chars().count());
     let _ = write!(
         out,
@@ -608,7 +662,12 @@ fn place_cursor(dash: &Dash, out: &mut String) {
         // blinking on the frozen screen would look live.
         if agent.cursor_visible && agent.exited.is_none() && !agent.asleep() {
             let (row, col) = agent.cursor;
-            let _ = write!(out, "\x1b[{};{}H\x1b[?25h", row + 1, col + 1 + SIDEBAR_WIDTH);
+            let _ = write!(
+                out,
+                "\x1b[{};{}H\x1b[?25h",
+                row + 1,
+                col + 1 + SIDEBAR_WIDTH
+            );
             return;
         }
     }
@@ -639,7 +698,11 @@ mod tests {
                     if body.as_bytes().get(end) == Some(&b'H') {
                         let mut parts = body[..end].split(';');
                         let mut next = || {
-                            parts.next().and_then(|v| v.parse::<usize>().ok()).unwrap_or(1) - 1
+                            parts
+                                .next()
+                                .and_then(|v| v.parse::<usize>().ok())
+                                .unwrap_or(1)
+                                - 1
                         };
                         row = next();
                         col = next();
@@ -660,7 +723,10 @@ mod tests {
         }
 
         fn rows(&self) -> Vec<String> {
-            self.cells.iter().map(|r| r.iter().collect::<String>()).collect()
+            self.cells
+                .iter()
+                .map(|r| r.iter().collect::<String>())
+                .collect()
         }
 
         /// (row, col) of every painted cell outside the given rectangle.
@@ -694,10 +760,15 @@ mod tests {
         let mut hops = 0;
         for frame in 0..80 {
             let rows = badge(46, 14, frame).rows();
-            let fence = rows.iter().find(|r| r.contains('╥')).expect("a fence to jump");
+            let fence = rows
+                .iter()
+                .find(|r| r.contains('╥'))
+                .expect("a fence to jump");
             let fence_col = cell_col(fence, "╥").unwrap() as i32;
             let ground = rows.iter().position(|r| r.contains('▁')).unwrap();
-            let Some(face) = rows.iter().position(|r| r.contains("(o.o)")) else { continue };
+            let Some(face) = rows.iter().position(|r| r.contains("(o.o)")) else {
+                continue;
+            };
             let col = cell_col(&rows[face], "(o.o)").unwrap() as i32;
             columns.push(col);
             // Grounded, the face sits two rows above the ground; airborne,
@@ -714,9 +785,15 @@ mod tests {
                  (sheep at {col}, post at {fence_col})"
             );
         }
-        assert!(columns.len() > 20, "the sheep is on screen most of the time");
+        assert!(
+            columns.len() > 20,
+            "the sheep is on screen most of the time"
+        );
         let forward = columns.windows(2).filter(|w| w[1] > w[0]).count();
-        assert!(forward >= columns.len() - 2, "the sheep runs one way: {columns:?}");
+        assert!(
+            forward >= columns.len() - 2,
+            "the sheep runs one way: {columns:?}"
+        );
         assert!(hops >= 5, "it clears the fence in an arc, not a twitch");
     }
 
@@ -726,7 +803,10 @@ mod tests {
             for h in 0..14u16 {
                 let canvas = badge(w, h, 7);
                 let stray = canvas.outside(h as usize, 0..w);
-                assert!(stray.is_empty(), "badge escapes a {w}x{h} pane at {stray:?}");
+                assert!(
+                    stray.is_empty(),
+                    "badge escapes a {w}x{h} pane at {stray:?}"
+                );
             }
         }
     }

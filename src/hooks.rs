@@ -144,11 +144,17 @@ fn read_payload() -> Option<serde_json::Value> {
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 4096];
     loop {
-        let left = deadline.saturating_duration_since(Instant::now()).as_millis() as i32;
+        let left = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
         if left <= 0 {
             break;
         }
-        let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
         match unsafe { libc::poll(&mut pfd, 1, left) } {
             1 => {}
             _ => break, // timeout, or a stdin we can't poll

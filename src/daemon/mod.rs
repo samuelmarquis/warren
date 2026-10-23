@@ -56,7 +56,10 @@ const FLUSH_INTERVAL: Duration = Duration::from_millis(33);
 fn scrollback() -> usize {
     static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *N.get_or_init(|| {
-        std::env::var("WARREN_SCROLLBACK").ok().and_then(|v| v.parse().ok()).unwrap_or(2000)
+        std::env::var("WARREN_SCROLLBACK")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2000)
     })
 }
 
@@ -107,8 +110,14 @@ pub struct DaemonArgs {
 
 impl DaemonArgs {
     pub fn parse(rest: &[String]) -> Result<Self> {
-        let sys = rest.iter().find_map(|a| a.strip_prefix("--sys=")).map(String::from);
-        let extra = rest.iter().find_map(|a| a.strip_prefix("--extra=")).map(String::from);
+        let sys = rest
+            .iter()
+            .find_map(|a| a.strip_prefix("--sys="))
+            .map(String::from);
+        let extra = rest
+            .iter()
+            .find_map(|a| a.strip_prefix("--extra="))
+            .map(String::from);
         let kind = match rest.iter().find_map(|a| a.strip_prefix("--kind=")) {
             Some(k) => Kind::parse(k).with_context(|| format!("unknown agent kind '{k}'"))?,
             None => Kind::default(),
@@ -122,7 +131,9 @@ impl DaemonArgs {
             .filter(|t| !t.is_empty());
         let pos: Vec<&String> = rest.iter().filter(|a| !a.starts_with("--")).collect();
         if pos.len() < 5 {
-            bail!("usage: warren __daemon NAME SLOT COLOR MODE DIR [SESSION-ID] [--kind=…] [--sys=…] [--extra=…]");
+            bail!(
+                "usage: warren __daemon NAME SLOT COLOR MODE DIR [SESSION-ID] [--kind=…] [--sys=…] [--extra=…]"
+            );
         }
         Ok(DaemonArgs {
             name: pos[0].clone(),
@@ -133,7 +144,10 @@ impl DaemonArgs {
             dir: pos[4].clone(),
             sid: pos.get(5).map(|s| s.to_string()),
             sys,
-            extra, asleep, title, matrix,
+            extra,
+            asleep,
+            title,
+            matrix,
         })
     }
 }
@@ -183,7 +197,11 @@ impl Spawn {
         if self.matrix {
             // A start that cannot have the chat it was promised fails out
             // loud, rather than come up quietly deaf.
-            let name = self.env.get("WARREN_AGENT").map(String::as_str).unwrap_or_default();
+            let name = self
+                .env
+                .get("WARREN_AGENT")
+                .map(String::as_str)
+                .unwrap_or_default();
             let flags = crate::matrix::launch_flags(self.kind, name)
                 .context("setting up chat (`:set matrix off` starts it without)")?;
             cmd.push(' ');
@@ -220,8 +238,12 @@ impl Spawn {
                 .with_context(|| format!("agent directory {}", self.dir))?;
         }
         let cmd = self.command(mode, sid)?;
-        let window_size =
-            WindowSize { num_lines: rows, num_cols: cols, cell_width: 8, cell_height: 16 };
+        let window_size = WindowSize {
+            num_lines: rows,
+            num_cols: cols,
+            cell_width: 8,
+            cell_height: 16,
+        };
         let options = Options {
             shell: Some(Shell::new(self.shell.clone(), vec!["-c".into(), cmd])),
             working_directory: Some(self.dir.clone().into()),
@@ -295,18 +317,26 @@ pub fn run(args: DaemonArgs) -> Result<()> {
 
     let run_dir = crate::paths::ensure_run_dir()?;
     let sock = run_dir.join(format!("{}.sock", args.name));
-    let listener = bind_or_replace(&sock)
-        .with_context(|| format!("binding {}", sock.display()))?;
+    let listener = bind_or_replace(&sock).with_context(|| format!("binding {}", sock.display()))?;
     listener.set_nonblocking(true)?;
 
-    let log = std::env::var("WARREN_LOG").ok().map(|p| {
-        std::fs::OpenOptions::new().create(true).append(true).open(p)
-    }).and_then(Result::ok);
+    let log = std::env::var("WARREN_LOG")
+        .ok()
+        .map(|p| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)
+        })
+        .and_then(Result::ok);
 
     let mut env = HashMap::new();
     // TERM must be xterm-ish, NOT screen-*: Claude detects "screen" and falls
     // back to its alternate-screen renderer (no scrollback at all).
-    env.insert("TERM".into(), std::env::var("DVTM_TERM").unwrap_or_else(|_| "xterm-256color".into()));
+    env.insert(
+        "TERM".into(),
+        std::env::var("DVTM_TERM").unwrap_or_else(|_| "xterm-256color".into()),
+    );
     env.insert("COLORTERM".into(), "truecolor".into());
     env.insert("WARREN_AGENT".into(), args.name.clone());
     env.insert("WARREN_SOCK".into(), sock.display().to_string());
@@ -317,7 +347,9 @@ pub fn run(args: DaemonArgs) -> Result<()> {
         sys: args.sys.clone(),
         extra: args.extra.clone(),
         title: args.title.clone(),
-        custom: std::env::var("WARREN_AGENT_CMD").ok().filter(|c| !c.is_empty()),
+        custom: std::env::var("WARREN_AGENT_CMD")
+            .ok()
+            .filter(|c| !c.is_empty()),
         matrix: args.matrix,
         shell: std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
         env,
@@ -342,20 +374,34 @@ pub fn run(args: DaemonArgs) -> Result<()> {
         if let Some(pty) = pty.as_mut() {
             pty.register(&poller, PollEvent::readable(KEY_PTY), PollMode::Level)?;
         }
-        poller.add_with_mode(&listener, PollEvent::readable(KEY_LISTENER), PollMode::Level)?;
+        poller.add_with_mode(
+            &listener,
+            PollEvent::readable(KEY_LISTENER),
+            PollMode::Level,
+        )?;
     }
 
     // Harnesses that name their session on the tty are looked up; the others
     // report it themselves (claude, through its hooks).
     let spawn_probe = spawn.kind.learns_session_from_tty() && spawn.custom.is_none();
-    let created = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let mut daemon = Daemon {
         term: term::AgentTerm::new(80, 24, scrollback()),
         pty,
         // The first run has gone out carrying the name; every one after it
         // resumes a conversation that already has it.
-        spawn: Spawn { title: None, ..spawn },
-        power: if args.asleep { Power::Asleep } else { Power::Awake },
+        spawn: Spawn {
+            title: None,
+            ..spawn
+        },
+        power: if args.asleep {
+            Power::Asleep
+        } else {
+            Power::Awake
+        },
         sid,
         sleep_deadline: None,
         woke_at: None,
@@ -380,7 +426,10 @@ pub fn run(args: DaemonArgs) -> Result<()> {
             // the harness decides to call itself.
             display: args.title.clone().unwrap_or_else(|| args.name.clone()),
             color: args.color,
-            pinned: args.title.as_deref().is_some_and(|t| args.kind.name_flag(t).is_none()),
+            pinned: args
+                .title
+                .as_deref()
+                .is_some_and(|t| args.kind.name_flag(t).is_none()),
             slot: args.slot,
             cwd: args.dir,
             created,
@@ -453,7 +502,13 @@ impl Daemon {
     fn logf(&mut self, msg: &str) {
         if let Some(f) = &mut self.log {
             let t = self.started.elapsed();
-            let _ = writeln!(f, "[{}] {:>9.3}ms {}", self.meta.name, t.as_secs_f64() * 1000.0, msg);
+            let _ = writeln!(
+                f,
+                "[{}] {:>9.3}ms {}",
+                self.meta.name,
+                t.as_secs_f64() * 1000.0,
+                msg
+            );
         }
     }
 
@@ -482,9 +537,21 @@ impl Daemon {
             if self.log.is_some() && (events.iter().next().is_some() || self.dirty) {
                 let keys: Vec<String> = events
                     .iter()
-                    .map(|e| format!("{}{}{}", e.key, if e.readable { "r" } else { "" }, if e.writable { "w" } else { "" }))
+                    .map(|e| {
+                        format!(
+                            "{}{}{}",
+                            e.key,
+                            if e.readable { "r" } else { "" },
+                            if e.writable { "w" } else { "" }
+                        )
+                    })
                     .collect();
-                let msg = format!("wake: [{}] dirty={} flush_at={:?}", keys.join(","), self.dirty, flush_at.map(|a| a.saturating_duration_since(Instant::now())));
+                let msg = format!(
+                    "wake: [{}] dirty={} flush_at={:?}",
+                    keys.join(","),
+                    self.dirty,
+                    flush_at.map(|a| a.saturating_duration_since(Instant::now()))
+                );
                 self.logf(&msg);
             }
 
@@ -567,8 +634,10 @@ impl Daemon {
     /// or the agent genuinely ending (the only case that stops the daemon).
     fn on_child_exit(&mut self, status: i32) -> Option<i32> {
         self.read_pty(); // last words, before the pty goes away
-        let woke_recently =
-            self.woke_at.map(|t| t.elapsed() < WAKE_GRACE).unwrap_or(false);
+        let woke_recently = self
+            .woke_at
+            .map(|t| t.elapsed() < WAKE_GRACE)
+            .unwrap_or(false);
         match self.power {
             // Closing the agent means closing it — never mistake a kill for a
             // sleep, or for a resume that failed.
@@ -599,7 +668,9 @@ impl Daemon {
             // it the agent, which is exactly what a restart must not cost.
             // `/exit` exits 0; a kill we were asked for is caught above.
             _ if stopped_by_signal(status) => {
-                self.logf(&format!("stopped from outside: child exited with status {status}"));
+                self.logf(&format!(
+                    "stopped from outside: child exited with status {status}"
+                ));
                 self.finish_sleep();
                 None
             }
@@ -625,8 +696,8 @@ impl Daemon {
                         preview.push_str(&escape_bytes(&buf[..n.min(160)]));
                     }
                     // Output after a quiet spell is a turn beginning.
-                    began_turn |= (self.last_output.elapsed().as_millis() as u64)
-                        >= proto::BUSY_QUIET_MS;
+                    began_turn |=
+                        (self.last_output.elapsed().as_millis() as u64) >= proto::BUSY_QUIET_MS;
                     let history_was = self.term.history_len();
                     self.term.advance(&buf[..n]);
                     grew += self.term.history_len().saturating_sub(history_was);
@@ -675,7 +746,11 @@ impl Daemon {
             return;
         }
         if self.log.is_some() {
-            let msg = format!("write_pty: {} bytes  «{}»", self.pty_in.len(), escape_bytes(&self.pty_in[..self.pty_in.len().min(160)]));
+            let msg = format!(
+                "write_pty: {} bytes  «{}»",
+                self.pty_in.len(),
+                escape_bytes(&self.pty_in[..self.pty_in.len().min(160)])
+            );
             self.logf(&msg);
         }
         let pty = self.pty.as_mut().unwrap();
@@ -774,7 +849,9 @@ impl Daemon {
     /// A claude that won't take SIGTERM gets one SIGKILL, then we stop
     /// signalling: escalating forever is how a daemon spins.
     fn escalate_sleep(&mut self) {
-        let Some(deadline) = self.sleep_deadline else { return };
+        let Some(deadline) = self.sleep_deadline else {
+            return;
+        };
         if Instant::now() < deadline || self.power != Power::Sleeping {
             return;
         }
@@ -859,7 +936,10 @@ impl Daemon {
             self.logf(&format!("wake failed to register pty: {e}"));
             return; // pty drops here: SIGHUP + reap, still asleep
         }
-        self.logf(&format!("wake: {mode} {}", sid.as_deref().unwrap_or("(no session id)")));
+        self.logf(&format!(
+            "wake: {mode} {}",
+            sid.as_deref().unwrap_or("(no session id)")
+        ));
         self.tty = slave_tty(&mut pty);
         self.pty = Some(pty);
         self.pty_wants_write = false;
@@ -909,7 +989,9 @@ impl Daemon {
     }
 
     fn read_client(&mut self, key: usize) {
-        let Some(conn) = self.conns.get_mut(&key) else { return };
+        let Some(conn) = self.conns.get_mut(&key) else {
+            return;
+        };
         // On EOF, still process what's buffered first: one-shot peers
         // (hooks, Query scripts) write their frame and close immediately.
         let eof = !conn.fill();
@@ -957,7 +1039,12 @@ impl Daemon {
                 self.unscroll(key);
             }
             ToDaemon::Resize { cols, rows } => self.resize_to(cols, rows),
-            ToDaemon::Mouse { kind, col, row, mods } => {
+            ToDaemon::Mouse {
+                kind,
+                col,
+                row,
+                mods,
+            } => {
                 // No process to click on: a stray event must not queue up
                 // and land in the resumed prompt. The wheel still works,
                 // because scrolling what the agent left behind asks nothing
@@ -980,7 +1067,12 @@ impl Daemon {
                 };
                 self.scroll_conn(key, lines);
             }
-            ToDaemon::SetMeta { name, color, pinned, slot } => {
+            ToDaemon::SetMeta {
+                name,
+                color,
+                pinned,
+                slot,
+            } => {
                 if let Some(n) = name {
                     self.meta.display = n;
                 }
@@ -996,7 +1088,12 @@ impl Daemon {
                 let update = ToClient::MetaChanged(self.meta.clone());
                 self.broadcast(&update);
             }
-            ToDaemon::SetLaunch { dir, extra, sys, matrix } => {
+            ToDaemon::SetLaunch {
+                dir,
+                extra,
+                sys,
+                matrix,
+            } => {
                 let given = |v: String| Some(v).filter(|v| !v.trim().is_empty());
                 if let Some(dir) = dir {
                     self.logf(&format!("launch dir: {dir}"));
@@ -1117,9 +1214,13 @@ impl Daemon {
             .map(|(k, _)| *k)
             .collect();
         for key in moved {
-            let Some(offset) = self.conns.get(&key).map(|c| c.offset) else { continue };
+            let Some(offset) = self.conns.get(&key).map(|c| c.offset) else {
+                continue;
+            };
             let frame = self.snapshot_at(offset);
-            let Ok(encoded) = proto::encode_frame(&frame) else { continue };
+            let Ok(encoded) = proto::encode_frame(&frame) else {
+                continue;
+            };
             if let Some(conn) = self.conns.get_mut(&key) {
                 conn.scroll_dirty = false;
                 conn.send(&encoded);
@@ -1137,7 +1238,9 @@ impl Daemon {
             return;
         }
         let frame = self.snapshot_at(0);
-        let Ok(encoded) = proto::encode_frame(&frame) else { return };
+        let Ok(encoded) = proto::encode_frame(&frame) else {
+            return;
+        };
         if let Some(conn) = self.conns.get_mut(&key) {
             conn.offset = 0;
             conn.scroll_dirty = false;
@@ -1154,7 +1257,9 @@ impl Daemon {
             return;
         }
         let frame = self.snapshot_at(0);
-        let Ok(encoded) = proto::encode_frame(&frame) else { return };
+        let Ok(encoded) = proto::encode_frame(&frame) else {
+            return;
+        };
         for conn in self.conns.values_mut() {
             if conn.offset != 0 {
                 conn.offset = 0;
@@ -1277,7 +1382,10 @@ impl Daemon {
         if alt != self.sent_alt || mouse != self.sent_mouse {
             self.sent_alt = alt;
             self.sent_mouse = mouse;
-            let update = ToClient::ModeChanged { alt_screen: alt, mouse };
+            let update = ToClient::ModeChanged {
+                alt_screen: alt,
+                mouse,
+            };
             self.broadcast(&update);
         }
 
@@ -1307,7 +1415,9 @@ impl Daemon {
     }
 
     fn broadcast(&mut self, msg: &ToClient) {
-        let Ok(encoded) = proto::encode_frame(msg) else { return };
+        let Ok(encoded) = proto::encode_frame(msg) else {
+            return;
+        };
         for conn in self.conns.values_mut() {
             if conn.attached {
                 conn.send(&encoded);
@@ -1431,7 +1541,9 @@ impl Daemon {
         let mut queued: Vec<String> = Vec::new();
         for (key, conn) in &self.conns {
             let ev = PollEvent::new(*key, true, conn.wants_write());
-            let r = self.poller.modify_with_mode(&conn.stream, ev, PollMode::Level);
+            let r = self
+                .poller
+                .modify_with_mode(&conn.stream, ev, PollMode::Level);
             if self.log.is_some() && (conn.wants_write() || r.is_err()) {
                 queued.push(format!(
                     "{key}:pending={}{}",
@@ -1485,7 +1597,10 @@ mod tests {
         let omp = spawn_for(Kind::Omp);
         assert_eq!(omp.command("new", None).unwrap(), "omp");
         assert_eq!(omp.command("continue", None).unwrap(), "omp --continue");
-        assert_eq!(omp.command("resume", Some("01a0-ab")).unwrap(), "omp --resume 01a0-ab");
+        assert_eq!(
+            omp.command("resume", Some("01a0-ab")).unwrap(),
+            "omp --resume 01a0-ab"
+        );
 
         let mut dressed = spawn_for(Kind::Omp);
         dressed.sys = Some("be brief".into());
@@ -1498,11 +1613,17 @@ mod tests {
         // A quote in the system prompt stays inside one shell word.
         let mut quoted = spawn_for(Kind::Omp);
         quoted.sys = Some("don't stop".into());
-        assert_eq!(quoted.command("new", None).unwrap(), r"omp --system-prompt 'don'\''t stop'");
+        assert_eq!(
+            quoted.command("new", None).unwrap(),
+            r"omp --system-prompt 'don'\''t stop'"
+        );
 
         // A typed name starts the session under it where the harness can be
         // told, as one shell word whatever was typed. OMP cannot be told.
-        assert_eq!(Kind::Claude.name_flag("Sam's EQ").as_deref(), Some(r"-n 'Sam'\''s EQ'"));
+        assert_eq!(
+            Kind::Claude.name_flag("Sam's EQ").as_deref(),
+            Some(r"-n 'Sam'\''s EQ'")
+        );
         let mut named = spawn_for(Kind::Omp);
         named.title = Some("EQ".into());
         assert_eq!(named.command("new", None).unwrap(), "omp");

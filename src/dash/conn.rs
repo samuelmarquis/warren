@@ -179,7 +179,9 @@ impl AgentConn {
         if self.dead {
             return;
         }
-        let Ok(frame) = proto::encode_frame(msg) else { return };
+        let Ok(frame) = proto::encode_frame(msg) else {
+            return;
+        };
         if self.out.len() - self.sent + frame.len() > OUT_CAP {
             self.dead = true;
             return;
@@ -277,7 +279,11 @@ impl AgentConn {
                 self.full_dirty = true;
                 self.meta_dirty = true;
             }
-            ToClient::Damage { lines, cursor, cursor_visible } => {
+            ToClient::Damage {
+                lines,
+                cursor,
+                cursor_visible,
+            } => {
                 for (row, line) in lines {
                     let row_us = row as usize;
                     if row_us >= self.grid.len() {

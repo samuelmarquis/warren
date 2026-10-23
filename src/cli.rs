@@ -43,10 +43,14 @@ pub fn discover() -> Vec<Agent> {
 }
 
 /// One-shot Query against a daemon socket.
-fn query_agent(sock: &Path) -> Option<(Meta, AgentState)> {
+pub(crate) fn query_agent(sock: &Path) -> Option<(Meta, AgentState)> {
     let mut stream = UnixStream::connect(sock).ok()?;
-    stream.set_read_timeout(Some(Duration::from_millis(500))).ok()?;
-    stream.set_write_timeout(Some(Duration::from_millis(500))).ok()?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .ok()?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(500)))
+        .ok()?;
     let frame = proto::encode_frame(&ToDaemon::Query).ok()?;
     stream.write_all(&frame).ok()?;
 
@@ -112,21 +116,34 @@ pub fn cmd_new(args: &[String]) -> Result<()> {
         bail!("empty name");
     }
     let dir = resolve_dir(pos.get(1).map(|s| s.as_str()), &shell_dir())?;
-    let color: u8 =
-        pos.get(2).map(|c| c.parse()).transpose().context("COLOR must be 0-255")?.unwrap_or(0);
-    let mode = pos.get(3).cloned().cloned().unwrap_or_else(|| "new".to_string());
+    let color: u8 = pos
+        .get(2)
+        .map(|c| c.parse())
+        .transpose()
+        .context("COLOR must be 0-255")?
+        .unwrap_or(0);
+    let mode = pos
+        .get(3)
+        .cloned()
+        .cloned()
+        .unwrap_or_else(|| "new".to_string());
     if !matches!(mode.as_str(), "new" | "resume" | "continue" | "fork") {
         bail!("mode must be new, resume, continue, or fork");
     }
     if mode == "fork" && !kind.can_fork() {
-        bail!("{} cannot fork a conversation — resume it instead", kind.as_str());
+        bail!(
+            "{} cannot fork a conversation — resume it instead",
+            kind.as_str()
+        );
     }
     let sid = pos.get(4).map(|s| s.to_string());
 
     // Live agents give us both name collisions and used slots; discover()
     // also garbage-collects stale sockets so dead names become reusable.
-    let live: Vec<(String, u8)> =
-        discover().into_iter().map(|a| (a.meta.name, a.meta.slot)).collect();
+    let live: Vec<(String, u8)> = discover()
+        .into_iter()
+        .map(|a| (a.meta.name, a.meta.slot))
+        .collect();
     let name = launch_agent(
         &NewAgent {
             base: &base,
@@ -185,7 +202,9 @@ pub struct NewAgent<'a> {
 /// spawn the daemon. Shared by the CLI and the dashboard's new-agent form.
 pub fn launch_agent(spec: &NewAgent, live: &[(String, u8)]) -> Result<String> {
     let name = crate::names::unique(spec.base, live.iter().map(|(n, _)| n.as_str()));
-    let slot = (1..=u8::MAX).find(|s| !live.iter().any(|(_, used)| used == s)).unwrap_or(0);
+    let slot = (1..=u8::MAX)
+        .find(|s| !live.iter().any(|(_, used)| used == s))
+        .unwrap_or(0);
     spawn_daemon(&name, slot, spec)?;
     Ok(name)
 }
@@ -193,7 +212,16 @@ pub fn launch_agent(spec: &NewAgent, live: &[(String, u8)]) -> Result<String> {
 /// Spawn `warren __daemon` fully detached: new session, no stdio, no cwd tie.
 /// We exit immediately after, so it reparents to init (ppid 1).
 fn spawn_daemon(name: &str, slot: u8, spec: &NewAgent) -> Result<()> {
-    let NewAgent { dir, color, kind, mode, sid, sys, extra, .. } = *spec;
+    let NewAgent {
+        dir,
+        color,
+        kind,
+        mode,
+        sid,
+        sys,
+        extra,
+        ..
+    } = *spec;
     let exe = std::env::current_exe()?;
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("__daemon")
@@ -288,7 +316,10 @@ fn typed_path(arg: Option<&str>, base: &str) -> Result<PathBuf> {
         d => PathBuf::from(base).join(d),
     };
     if !path.is_absolute() {
-        bail!("'{}' is not a directory an agent can run in", path.display());
+        bail!(
+            "'{}' is not a directory an agent can run in",
+            path.display()
+        );
     }
     Ok(path)
 }
@@ -384,7 +415,10 @@ pub fn cmd_restore(args: &[String]) -> Result<()> {
         return Ok(());
     }
     if args.iter().any(|a| a == "--list" || a == "-l") {
-        println!("agents to restore (from {}):", crate::record::dir().display());
+        println!(
+            "agents to restore (from {}):",
+            crate::record::dir().display()
+        );
         for n in &notes {
             println!("{:>3}  {:<32}  {}", n.slot, n.display, n.cwd);
         }
@@ -409,9 +443,7 @@ pub fn cmd_restore(args: &[String]) -> Result<()> {
 /// Under the notes lock, and with what is live read again once it is held:
 /// whoever held it before may have just brought these same notes back, and
 /// a list made before waiting for it would restore them a second time.
-pub fn restore_waiting(
-    only: Option<&str>,
-) -> Vec<(crate::record::Record, Result<()>)> {
+pub fn restore_waiting(only: Option<&str>) -> Vec<(crate::record::Record, Result<()>)> {
     let _lock = crate::record::lock();
     let live: std::collections::HashSet<String> =
         discover().into_iter().map(|a| a.meta.name).collect();
@@ -442,12 +474,15 @@ pub struct Restorable {
 pub fn restorable(live: &std::collections::HashSet<String>) -> Restorable {
     use std::collections::{HashMap, HashSet};
     let mut known: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut out = Restorable { ready: Vec::new(), orphaned: Vec::new() };
+    let mut out = Restorable {
+        ready: Vec::new(),
+        orphaned: Vec::new(),
+    };
     for note in crate::record::restorable(live) {
         let kind = Kind::parse(&note.kind).unwrap_or_default();
-        let ids = known.entry(note.kind.clone()).or_insert_with(|| {
-            kind.sessions().into_iter().map(|s| s.id).collect()
-        });
+        let ids = known
+            .entry(note.kind.clone())
+            .or_insert_with(|| kind.sessions().into_iter().map(|s| s.id).collect());
         // An empty store is "cannot tell" rather than "nothing is there":
         // an unreadable ~/.claude must not throw a colony away. OMP names a
         // live agent's session by its file — that is what its tty row says,
@@ -516,7 +551,10 @@ fn rename_to(sock: &Path, display: &str, pinned: bool) -> Result<()> {
 pub fn cmd_ls() -> Result<()> {
     let agents = discover();
     if agents.is_empty() {
-        println!("no agents running (in {})", crate::paths::run_dir().display());
+        println!(
+            "no agents running (in {})",
+            crate::paths::run_dir().display()
+        );
         return Ok(());
     }
     println!("agents (in {}):", crate::paths::run_dir().display());
@@ -534,7 +572,10 @@ pub fn cmd_ls() -> Result<()> {
         } else {
             a.meta.name.clone()
         };
-        println!("{:>3}  {:<32}  {:<9}  {}", a.meta.slot, label, state, a.meta.cwd);
+        println!(
+            "{:>3}  {:<32}  {:<9}  {}",
+            a.meta.slot, label, state, a.meta.cwd
+        );
     }
     Ok(())
 }
@@ -570,7 +611,7 @@ pub fn cmd_kill(args: &[String]) -> Result<()> {
 
 /// Is this agent mid-turn? The daemon reports the same two signals the
 /// dashboard's sidebar reads: the hook state, else recent pty output.
-fn agent_busy(state: &AgentState) -> bool {
+pub(crate) fn agent_busy(state: &AgentState) -> bool {
     match state.hook {
         Some(HookState::Working) => true,
         Some(HookState::Waiting) => false,
@@ -584,7 +625,10 @@ pub fn cmd_power(args: &[String], wake: bool) -> Result<()> {
     let verb = if wake { "wake" } else { "sleep" };
     let force = !wake && args.iter().any(|a| a == "--force");
     let Some(raw) = args.iter().find(|a| !a.starts_with("--")) else {
-        bail!("usage: warren {verb} NAME{}", if wake { "" } else { " [--force]" });
+        bail!(
+            "usage: warren {verb} NAME{}",
+            if wake { "" } else { " [--force]" }
+        );
     };
     let name = named(raw)?;
     let sock = crate::paths::sock_path(name);
@@ -613,7 +657,9 @@ pub fn cmd_power(args: &[String], wake: bool) -> Result<()> {
         // The two things sleep can't take back: an unfinished turn, and a
         // conversation with no id to resume it by.
         if agent_busy(&state) && !force {
-            bail!("'{name}' is busy — let the turn finish, or `warren sleep {name} --force` to lose it");
+            bail!(
+                "'{name}' is busy — let the turn finish, or `warren sleep {name} --force` to lose it"
+            );
         }
         if !state.resumable {
             bail!("'{name}' has no session id yet — nothing to resume it from");
@@ -622,7 +668,11 @@ pub fn cmd_power(args: &[String], wake: bool) -> Result<()> {
 
     let mut stream = UnixStream::connect(&sock)?;
     stream.set_write_timeout(Some(Duration::from_millis(500)))?;
-    let msg = if wake { ToDaemon::Wake } else { ToDaemon::Sleep };
+    let msg = if wake {
+        ToDaemon::Wake
+    } else {
+        ToDaemon::Sleep
+    };
     stream.write_all(&proto::encode_frame(&msg)?)?;
     drop(stream);
 
@@ -631,7 +681,10 @@ pub fn cmd_power(args: &[String], wake: bool) -> Result<()> {
         std::thread::sleep(Duration::from_millis(50));
         match query_agent(&sock) {
             Some((_, s)) if s.power.is_down() != wake => {
-                println!("warren: '{name}' is {}", format!("{:?}", s.power).to_lowercase());
+                println!(
+                    "warren: '{name}' is {}",
+                    format!("{:?}", s.power).to_lowercase()
+                );
                 return Ok(());
             }
             Some(_) => continue,
@@ -660,9 +713,15 @@ pub fn cmd_power(args: &[String], wake: bool) -> Result<()> {
 pub fn cmd_set(args: &[String]) -> Result<()> {
     let usage = "usage: warren set NAME [--dir=DIR] [--extra=ARGS] [--sys=PROMPT] [--matrix=on|off]  \
                  (an empty --extra= or --sys= clears it)";
-    let Some(raw) = args.iter().find(|a| !a.starts_with("--")) else { bail!(usage) };
+    let Some(raw) = args.iter().find(|a| !a.starts_with("--")) else {
+        bail!(usage)
+    };
     let name = named(raw)?;
-    let flag = |f: &str| args.iter().find_map(|a| a.strip_prefix(f)).map(str::to_string);
+    let flag = |f: &str| {
+        args.iter()
+            .find_map(|a| a.strip_prefix(f))
+            .map(str::to_string)
+    };
     let (dir, extra, sys) = (flag("--dir="), flag("--extra="), flag("--sys="));
     let matrix = match flag("--matrix=").as_deref().map(str::trim) {
         None => None,
@@ -674,7 +733,10 @@ pub fn cmd_set(args: &[String]) -> Result<()> {
         bail!(usage);
     }
     if matrix == Some(true) && crate::matrix::config()?.is_none() {
-        bail!("chat is not set up on this machine: no {}", crate::matrix::config_path().display());
+        bail!(
+            "chat is not set up on this machine: no {}",
+            crate::matrix::config_path().display()
+        );
     }
     let dir = match dir {
         None => None,
@@ -689,11 +751,15 @@ pub fn cmd_set(args: &[String]) -> Result<()> {
     };
 
     let sock = crate::paths::sock_path(name);
-    let (_, state) =
-        query_agent(&sock).with_context(|| format!("no live agent named '{name}'"))?;
+    let (_, state) = query_agent(&sock).with_context(|| format!("no live agent named '{name}'"))?;
     let mut stream = UnixStream::connect(&sock)?;
     stream.set_write_timeout(Some(Duration::from_millis(500)))?;
-    let msg = ToDaemon::SetLaunch { dir: dir.clone(), extra: extra.clone(), sys: sys.clone(), matrix };
+    let msg = ToDaemon::SetLaunch {
+        dir: dir.clone(),
+        extra: extra.clone(),
+        sys: sys.clone(),
+        matrix,
+    };
     stream.write_all(&proto::encode_frame(&msg)?)?;
     drop(stream);
 
@@ -737,7 +803,13 @@ pub fn cmd_set(args: &[String]) -> Result<()> {
             Some(_) => "a new system prompt".to_string(),
             None => "no system prompt".to_string(),
         }),
-        matrix.map(|m| if m { "chat on".to_string() } else { "chat off".to_string() }),
+        matrix.map(|m| {
+            if m {
+                "chat on".to_string()
+            } else {
+                "chat off".to_string()
+            }
+        }),
     ]
     .into_iter()
     .flatten()
@@ -861,14 +933,24 @@ fn attach_loop(stream: &mut UnixStream, cols: u16, rows: u16) -> Result<String> 
         let mut painter = stdout.lock();
         while let Some(msg) = decoder.next::<ToClient>()? {
             match msg {
-                ToClient::Snapshot { screen, cursor, cursor_visible, .. } => {
+                ToClient::Snapshot {
+                    screen,
+                    cursor,
+                    cursor_visible,
+                    ..
+                } => {
                     write!(painter, "\x1b[2J")?;
                     for (row, line) in screen.iter().enumerate() {
                         draw_line(&mut painter, row as u16, line)?;
                     }
                     place_cursor(&mut painter, cursor, cursor_visible)?;
                 }
-                ToClient::Damage { lines, cursor, cursor_visible, .. } => {
+                ToClient::Damage {
+                    lines,
+                    cursor,
+                    cursor_visible,
+                    ..
+                } => {
                     for (row, line) in &lines {
                         draw_line(&mut painter, *row, line)?;
                     }
@@ -917,7 +999,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let base = tmp.to_string_lossy().to_string();
-        let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap().to_string_lossy().to_string();
+        let canon = |p: &std::path::Path| {
+            std::fs::canonicalize(p)
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        };
 
         // The point of the whole thing: a new project directory, made by
         // asking for an agent in it.
@@ -935,7 +1022,10 @@ mod tests {
         // `~` is this machine's home. `~someone` is a guess, and a path that
         // only looks like one is not a path: neither becomes `/`.
         let home = std::env::var("HOME").unwrap();
-        assert_eq!(resolve_dir(Some("~"), &base).unwrap(), canon(Path::new(&home)));
+        assert_eq!(
+            resolve_dir(Some("~"), &base).unwrap(),
+            canon(Path::new(&home))
+        );
         assert!(resolve_dir(Some("~~nonsense//path"), &base).is_err());
         assert!(resolve_dir(Some("~bob/code"), &base).is_err());
 
@@ -973,17 +1063,26 @@ pub fn cmd_join(args: &[String]) -> Result<()> {
 /// agent that was awake is woken again.
 pub fn cmd_renew(args: &[String]) -> Result<()> {
     let usage = "usage: warren renew NAME [--matrix=on|off] [--force]";
-    let Some(raw) = args.iter().find(|a| !a.starts_with("--")) else { bail!(usage) };
+    let Some(raw) = args.iter().find(|a| !a.starts_with("--")) else {
+        bail!(usage)
+    };
     let name = named(raw)?;
     let force = args.iter().any(|a| a == "--force");
-    let matrix = match args.iter().find_map(|a| a.strip_prefix("--matrix=")).map(str::trim) {
+    let matrix = match args
+        .iter()
+        .find_map(|a| a.strip_prefix("--matrix="))
+        .map(str::trim)
+    {
         None => None,
         Some("on" | "yes" | "true" | "1") => Some(true),
         Some("off" | "no" | "false" | "0") => Some(false),
         Some(other) => bail!("--matrix is on or off, not '{other}'"),
     };
     if matrix == Some(true) && crate::matrix::config()?.is_none() {
-        bail!("chat is not set up on this machine: no {}", crate::matrix::config_path().display());
+        bail!(
+            "chat is not set up on this machine: no {}",
+            crate::matrix::config_path().display()
+        );
     }
 
     let sock = crate::paths::sock_path(name);
@@ -1004,7 +1103,9 @@ pub fn cmd_renew(args: &[String]) -> Result<()> {
         loop {
             match query_agent(&sock) {
                 Some((_, s)) if s.power == proto::Power::Asleep => break,
-                Some(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+                Some(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(100))
+                }
                 Some(_) => bail!("'{name}' did not fall asleep; nothing was changed"),
                 None => bail!("'{name}' went away"),
             }
@@ -1027,11 +1128,15 @@ pub fn cmd_renew(args: &[String]) -> Result<()> {
     // Held from the old daemon's end to the new one's start: a dashboard
     // opening in between would otherwise restore this note as well.
     let _lock = crate::record::lock();
-    let pid = daemon_pid(&sock).with_context(|| format!("could not find the process behind '{name}'"))?;
+    let pid =
+        daemon_pid(&sock).with_context(|| format!("could not find the process behind '{name}'"))?;
     // SIGKILL, as a shutdown would: the daemon gets no chance to treat this
     // as the agent ending, so its note stays.
     if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
-        bail!("could not stop the old daemon (pid {pid}): {}", std::io::Error::last_os_error());
+        bail!(
+            "could not stop the old daemon (pid {pid}): {}",
+            std::io::Error::last_os_error()
+        );
     }
     let deadline = Instant::now() + Duration::from_secs(5);
     while UnixStream::connect(&sock).is_ok() && Instant::now() < deadline {
@@ -1047,16 +1152,19 @@ pub fn cmd_renew(args: &[String]) -> Result<()> {
     if was_awake {
         cmd_power(&[name.to_string()], true)?;
     }
-    println!("warren: renewed '{name}'{}", match matrix {
-        Some(true) => ", with chat",
-        Some(false) => ", without chat",
-        None => "",
-    });
+    println!(
+        "warren: renewed '{name}'{}",
+        match matrix {
+            Some(true) => ", with chat",
+            Some(false) => ", without chat",
+            None => "",
+        }
+    );
     Ok(())
 }
 
 /// The process listening on an agent's socket: its daemon.
-fn daemon_pid(sock: &Path) -> Option<i32> {
+pub(crate) fn daemon_pid(sock: &Path) -> Option<i32> {
     use std::os::fd::AsRawFd;
     let stream = UnixStream::connect(sock).ok()?;
     let fd = stream.as_raw_fd();
@@ -1065,7 +1173,13 @@ fn daemon_pid(sock: &Path) -> Option<i32> {
         let mut pid: libc::pid_t = 0;
         let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
         let ok = unsafe {
-            libc::getsockopt(fd, libc::SOL_LOCAL, libc::LOCAL_PEERPID, (&raw mut pid).cast(), &mut len)
+            libc::getsockopt(
+                fd,
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEERPID,
+                (&raw mut pid).cast(),
+                &mut len,
+            )
         };
         (ok == 0 && pid > 0).then_some(pid)
     }
@@ -1074,7 +1188,13 @@ fn daemon_pid(sock: &Path) -> Option<i32> {
         let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
         let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
         let ok = unsafe {
-            libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERCRED, (&raw mut cred).cast(), &mut len)
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&raw mut cred).cast(),
+                &mut len,
+            )
         };
         (ok == 0 && cred.pid > 0).then_some(cred.pid)
     }

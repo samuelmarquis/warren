@@ -56,7 +56,9 @@ pub fn save(rec: &Record) {
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let Ok(body) = serde_json::to_vec_pretty(rec) else { return };
+    let Ok(body) = serde_json::to_vec_pretty(rec) else {
+        return;
+    };
     // Through a temporary name: a note half-written is a note that cannot be
     // read, and this is rewritten every time a title changes.
     let tmp = dir.join(format!(".{}.tmp", rec.name));
@@ -76,7 +78,9 @@ pub fn forget(name: &str) {
 
 /// Every note on this machine, oldest slot first.
 pub fn all() -> Vec<Record> {
-    let Ok(entries) = std::fs::read_dir(dir()) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(dir()) else {
+        return Vec::new();
+    };
     let mut out: Vec<Record> = entries
         .flatten()
         .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
@@ -108,5 +112,8 @@ pub fn lock() -> Option<std::fs::File> {
 /// Notes whose agent is not running: what a restore would actually bring
 /// back. An agent that is already here needs nothing.
 pub fn restorable(live: &HashSet<String>) -> Vec<Record> {
-    all().into_iter().filter(|r| !live.contains(&r.name)).collect()
+    all()
+        .into_iter()
+        .filter(|r| !live.contains(&r.name))
+        .collect()
 }

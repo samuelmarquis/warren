@@ -10,11 +10,11 @@ use std::time::{Duration, Instant};
 // The crate isn't a library, so pull the protocol modules in directly
 // (their `crate::spans` paths resolve against this test crate's root).
 #[allow(dead_code)]
-#[path = "../src/spans.rs"]
-mod spans;
-#[allow(dead_code)]
 #[path = "../src/proto.rs"]
 mod proto;
+#[allow(dead_code)]
+#[path = "../src/spans.rs"]
+mod spans;
 use proto::{FrameDecoder, HookState, MouseKind, Power, ToClient, ToDaemon};
 
 const BIN: &str = env!("CARGO_BIN_EXE_warren");
@@ -74,12 +74,19 @@ struct Viewer {
 impl Viewer {
     fn connect(sock: &Path) -> Viewer {
         let stream = UnixStream::connect(sock).expect("connect to daemon");
-        stream.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
-        Viewer { stream, decoder: FrameDecoder::new() }
+        stream
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        Viewer {
+            stream,
+            decoder: FrameDecoder::new(),
+        }
     }
 
     fn send(&mut self, msg: &ToDaemon) {
-        self.stream.write_all(&proto::encode_frame(msg).unwrap()).unwrap();
+        self.stream
+            .write_all(&proto::encode_frame(msg).unwrap())
+            .unwrap();
     }
 
     fn attach(sock: &Path, cols: u16, rows: u16) -> (Viewer, ToClient) {
@@ -92,11 +99,7 @@ impl Viewer {
     }
 
     /// Read frames until one matches, with an overall deadline in ms.
-    fn await_frame(
-        &mut self,
-        ms: u64,
-        pred: impl Fn(&ToClient) -> bool,
-    ) -> Option<ToClient> {
+    fn await_frame(&mut self, ms: u64, pred: impl Fn(&ToClient) -> bool) -> Option<ToClient> {
         let deadline = Instant::now() + Duration::from_millis(ms);
         let mut buf = [0u8; 65536];
         loop {
@@ -146,11 +149,19 @@ fn new_agent_in(home: &TestHome, name: &str, dir: &Path, agent_cmd: &str) {
         .args(["new", name, dir.to_str().unwrap()])
         .output()
         .expect("run warren new");
-    assert!(out.status.success(), "warren new failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "warren new failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 fn new_agent(home: &TestHome, name: &str, agent_cmd: &str) {
-    let out = home.warren(agent_cmd).args(["new", name]).output().expect("run warren new");
+    let out = home
+        .warren(agent_cmd)
+        .args(["new", name])
+        .output()
+        .expect("run warren new");
     assert!(
         out.status.success(),
         "warren new failed: {}{}",
@@ -182,7 +193,10 @@ fn apply_frame(grid: &std::cell::RefCell<Vec<String>>, m: &ToClient) {
     let mut g = grid.borrow_mut();
     match m {
         ToClient::Snapshot { screen, .. } => {
-            *g = screen.iter().map(|l| l.0.iter().map(|s| s.text.as_str()).collect()).collect();
+            *g = screen
+                .iter()
+                .map(|l| l.0.iter().map(|s| s.text.as_str()).collect())
+                .collect();
         }
         ToClient::Damage { lines, .. } => {
             for (row, line) in lines {
@@ -201,7 +215,13 @@ fn apply_frame(grid: &std::cell::RefCell<Vec<String>>, m: &ToClient) {
 fn sidebar_of(grid: &std::cell::RefCell<Vec<String>>) -> Vec<String> {
     grid.borrow()
         .iter()
-        .map(|r| r.chars().take(23).collect::<String>().trim_end().to_string())
+        .map(|r| {
+            r.chars()
+                .take(23)
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
         .collect()
 }
 
@@ -214,7 +234,12 @@ fn attach_snapshot_input_echo_and_kill() {
     let sock = home.sock("echo");
 
     let (mut viewer, snap) = Viewer::attach(&sock, 80, 24);
-    let ToClient::Snapshot { cols, rows, screen, .. } = &snap else { unreachable!() };
+    let ToClient::Snapshot {
+        cols, rows, screen, ..
+    } = &snap
+    else {
+        unreachable!()
+    };
     assert_eq!((*cols, *rows), (80, 24));
     // The agent races us: its greeting is either already in the snapshot or
     // arrives as the damage right after.
@@ -243,8 +268,16 @@ fn attach_snapshot_input_echo_and_kill() {
     assert!(ls.contains("echo"), "ls lists the agent: {ls}");
 
     // Kill → Exited frame → socket unlinked.
-    let out = home.warren("unused").args(["kill", "echo"]).output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = home
+        .warren("unused")
+        .args(["kill", "echo"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let exited = viewer.await_frame(5_000, |m| matches!(m, ToClient::Exited { .. }));
     assert!(exited.is_some(), "viewer told about exit");
     assert!(!sock.exists(), "socket cleaned up");
@@ -259,13 +292,22 @@ fn resize_reflows_and_resnapshots_all_viewers() {
     let (mut a, _) = Viewer::attach(&sock, 80, 24);
     let (mut b, _) = Viewer::attach(&sock, 80, 24);
 
-    a.send(&ToDaemon::Resize { cols: 100, rows: 30 });
+    a.send(&ToDaemon::Resize {
+        cols: 100,
+        rows: 30,
+    });
     // BOTH viewers get the authoritative new snapshot.
     for v in [&mut a, &mut b] {
-        let snap = v.await_frame(
-            5_000,
-            |m| matches!(m, ToClient::Snapshot { cols: 100, rows: 30, .. }),
-        );
+        let snap = v.await_frame(5_000, |m| {
+            matches!(
+                m,
+                ToClient::Snapshot {
+                    cols: 100,
+                    rows: 30,
+                    ..
+                }
+            )
+        });
         assert!(snap.is_some(), "resized snapshot broadcast");
     }
 }
@@ -305,7 +347,9 @@ fn hook_state_round_trip() {
     assert!(out.status.success(), "hook must exit 0");
 
     let (_, snap) = Viewer::attach(&sock, 80, 24);
-    let ToClient::Snapshot { state, .. } = snap else { unreachable!() };
+    let ToClient::Snapshot { state, .. } = snap else {
+        unreachable!()
+    };
     assert_eq!(state.hook, Some(HookState::Attention));
     // No stdin payload, so no conversation to resume yet.
     assert_eq!(state.session, None);
@@ -326,7 +370,9 @@ fn hook_state_round_trip() {
     assert!(hook.wait().unwrap().success(), "hook must exit 0");
 
     let (_, snap) = Viewer::attach(&sock, 80, 24);
-    let ToClient::Snapshot { state, .. } = snap else { unreachable!() };
+    let ToClient::Snapshot { state, .. } = snap else {
+        unreachable!()
+    };
     assert_eq!(state.hook, Some(HookState::Waiting));
     assert_eq!(
         state.session.as_deref(),
@@ -336,7 +382,10 @@ fn hook_state_round_trip() {
     assert!(state.resumable);
 
     // Without WARREN_SOCK it's silently a no-op (claude outside warren).
-    let out = Command::new(BIN).args(["hook", "working"]).output().unwrap();
+    let out = Command::new(BIN)
+        .args(["hook", "working"])
+        .output()
+        .unwrap();
     assert!(out.status.success());
 }
 
@@ -358,14 +407,21 @@ fn sleep_stops_the_process_and_keeps_the_agent() {
     let sock = home.sock("napper");
 
     let (mut viewer, snap) = Viewer::attach(&sock, 80, 24);
-    let ToClient::Snapshot { screen, .. } = &snap else { unreachable!() };
+    let ToClient::Snapshot { screen, .. } = &snap else {
+        unreachable!()
+    };
     let mut text = screen_text(screen);
     if !text.contains("awake as") {
         let frame = viewer
             .await_frame(5_000, |m| matches!(m, ToClient::Damage { .. }))
             .expect("agent output");
-        let ToClient::Damage { lines, .. } = frame else { unreachable!() };
-        text = lines.iter().map(|(_, l)| screen_text(std::slice::from_ref(l))).collect();
+        let ToClient::Damage { lines, .. } = frame else {
+            unreachable!()
+        };
+        text = lines
+            .iter()
+            .map(|(_, l)| screen_text(std::slice::from_ref(l)))
+            .collect();
     }
     let pid: String = text
         .split("awake as ")
@@ -378,11 +434,14 @@ fn sleep_stops_the_process_and_keeps_the_agent() {
 
     viewer.send(&ToDaemon::Sleep);
     let asleep = viewer
-        .await_frame(10_000, |m| {
-            matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep)
-        })
+        .await_frame(
+            10_000,
+            |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep),
+        )
         .expect("agent reports itself asleep");
-    let ToClient::StateChanged(state) = asleep else { unreachable!() };
+    let ToClient::StateChanged(state) = asleep else {
+        unreachable!()
+    };
     assert_eq!(state.hook, None, "no process, no lifecycle state");
 
     // The process is gone — that's the whole point — but the agent is not.
@@ -390,28 +449,50 @@ fn sleep_stops_the_process_and_keeps_the_agent() {
     while pid_alive(&pid) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(!pid_alive(&pid), "sleeping must kill the agent's process group");
-    assert!(sock.exists(), "the daemon (and so the tab) outlives its process");
+    assert!(
+        !pid_alive(&pid),
+        "sleeping must kill the agent's process group"
+    );
+    assert!(
+        sock.exists(),
+        "the daemon (and so the tab) outlives its process"
+    );
 
     // A fresh viewer still gets the agent, its metadata and its last screen.
     let (_, snap) = Viewer::attach(&sock, 80, 24);
-    let ToClient::Snapshot { screen, state, meta, .. } = &snap else { unreachable!() };
+    let ToClient::Snapshot {
+        screen,
+        state,
+        meta,
+        ..
+    } = &snap
+    else {
+        unreachable!()
+    };
     assert_eq!(meta.name, "napper");
     assert_eq!(state.power, Power::Asleep);
-    assert!(screen_text(screen).contains("awake as"), "the last frame stays readable");
+    assert!(
+        screen_text(screen).contains("awake as"),
+        "the last frame stays readable"
+    );
 
     // Waking respawns it: same agent, new process.
     viewer.send(&ToDaemon::Wake);
     let frame = viewer
         .await_frame(10_000, |m| match m {
-            ToClient::Damage { lines, .. } => {
-                lines.iter().any(|(_, l)| screen_text(std::slice::from_ref(l)).contains("awake as"))
-            }
+            ToClient::Damage { lines, .. } => lines
+                .iter()
+                .any(|(_, l)| screen_text(std::slice::from_ref(l)).contains("awake as")),
             _ => false,
         })
         .expect("the woken agent paints again");
-    let ToClient::Damage { lines, .. } = frame else { unreachable!() };
-    let text: String = lines.iter().map(|(_, l)| screen_text(std::slice::from_ref(l))).collect();
+    let ToClient::Damage { lines, .. } = frame else {
+        unreachable!()
+    };
+    let text: String = lines
+        .iter()
+        .map(|(_, l)| screen_text(std::slice::from_ref(l)))
+        .collect();
     let new_pid: String = text
         .split("awake as ")
         .nth(1)
@@ -428,17 +509,27 @@ fn a_wake_sent_while_still_falling_asleep_is_not_dropped() {
     let home = TestHome::new("wakemid");
     // Takes its time over SIGTERM, as claude does running its SessionEnd
     // hooks: the window `warren sleep; warren wake` used to fall into.
-    new_agent(&home, "slow", "trap 'sleep 1; exit 143' TERM; printf 'up\\r\\n'; while :; do sleep 0.1; done");
+    new_agent(
+        &home,
+        "slow",
+        "trap 'sleep 1; exit 143' TERM; printf 'up\\r\\n'; while :; do sleep 0.1; done",
+    );
     let sock = home.sock("slow");
     let (mut viewer, _) = Viewer::attach(&sock, 80, 24);
 
     viewer.send(&ToDaemon::Sleep);
     viewer
-        .await_frame(5_000, |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Sleeping))
+        .await_frame(
+            5_000,
+            |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Sleeping),
+        )
         .expect("falling asleep");
     viewer.send(&ToDaemon::Wake);
     viewer
-        .await_frame(10_000, |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep))
+        .await_frame(
+            10_000,
+            |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep),
+        )
         .expect("the sleep completes");
     let woke = viewer.await_frame(10_000, |m| {
         matches!(m, ToClient::StateChanged(s) if matches!(s.power, Power::Waking | Power::Awake))
@@ -450,7 +541,11 @@ fn a_wake_sent_while_still_falling_asleep_is_not_dropped() {
 fn an_agent_stopped_from_outside_sleeps_and_keeps_its_note() {
     let home = TestHome::new("sigterm");
     // Like claude on SIGTERM: exits cleanly, with 128+signal.
-    new_agent(&home, "shutdown", "trap 'exit 143' TERM; printf 'awake as %s\\n' $$; while :; do sleep 1; done");
+    new_agent(
+        &home,
+        "shutdown",
+        "trap 'exit 143' TERM; printf 'awake as %s\\n' $$; while :; do sleep 1; done",
+    );
     let sock = home.sock("shutdown");
 
     // A conversation to come back to, so the agent is written down at all.
@@ -460,30 +555,40 @@ fn an_agent_stopped_from_outside_sleeps_and_keeps_its_note() {
         .stdin(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    hook.stdin.take().unwrap().write_all(br#"{"session_id":"conv-7"}"#).unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"session_id":"conv-7"}"#)
+        .unwrap();
     assert!(hook.wait().unwrap().success());
     let note = home.dir.join("notes").join("shutdown.json");
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !std::fs::read_to_string(&note).unwrap_or_default().contains("conv-7") && Instant::now() < deadline {
+    while !std::fs::read_to_string(&note)
+        .unwrap_or_default()
+        .contains("conv-7")
+        && Instant::now() < deadline
+    {
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(note.exists(), "the agent is written down");
 
     let (mut viewer, _) = Viewer::attach(&sock, 80, 24);
-    let frame = viewer
-        .await_frame(5_000, |m| match m {
-            ToClient::Damage { lines, .. } => {
-                lines.iter().any(|(_, l)| screen_text(std::slice::from_ref(l)).contains("awake as"))
-            }
-            _ => false,
-        });
+    let frame = viewer.await_frame(5_000, |m| match m {
+        ToClient::Damage { lines, .. } => lines
+            .iter()
+            .any(|(_, l)| screen_text(std::slice::from_ref(l)).contains("awake as")),
+        _ => false,
+    });
     let text = match frame {
-        Some(ToClient::Damage { lines, .. }) => {
-            lines.iter().map(|(_, l)| screen_text(std::slice::from_ref(l))).collect::<String>()
-        }
+        Some(ToClient::Damage { lines, .. }) => lines
+            .iter()
+            .map(|(_, l)| screen_text(std::slice::from_ref(l)))
+            .collect::<String>(),
         _ => {
             let (_, snap) = Viewer::attach(&sock, 80, 24);
-            let ToClient::Snapshot { screen, .. } = snap else { unreachable!() };
+            let ToClient::Snapshot { screen, .. } = snap else {
+                unreachable!()
+            };
             screen_text(&screen)
         }
     };
@@ -497,10 +602,17 @@ fn an_agent_stopped_from_outside_sleeps_and_keeps_its_note() {
 
     // The machine is going down: the agent's process is told to stop, and
     // its daemon has not been told yet.
-    assert!(Command::new("kill").args(["-TERM", &pid]).status().unwrap().success());
-    let asleep = viewer.await_frame(10_000, |m| {
-        matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep)
-    });
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let asleep = viewer.await_frame(
+        10_000,
+        |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep),
+    );
     assert!(asleep.is_some(), "a stopped agent goes to sleep");
     std::thread::sleep(Duration::from_millis(300));
     assert!(sock.exists(), "and keeps its tab");
@@ -517,7 +629,10 @@ fn an_agent_that_exits_by_itself_is_over() {
     while sock.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(!sock.exists(), "an agent that exits on its own takes its tab with it");
+    assert!(
+        !sock.exists(),
+        "an agent that exits on its own takes its tab with it"
+    );
 }
 
 #[test]
@@ -529,25 +644,32 @@ fn keys_typed_at_a_sleeping_agent_land_in_the_resumed_one() {
 
     viewer.send(&ToDaemon::Sleep);
     viewer
-        .await_frame(10_000, |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep))
+        .await_frame(
+            10_000,
+            |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep),
+        )
         .expect("asleep");
 
     // Typing at a sleeping agent: the daemon holds the bytes…
     viewer.send(&ToDaemon::Input(proto::b64_encode(b"knock knock\r")));
     assert!(
-        viewer.await_frame(500, |m| matches!(m, ToClient::Damage { .. })).is_none(),
+        viewer
+            .await_frame(500, |m| matches!(m, ToClient::Damage { .. }))
+            .is_none(),
         "a sleeping agent paints nothing"
     );
     // …and hands them to the process the wake starts.
     viewer.send(&ToDaemon::Wake);
-    let frame = viewer
-        .await_frame(10_000, |m| match m {
-            ToClient::Damage { lines, .. } => lines
-                .iter()
-                .any(|(_, l)| screen_text(std::slice::from_ref(l)).contains("knock knock")),
-            _ => false,
-        });
-    assert!(frame.is_some(), "buffered keystrokes reach the resumed agent");
+    let frame = viewer.await_frame(10_000, |m| match m {
+        ToClient::Damage { lines, .. } => lines
+            .iter()
+            .any(|(_, l)| screen_text(std::slice::from_ref(l)).contains("knock knock")),
+        _ => false,
+    });
+    assert!(
+        frame.is_some(),
+        "buffered keystrokes reach the resumed agent"
+    );
 }
 
 #[test]
@@ -566,7 +688,10 @@ fn a_wake_that_fails_leaves_the_agent_asleep() {
 
     viewer.send(&ToDaemon::Sleep);
     viewer
-        .await_frame(10_000, |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep))
+        .await_frame(
+            10_000,
+            |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep),
+        )
         .expect("asleep");
 
     std::fs::write(&marker, b"").unwrap();
@@ -574,14 +699,17 @@ fn a_wake_that_fails_leaves_the_agent_asleep() {
 
     // The agent tries, fails, and settles back to asleep — with the reason on
     // screen. What it must NOT do is take its own tab down.
-    let back = viewer.await_frame(10_000, |m| {
-        matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep)
-    });
+    let back = viewer.await_frame(
+        10_000,
+        |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep),
+    );
     assert!(back.is_some(), "a failed wake falls back to asleep");
     assert!(sock.exists(), "the agent outlives a resume it could not do");
 
     let (_, snap) = Viewer::attach(&sock, 80, 24);
-    let ToClient::Snapshot { screen, state, .. } = &snap else { unreachable!() };
+    let ToClient::Snapshot { screen, state, .. } = &snap else {
+        unreachable!()
+    };
     assert_eq!(state.power, Power::Asleep);
     assert!(
         screen_text(screen).contains("cannot resume"),
@@ -593,12 +721,15 @@ fn a_wake_that_fails_leaves_the_agent_asleep() {
     std::fs::remove_file(&marker).unwrap();
     viewer.send(&ToDaemon::Wake);
     let up = viewer.await_frame(10_000, |m| match m {
-        ToClient::Damage { lines, .. } => {
-            lines.iter().any(|(_, l)| screen_text(std::slice::from_ref(l)).contains("up"))
-        }
+        ToClient::Damage { lines, .. } => lines
+            .iter()
+            .any(|(_, l)| screen_text(std::slice::from_ref(l)).contains("up")),
         _ => false,
     });
-    assert!(up.is_some(), "the agent comes back when the resume can succeed");
+    assert!(
+        up.is_some(),
+        "the agent comes back when the resume can succeed"
+    );
 }
 
 #[test]
@@ -610,7 +741,10 @@ fn closing_an_agent_just_after_waking_it_still_closes_it() {
 
     viewer.send(&ToDaemon::Sleep);
     viewer
-        .await_frame(10_000, |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep))
+        .await_frame(
+            10_000,
+            |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep),
+        )
         .expect("asleep");
     viewer.send(&ToDaemon::Wake);
     viewer
@@ -621,7 +755,10 @@ fn closing_an_agent_just_after_waking_it_still_closes_it() {
     // this death was asked for, and must close the agent, not re-sleep it.
     viewer.send(&ToDaemon::Kill);
     let exited = viewer.await_frame(10_000, |m| matches!(m, ToClient::Exited { .. }));
-    assert!(exited.is_some(), "kill right after a wake still ends the agent");
+    assert!(
+        exited.is_some(),
+        "kill right after a wake still ends the agent"
+    );
     let deadline = Instant::now() + Duration::from_secs(5);
     while sock.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
@@ -638,7 +775,10 @@ fn closing_a_sleeping_agent_ends_its_daemon() {
 
     viewer.send(&ToDaemon::Sleep);
     viewer
-        .await_frame(10_000, |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep))
+        .await_frame(
+            10_000,
+            |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep),
+        )
         .expect("asleep");
 
     // No child means no child exit to end the daemon: Kill has to do it.
@@ -647,20 +787,29 @@ fn closing_a_sleeping_agent_ends_its_daemon() {
     while sock.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(!sock.exists(), "closing a sleeping agent must unlink its socket");
+    assert!(
+        !sock.exists(),
+        "closing a sleeping agent must unlink its socket"
+    );
 }
 
 #[test]
 fn stalled_viewer_is_dropped_and_never_blocks_the_daemon() {
     let home = TestHome::new("stall");
     // A chatty agent: continuous output forever.
-    new_agent(&home, "noisy", "while :; do printf 'spam %s\\n' $RANDOM; done");
+    new_agent(
+        &home,
+        "noisy",
+        "while :; do printf 'spam %s\\n' $RANDOM; done",
+    );
     let sock = home.sock("noisy");
 
     // Viewer that attaches and then never reads — v0's freeze recipe.
     // (Set the timeout now: macOS rejects setsockopt once the peer drops us.)
     let mut stalled = UnixStream::connect(&sock).unwrap();
-    stalled.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    stalled
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
     stalled
         .write_all(&proto::encode_frame(&ToDaemon::Attach { cols: 80, rows: 24 }).unwrap())
         .unwrap();
@@ -673,11 +822,17 @@ fn stalled_viewer_is_dropped_and_never_blocks_the_daemon() {
         let mut v = Viewer::connect(&sock);
         v.send(&ToDaemon::Query);
         let meta = v.await_frame(2_000, |m| matches!(m, ToClient::MetaChanged(_)));
-        assert!(meta.is_some(), "daemon answers Query #{queries} while a viewer stalls");
+        assert!(
+            meta.is_some(),
+            "daemon answers Query #{queries} while a viewer stalls"
+        );
         queries += 1;
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert!(queries >= 10, "daemon stayed responsive ({queries} queries)");
+    assert!(
+        queries >= 10,
+        "daemon stayed responsive ({queries} queries)"
+    );
 
     // The stalled connection got dropped at the cap (read returns EOF).
     let mut drain = vec![0u8; 1 << 20];
@@ -716,25 +871,36 @@ fn title_sync_policy() {
     let mut display = String::new();
     while Instant::now() < deadline {
         let (_, snap) = Viewer::attach(&sock, 80, 24);
-        let ToClient::Snapshot { meta, .. } = snap else { unreachable!() };
+        let ToClient::Snapshot { meta, .. } = snap else {
+            unreachable!()
+        };
         display = meta.display;
         if display == "Fix the bug" {
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert_eq!(display, "Fix the bug", "title mirrored with spinner stripped");
+    assert_eq!(
+        display, "Fix the bug",
+        "title mirrored with spinner stripped"
+    );
     // The idle title ("Claude Code", emitted 300ms in) must NOT overwrite it.
     std::thread::sleep(Duration::from_millis(600));
     let (_, snap) = Viewer::attach(&sock, 80, 24);
-    let ToClient::Snapshot { meta, .. } = snap else { unreachable!() };
+    let ToClient::Snapshot { meta, .. } = snap else {
+        unreachable!()
+    };
     assert_eq!(meta.display, "Fix the bug", "idle title ignored");
 }
 
 #[test]
 fn pinned_name_resists_title_sync() {
     let home = TestHome::new("pin");
-    new_agent(&home, "pinned", "sleep 0.4; printf '\\033]0;Sneaky title\\007'; cat");
+    new_agent(
+        &home,
+        "pinned",
+        "sleep 0.4; printf '\\033]0;Sneaky title\\007'; cat",
+    );
     let sock = home.sock("pinned");
 
     let (mut viewer, _) = Viewer::attach(&sock, 80, 24);
@@ -744,16 +910,22 @@ fn pinned_name_resists_title_sync() {
         pinned: Some(true),
         slot: None,
     });
-    let renamed = viewer.await_frame(5_000, |m| {
-        matches!(m, ToClient::MetaChanged(meta) if meta.display == "my-name" && meta.pinned)
-    });
+    let renamed = viewer.await_frame(
+        5_000,
+        |m| matches!(m, ToClient::MetaChanged(meta) if meta.display == "my-name" && meta.pinned),
+    );
     assert!(renamed.is_some(), "manual rename lands");
 
     // Give the title plenty of time to arrive after the rename.
     std::thread::sleep(Duration::from_millis(800));
     let (_, snap) = Viewer::attach(&sock, 80, 24);
-    let ToClient::Snapshot { meta, .. } = snap else { unreachable!() };
-    assert_eq!(meta.display, "my-name", "pinned name wins over Claude's title");
+    let ToClient::Snapshot { meta, .. } = snap else {
+        unreachable!()
+    };
+    assert_eq!(
+        meta.display, "my-name",
+        "pinned name wins over Claude's title"
+    );
 }
 
 #[test]
@@ -771,21 +943,31 @@ fn mouse_forwarded_only_when_subscribed() {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let (_, snap) = Viewer::attach(&sock, 80, 24);
-        let ToClient::Snapshot { mouse, .. } = snap else { unreachable!() };
+        let ToClient::Snapshot { mouse, .. } = snap else {
+            unreachable!()
+        };
         if mouse == proto::MouseProto::Drag {
             break;
         }
         assert!(Instant::now() < deadline, "agent never subscribed to mouse");
         std::thread::sleep(Duration::from_millis(50));
     }
-    viewer.send(&ToDaemon::Mouse { kind: proto::MouseKind::Down(0), col: 4, row: 2, mods: 0 });
+    viewer.send(&ToDaemon::Mouse {
+        kind: proto::MouseKind::Down(0),
+        col: 4,
+        row: 2,
+        mods: 0,
+    });
 
     // cat -v echoes the click's SGR encoding: ^[[<0;5;3M.
     let damage = viewer.await_frame(5_000, |m| {
         matches!(m, ToClient::Damage { lines, .. }
             if lines.iter().any(|(_, l)| l.0.iter().any(|s| s.text.contains("[<0;5;3M"))))
     });
-    assert!(damage.is_some(), "subscribed click reaches the app, SGR-encoded");
+    assert!(
+        damage.is_some(),
+        "subscribed click reaches the app, SGR-encoded"
+    );
 }
 
 #[test]
@@ -822,7 +1004,11 @@ fn big_frame_tail_flushes_while_daemon_is_idle() {
 
     // The delay guarantees the burst lands AFTER the attach snapshot, in one
     // coalesced flush, while the viewer below is deliberately not reading.
-    new_agent(&home, "big", &format!("sleep 1; cat {}; sleep 30", payload.display()));
+    new_agent(
+        &home,
+        "big",
+        &format!("sleep 1; cat {}; sleep 30", payload.display()),
+    );
 
     let (mut viewer, _snap) = Viewer::attach(&home.sock("big"), 120, 30);
 
@@ -834,9 +1020,11 @@ fn big_frame_tail_flushes_while_daemon_is_idle() {
     let seen = std::cell::Cell::new(0usize);
     let done = viewer.await_frame(5_000, |m| {
         let text: String = match m {
-            ToClient::Damage { lines, .. } => {
-                lines.iter().flat_map(|(_, l)| l.0.iter()).map(|s| s.text.as_str()).collect()
-            }
+            ToClient::Damage { lines, .. } => lines
+                .iter()
+                .flat_map(|(_, l)| l.0.iter())
+                .map(|s| s.text.as_str())
+                .collect(),
             ToClient::Snapshot { screen, .. } => screen_text(screen),
             _ => return false,
         };
@@ -870,9 +1058,11 @@ fn input_triggered_burst_arrives_promptly() {
         let seen = std::cell::Cell::new(0usize);
         let done = viewer.await_frame(4_000, |m| {
             let text: String = match m {
-                ToClient::Damage { lines, .. } => {
-                    lines.iter().flat_map(|(_, l)| l.0.iter()).map(|s| s.text.as_str()).collect()
-                }
+                ToClient::Damage { lines, .. } => lines
+                    .iter()
+                    .flat_map(|(_, l)| l.0.iter())
+                    .map(|s| s.text.as_str())
+                    .collect(),
                 ToClient::Snapshot { screen, .. } => screen_text(screen),
                 _ => return false,
             };
@@ -880,8 +1070,15 @@ fn input_triggered_burst_arrives_promptly() {
             seen.get() >= 600
         });
         let ms = t0.elapsed().as_millis();
-        assert!(done.is_some(), "round {round}: burst never arrived ({}Y)", seen.get());
-        assert!(ms < 1500, "round {round}: burst took {ms}ms — daemon-side stall");
+        assert!(
+            done.is_some(),
+            "round {round}: burst never arrived ({}Y)",
+            seen.get()
+        );
+        assert!(
+            ms < 1500,
+            "round {round}: burst took {ms}ms — daemon-side stall"
+        );
     }
 }
 
@@ -935,7 +1132,10 @@ fn a_second_machine_shares_the_sidebar() {
         let mut g = grid.borrow_mut();
         match m {
             ToClient::Snapshot { screen, .. } => {
-                *g = screen.iter().map(|l| l.0.iter().map(|s| s.text.as_str()).collect()).collect();
+                *g = screen
+                    .iter()
+                    .map(|l| l.0.iter().map(|s| s.text.as_str()).collect())
+                    .collect();
             }
             ToClient::Damage { lines, .. } => {
                 for (row, line) in lines {
@@ -953,7 +1153,13 @@ fn a_second_machine_shares_the_sidebar() {
     fn sidebar(grid: &std::cell::RefCell<Vec<String>>) -> Vec<String> {
         grid.borrow()
             .iter()
-            .map(|r| r.chars().take(23).collect::<String>().trim_end().to_string())
+            .map(|r| {
+                r.chars()
+                    .take(23)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
             .collect()
     }
 
@@ -963,10 +1169,17 @@ fn a_second_machine_shares_the_sidebar() {
         let rows = sidebar(&grid);
         rows.iter().any(|r| r.contains("grader")) && rows.iter().any(|r| r.contains("svm"))
     });
-    assert!(up.is_some(), "both machines' agents arrived: {:?}", sidebar(&grid));
+    assert!(
+        up.is_some(),
+        "both machines' agents arrived: {:?}",
+        sidebar(&grid)
+    );
 
     let rows = sidebar(&grid);
-    let faraway = rows.iter().position(|r| r.trim() == "faraway").expect("a heading for the far machine");
+    let faraway = rows
+        .iter()
+        .position(|r| r.trim() == "faraway")
+        .expect("a heading for the far machine");
     let here = rows.iter().position(|r| r.contains("Research/")).unwrap();
     assert!(here < faraway, "this machine comes first: {rows:?}");
     // Folder numbers run straight through, so two digits still reach any of
@@ -976,15 +1189,25 @@ fn a_second_machine_shares_the_sidebar() {
     assert!(rows.iter().any(|r| r.trim() == "3 Courses/"), "{rows:?}");
     // And the sidebar says nothing about which machine an agent is on beyond
     // the heading it sits under.
-    assert!(!rows.iter().any(|r| r.contains("faraway:")), "no host tags on rows: {rows:?}");
+    assert!(
+        !rows.iter().any(|r| r.contains("faraway:")),
+        "no host tags on rows: {rows:?}"
+    );
 
     // ^Space 2 1 reaches an agent on the other machine.
     viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x0021")));
     let landed = viewer.await_frame(10_000, |m| {
         apply(&grid, m);
-        grid.borrow().last().map(|s| s.contains("spork")).unwrap_or(false)
+        grid.borrow()
+            .last()
+            .map(|s| s.contains("spork"))
+            .unwrap_or(false)
     });
-    assert!(landed.is_some(), "two digits crossed the machine: {:?}", grid.borrow().last());
+    assert!(
+        landed.is_some(),
+        "two digits crossed the machine: {:?}",
+        grid.borrow().last()
+    );
 }
 
 /// End-to-end, on a REAL dashboard: agents are grouped into folders by their
@@ -1009,7 +1232,10 @@ fn sidebar_groups_agents_by_directory_and_two_digits_navigate() {
         let mut g = grid.borrow_mut();
         match m {
             ToClient::Snapshot { screen, .. } => {
-                *g = screen.iter().map(|l| l.0.iter().map(|s| s.text.as_str()).collect()).collect();
+                *g = screen
+                    .iter()
+                    .map(|l| l.0.iter().map(|s| s.text.as_str()).collect())
+                    .collect();
             }
             ToClient::Damage { lines, .. } => {
                 for (row, line) in lines {
@@ -1028,7 +1254,13 @@ fn sidebar_groups_agents_by_directory_and_two_digits_navigate() {
     fn sidebar(grid: &std::cell::RefCell<Vec<String>>) -> Vec<String> {
         grid.borrow()
             .iter()
-            .map(|r| r.chars().take(23).collect::<String>().trim_end().to_string())
+            .map(|r| {
+                r.chars()
+                    .take(23)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
             .collect()
     }
 
@@ -1036,7 +1268,11 @@ fn sidebar_groups_agents_by_directory_and_two_digits_navigate() {
         apply(&grid, m);
         sidebar(&grid).iter().any(|r| r.contains("Phylogen/"))
     });
-    assert!(up.is_some(), "dashboard came up with folders: {:?}", sidebar(&grid));
+    assert!(
+        up.is_some(),
+        "dashboard came up with folders: {:?}",
+        sidebar(&grid)
+    );
 
     // A folder is the directory itself, named by its own last component —
     // never the path that got you there.
@@ -1049,7 +1285,9 @@ fn sidebar_groups_agents_by_directory_and_two_digits_navigate() {
     assert_eq!(rows[phylo_row].trim(), "2 Phylogen/");
     assert!(rows[phylo_row + 1].contains("└ 1 phylo"), "{rows:?}");
     assert!(
-        !rows.iter().any(|r| r.contains(&inner.dir.display().to_string())),
+        !rows
+            .iter()
+            .any(|r| r.contains(&inner.dir.display().to_string())),
         "no full paths in the sidebar: {rows:?}"
     );
 
@@ -1057,15 +1295,29 @@ fn sidebar_groups_agents_by_directory_and_two_digits_navigate() {
     viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x001")));
     let armed = viewer.await_frame(5_000, |m| {
         apply(&grid, m);
-        grid.borrow().last().map(|s| s.contains("go to  1 Research/")).unwrap_or(false)
+        grid.borrow()
+            .last()
+            .map(|s| s.contains("go to  1 Research/"))
+            .unwrap_or(false)
     });
-    assert!(armed.is_some(), "first digit arms the folder: {:?}", grid.borrow().last());
+    assert!(
+        armed.is_some(),
+        "first digit arms the folder: {:?}",
+        grid.borrow().last()
+    );
     viewer.send(&ToDaemon::Input(proto::b64_encode(b"2")));
     let landed = viewer.await_frame(5_000, |m| {
         apply(&grid, m);
-        grid.borrow().last().map(|s| s.contains("splitr")).unwrap_or(false)
+        grid.borrow()
+            .last()
+            .map(|s| s.contains("splitr"))
+            .unwrap_or(false)
     });
-    assert!(landed.is_some(), "second digit lands on it: {:?}", grid.borrow().last());
+    assert!(
+        landed.is_some(),
+        "second digit lands on it: {:?}",
+        grid.borrow().last()
+    );
 
     // Click the folder header: the directory folds away, agents keep running.
     viewer.send(&ToDaemon::Mouse {
@@ -1083,10 +1335,15 @@ fn sidebar_groups_agents_by_directory_and_two_digits_navigate() {
     let folded = viewer.await_frame(5_000, |m| {
         apply(&grid, m);
         let rows = sidebar(&grid);
-        rows.iter().any(|r| r.contains("Research/") && r.contains('▸'))
+        rows.iter()
+            .any(|r| r.contains("Research/") && r.contains('▸'))
             && !rows.iter().any(|r| r.contains("svm"))
     });
-    assert!(folded.is_some(), "clicking a folder folds it: {:?}", sidebar(&grid));
+    assert!(
+        folded.is_some(),
+        "clicking a folder folds it: {:?}",
+        sidebar(&grid)
+    );
 
     // And opens it again.
     viewer.send(&ToDaemon::Mouse {
@@ -1105,7 +1362,11 @@ fn sidebar_groups_agents_by_directory_and_two_digits_navigate() {
         apply(&grid, m);
         sidebar(&grid).iter().any(|r| r.contains("svm"))
     });
-    assert!(opened.is_some(), "clicking again opens it: {:?}", sidebar(&grid));
+    assert!(
+        opened.is_some(),
+        "clicking again opens it: {:?}",
+        sidebar(&grid)
+    );
 }
 
 /// End-to-end: a REAL dashboard (running as an agent under an outer daemon,
@@ -1133,7 +1394,10 @@ fn dashboard_paints_triggered_burst_without_extra_keys() {
         let mut g = grid.borrow_mut();
         match m {
             ToClient::Snapshot { screen, .. } => {
-                *g = screen.iter().map(|l| l.0.iter().map(|s| s.text.as_str()).collect()).collect();
+                *g = screen
+                    .iter()
+                    .map(|l| l.0.iter().map(|s| s.text.as_str()).collect())
+                    .collect();
             }
             ToClient::Damage { lines, .. } => {
                 for (row, line) in lines {
@@ -1161,12 +1425,22 @@ fn dashboard_paints_triggered_burst_without_extra_keys() {
     let t0 = Instant::now();
     let drawn = viewer.await_frame(5_000, |m| {
         apply(&grid, m);
-        grid.borrow().iter().map(|r| r.matches('Y').count()).sum::<usize>() >= 300
+        grid.borrow()
+            .iter()
+            .map(|r| r.matches('Y').count())
+            .sum::<usize>()
+            >= 300
     });
     let ms = t0.elapsed().as_millis();
     eprintln!("burst rendered by the dashboard in {ms}ms");
-    assert!(drawn.is_some(), "dashboard never painted the burst without another key");
-    assert!(ms < 2000, "dashboard took {ms}ms to paint an input-triggered burst");
+    assert!(
+        drawn.is_some(),
+        "dashboard never painted the burst without another key"
+    );
+    assert!(
+        ms < 2000,
+        "dashboard took {ms}ms to paint an input-triggered burst"
+    );
 }
 
 /// A machine with nothing running on it is still a machine that answered.
@@ -1186,8 +1460,12 @@ fn a_machine_with_no_agents_still_says_it_is_there() {
     std::fs::write(near.dir.join("hosts"), format!("faraway  {BIN}\n")).unwrap();
 
     let shim = fake_ssh(&near, &far);
-    let dash_cmd =
-        format!("WARREN_HOME={} WARREN_SSH={} {} up", near.dir.display(), shim.display(), BIN);
+    let dash_cmd = format!(
+        "WARREN_HOME={} WARREN_SSH={} {} up",
+        near.dir.display(),
+        shim.display(),
+        BIN
+    );
     new_agent(&outer, "dash", &dash_cmd);
     let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 22);
 
@@ -1200,7 +1478,11 @@ fn a_machine_with_no_agents_still_says_it_is_there() {
         let rows = sidebar_of(&grid);
         rows.iter().any(|r| r.contains("Research/")) && !rows.iter().any(|r| r.contains("faraway"))
     });
-    assert!(settled.is_some(), "no word about connecting: {:?}", sidebar_of(&grid));
+    assert!(
+        settled.is_some(),
+        "no word about connecting: {:?}",
+        sidebar_of(&grid)
+    );
 
     // And it stays that way — the roster is current, not merely unheard.
     std::thread::sleep(Duration::from_millis(2_500));
@@ -1210,7 +1492,9 @@ fn a_machine_with_no_agents_still_says_it_is_there() {
     });
     let rows = sidebar_of(&grid);
     assert!(
-        !rows.iter().any(|r| r.contains("connecting") || r.contains("reconnecting")),
+        !rows
+            .iter()
+            .any(|r| r.contains("connecting") || r.contains("reconnecting")),
         "an answering machine says nothing about connecting: {rows:?}"
     );
 }
@@ -1232,8 +1516,12 @@ fn the_form_creates_an_agent_on_another_machine() {
     std::fs::write(near.dir.join("hosts"), format!("faraway  {BIN}\n")).unwrap();
 
     let shim = fake_ssh(&near, &far);
-    let dash_cmd =
-        format!("WARREN_HOME={} WARREN_SSH={} {} up", near.dir.display(), shim.display(), BIN);
+    let dash_cmd = format!(
+        "WARREN_HOME={} WARREN_SSH={} {} up",
+        near.dir.display(),
+        shim.display(),
+        BIN
+    );
     new_agent(&outer, "dash", &dash_cmd);
     let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 22);
 
@@ -1243,7 +1531,11 @@ fn the_form_creates_an_agent_on_another_machine() {
         apply_frame(&grid, m);
         sidebar_of(&grid).iter().any(|r| r.contains("spork"))
     });
-    assert!(up.is_some(), "both machines are up: {:?}", sidebar_of(&grid));
+    assert!(
+        up.is_some(),
+        "both machines are up: {:?}",
+        sidebar_of(&grid)
+    );
 
     // ^Space n opens the form; Machine leads it, and `l` moves off "here".
     viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x00n")));
@@ -1251,13 +1543,23 @@ fn the_form_creates_an_agent_on_another_machine() {
         apply_frame(&grid, m);
         grid.borrow().iter().any(|r| r.contains("Machine"))
     });
-    assert!(form.is_some(), "the form offers a machine: {:?}", grid.borrow().clone());
+    assert!(
+        form.is_some(),
+        "the form offers a machine: {:?}",
+        grid.borrow().clone()
+    );
     viewer.send(&ToDaemon::Input(proto::b64_encode(b"l")));
     let picked = viewer.await_frame(10_000, |m| {
         apply_frame(&grid, m);
-        grid.borrow().iter().any(|r| r.contains("new claude agent on faraway"))
+        grid.borrow()
+            .iter()
+            .any(|r| r.contains("new claude agent on faraway"))
     });
-    assert!(picked.is_some(), "the form says where it will run: {:?}", grid.borrow().clone());
+    assert!(
+        picked.is_some(),
+        "the form says where it will run: {:?}",
+        grid.borrow().clone()
+    );
 
     // Tab to Title, name it, Tab to Root dir, clear the `~` the machine
     // switch left there, and give it one over on the far side.
@@ -1271,13 +1573,23 @@ fn the_form_creates_an_agent_on_another_machine() {
         apply_frame(&grid, m);
         sidebar_of(&grid).iter().any(|r| r.contains("remote-made"))
     });
-    assert!(made.is_some(), "the agent arrived from over there: {:?}", sidebar_of(&grid));
+    assert!(
+        made.is_some(),
+        "the agent arrived from over there: {:?}",
+        sidebar_of(&grid)
+    );
 
     let rows = sidebar_of(&grid);
-    let faraway = rows.iter().position(|r| r.trim() == "faraway").expect("a heading for the far machine");
+    let faraway = rows
+        .iter()
+        .position(|r| r.trim() == "faraway")
+        .expect("a heading for the far machine");
     let made_at = rows.iter().position(|r| r.contains("remote-made")).unwrap();
     assert!(made_at > faraway, "it belongs to the far machine: {rows:?}");
-    assert!(rows.iter().any(|r| r.contains("Burrow/")), "in the directory asked for: {rows:?}");
+    assert!(
+        rows.iter().any(|r| r.contains("Burrow/")),
+        "in the directory asked for: {rows:?}"
+    );
 
     // And it really is over there: this machine's run dir never saw it.
     let here: Vec<String> = std::fs::read_dir(near.dir.join("run"))
@@ -1285,8 +1597,15 @@ fn the_form_creates_an_agent_on_another_machine() {
         .flatten()
         .map(|e| e.file_name().to_string_lossy().to_string())
         .collect();
-    assert_eq!(here, vec!["svm.sock".to_string()], "nothing was created here: {here:?}");
-    let there = std::fs::read_dir(far.dir.join("run")).unwrap().flatten().count();
+    assert_eq!(
+        here,
+        vec!["svm.sock".to_string()],
+        "nothing was created here: {here:?}"
+    );
+    let there = std::fs::read_dir(far.dir.join("run"))
+        .unwrap()
+        .flatten()
+        .count();
     assert_eq!(there, 2, "spork and the new one, over there");
 }
 
@@ -1304,8 +1623,12 @@ fn the_new_agent_form_answers_the_mouse() {
     std::fs::write(near.dir.join("hosts"), format!("faraway  {BIN}\n")).unwrap();
 
     let shim = fake_ssh(&near, &far);
-    let dash_cmd =
-        format!("WARREN_HOME={} WARREN_SSH={} {} up", near.dir.display(), shim.display(), BIN);
+    let dash_cmd = format!(
+        "WARREN_HOME={} WARREN_SSH={} {} up",
+        near.dir.display(),
+        shim.display(),
+        BIN
+    );
     new_agent(&outer, "dash", &dash_cmd);
     let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 24);
 
@@ -1315,23 +1638,37 @@ fn the_new_agent_form_answers_the_mouse() {
         apply_frame(&grid, m);
         sidebar_of(&grid).iter().any(|r| r.contains("spork"))
     });
-    assert!(up.is_some(), "both machines are up: {:?}", sidebar_of(&grid));
+    assert!(
+        up.is_some(),
+        "both machines are up: {:?}",
+        sidebar_of(&grid)
+    );
 
     viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x00n")));
     let form = viewer.await_frame(10_000, |m| {
         apply_frame(&grid, m);
         grid.borrow().iter().any(|r| r.contains("[ faraway ]"))
     });
-    assert!(form.is_some(), "the machine chips are drawn: {:?}", grid.borrow().clone());
+    assert!(
+        form.is_some(),
+        "the machine chips are drawn: {:?}",
+        grid.borrow().clone()
+    );
 
     // Click the far machine's chip, wherever the form happened to draw it.
     let (row, col) = find_in_grid(&grid, "[ faraway ]").expect("the faraway chip is on screen");
     click(&mut viewer, row + 1, col + 2); // inside the chip, 1-based
     let picked = viewer.await_frame(10_000, |m| {
         apply_frame(&grid, m);
-        grid.borrow().iter().any(|r| r.contains("new claude agent on faraway"))
+        grid.borrow()
+            .iter()
+            .any(|r| r.contains("new claude agent on faraway"))
     });
-    assert!(picked.is_some(), "clicking a chip picks it: {:?}", grid.borrow().clone());
+    assert!(
+        picked.is_some(),
+        "clicking a chip picks it: {:?}",
+        grid.borrow().clone()
+    );
 
     // Click a text field: the cursor goes there, with no tabbing to reach it.
     let (row, _) = find_in_grid(&grid, "Sys prompt").expect("the field is on screen");
@@ -1343,7 +1680,11 @@ fn the_new_agent_form_answers_the_mouse() {
             .map(|r| r.contains("Sys prompt") && r.trim_end().ends_with('\u{2588}'))
             .unwrap_or(false)
     });
-    assert!(moved.is_some(), "clicking a field focuses it: {:?}", grid.borrow().get(row));
+    assert!(
+        moved.is_some(),
+        "clicking a field focuses it: {:?}",
+        grid.borrow().get(row)
+    );
 }
 
 /// Where a string sits on the dashboard's screen, 0-based.
@@ -1370,7 +1711,12 @@ fn click(viewer: &mut Viewer, row: usize, col: usize) {
 fn ctrl_z_sleeps_the_agent_instead_of_suspending_it() {
     let home = TestHome::new("ctrlz");
     // Announces its pid, then sits there like an idle harness.
-    new_agent_in(&home, "napper", &home.dir.join("Burrow"), "printf 'awake as %s\\n' $$; sleep 300");
+    new_agent_in(
+        &home,
+        "napper",
+        &home.dir.join("Burrow"),
+        "printf 'awake as %s\\n' $$; sleep 300",
+    );
 
     // Sleep needs a session to resume, which is what the hooks report.
     let mut hook = Command::new(BIN)
@@ -1379,7 +1725,11 @@ fn ctrl_z_sleeps_the_agent_instead_of_suspending_it() {
         .stdin(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    hook.stdin.take().unwrap().write_all(br#"{"session_id":"deadbeef"}"#).unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"session_id":"deadbeef"}"#)
+        .unwrap();
     assert!(hook.wait().unwrap().success(), "the hook must exit 0");
 
     let outer = TestHome::new("ctrlzout");
@@ -1393,7 +1743,11 @@ fn ctrl_z_sleeps_the_agent_instead_of_suspending_it() {
         apply_frame(&grid, m);
         grid.borrow().iter().any(|r| r.contains("awake as"))
     });
-    assert!(up.is_some(), "the agent is up and painting: {:?}", grid.borrow().clone());
+    assert!(
+        up.is_some(),
+        "the agent is up and painting: {:?}",
+        grid.borrow().clone()
+    );
     let text: String = grid.borrow().concat();
     let pid: String = text
         .split("awake as ")
@@ -1410,7 +1764,11 @@ fn ctrl_z_sleeps_the_agent_instead_of_suspending_it() {
         apply_frame(&grid, m);
         sidebar_of(&grid).iter().any(|r| r.contains("napper z"))
     });
-    assert!(slept.is_some(), "the row says it is asleep: {:?}", sidebar_of(&grid));
+    assert!(
+        slept.is_some(),
+        "the row says it is asleep: {:?}",
+        sidebar_of(&grid)
+    );
     assert!(!pid_alive(&pid), "the process is gone, not stopped");
 
     // And it wakes the same way, from NORMAL this time.
@@ -1448,9 +1806,17 @@ fn the_wheel_reads_the_scrollback_when_the_turn_is_over() {
                 grid.borrow().iter().any(|r| r.contains("line 40"))
             })
             .is_some();
-    assert!(done, "the first burst finished: {:?}", grid.borrow().clone());
+    assert!(
+        done,
+        "the first burst finished: {:?}",
+        grid.borrow().clone()
+    );
     // Ten rows: the early lines are long gone from the screen.
-    assert!(!grid.borrow().iter().any(|r| r.contains("line 5")), "{:?}", grid.borrow().clone());
+    assert!(
+        !grid.borrow().iter().any(|r| r.contains("line 5")),
+        "{:?}",
+        grid.borrow().clone()
+    );
 
     // Wait out the busy heuristic — this is the "turn is over" the rule is
     // about — then wheel up.
@@ -1458,13 +1824,22 @@ fn the_wheel_reads_the_scrollback_when_the_turn_is_over() {
     // Three lines a notch, the way a terminal does it, so this is a dozen
     // notches back up a thirty-line history — it clamps at the top.
     for _ in 0..12 {
-        viewer.send(&ToDaemon::Mouse { kind: MouseKind::WheelUp, col: 10, row: 5, mods: 0 });
+        viewer.send(&ToDaemon::Mouse {
+            kind: MouseKind::WheelUp,
+            col: 10,
+            row: 5,
+            mods: 0,
+        });
     }
     let back = viewer.await_frame(10_000, |m| {
         apply_frame(&grid, m);
         grid.borrow().iter().any(|r| r.contains("line 5"))
     });
-    assert!(back.is_some(), "the wheel reached the scrollback: {:?}", grid.borrow().clone());
+    assert!(
+        back.is_some(),
+        "the wheel reached the scrollback: {:?}",
+        grid.borrow().clone()
+    );
     // A viewer reading history is shown no cursor: it is down on the live
     // screen, where this viewer is not looking.
     if let Some(ToClient::Snapshot { cursor_visible, .. }) = back {
@@ -1477,7 +1852,11 @@ fn the_wheel_reads_the_scrollback_when_the_turn_is_over() {
         apply_frame(&grid, m);
         grid.borrow().iter().any(|r| r.contains("TURN TWO"))
     });
-    assert!(live.is_some(), "a turn starting ends the scroll: {:?}", grid.borrow().clone());
+    assert!(
+        live.is_some(),
+        "a turn starting ends the scroll: {:?}",
+        grid.borrow().clone()
+    );
 }
 
 /// No scrolling while it works. Mid-turn a harness repaints a live region,
@@ -1487,7 +1866,11 @@ fn the_wheel_reads_the_scrollback_when_the_turn_is_over() {
 fn the_wheel_does_nothing_while_the_agent_is_working() {
     let home = TestHome::new("scrollbusy");
     // Never stops printing: busy by the same heuristic the sidebar uses.
-    new_agent(&home, "chatty", "i=0; while :; do i=$((i+1)); echo \"tick $i\"; sleep 0.2; done");
+    new_agent(
+        &home,
+        "chatty",
+        "i=0; while :; do i=$((i+1)); echo \"tick $i\"; sleep 0.2; done",
+    );
     let (mut viewer, snap) = Viewer::attach(&home.sock("chatty"), 60, 10);
 
     let grid = std::cell::RefCell::new(Vec::<String>::new());
@@ -1496,11 +1879,20 @@ fn the_wheel_does_nothing_while_the_agent_is_working() {
         apply_frame(&grid, m);
         highest_tick(&grid) >= 8
     });
-    assert!(running.is_some(), "it is working: {:?}", grid.borrow().clone());
+    assert!(
+        running.is_some(),
+        "it is working: {:?}",
+        grid.borrow().clone()
+    );
 
     let at_wheel = highest_tick(&grid);
     for _ in 0..6 {
-        viewer.send(&ToDaemon::Mouse { kind: MouseKind::WheelUp, col: 10, row: 5, mods: 0 });
+        viewer.send(&ToDaemon::Mouse {
+            kind: MouseKind::WheelUp,
+            col: 10,
+            row: 5,
+            mods: 0,
+        });
     }
     // The view stays live: new ticks keep arriving rather than the viewer
     // being parked on a frozen screen.
@@ -1527,7 +1919,6 @@ fn highest_tick(grid: &std::cell::RefCell<Vec<String>>) -> u32 {
         .max()
         .unwrap_or(0)
 }
-
 
 /// A flick of the wheel goes as far as it was flicked. The answer to a
 /// scroll is a snapshot, and a snapshot used to be counted as the agent
@@ -1563,7 +1954,11 @@ fn a_flick_of_the_wheel_scrolls_further_than_one_notch() {
     // Past the busy window, so the turn counts as over.
     std::thread::sleep(Duration::from_millis(1_800));
     let before = topmost_line(&grid);
-    assert!(before > 0, "a live view to scroll from: {:?}", grid.borrow().clone());
+    assert!(
+        before > 0,
+        "a live view to scroll from: {:?}",
+        grid.borrow().clone()
+    );
 
     // Eight notches spread over a flick's worth of time, which is what a
     // trackpad sends — the answer to one notch lands before the next is
@@ -1613,7 +2008,11 @@ fn a_directory_that_is_not_there_yet_is_made_and_used() {
         .args(["new", "fresh", fresh.to_str().unwrap()])
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(fresh.is_dir(), "the directory was made");
 
     // The agent says where it is, in its own voice.
@@ -1627,7 +2026,11 @@ fn a_directory_that_is_not_there_yet_is_made_and_used() {
                 grid.borrow().iter().any(|r| r.contains("brand-new"))
             })
             .is_some();
-    assert!(says, "the agent is in the directory it was given: {:?}", grid.borrow().clone());
+    assert!(
+        says,
+        "the agent is in the directory it was given: {:?}",
+        grid.borrow().clone()
+    );
     assert!(
         !grid.borrow().iter().any(|r| r.trim() == "/"),
         "and not in the root of the disk: {:?}",
@@ -1640,7 +2043,11 @@ fn a_directory_that_is_not_there_yet_is_made_and_used() {
 fn a_path_that_makes_no_sense_is_refused() {
     let home = TestHome::new("nonsense");
     for bad in ["~~nonsense//path", "~someone-else/code"] {
-        let out = home.warren("sleep 300").args(["new", "nope", bad]).output().unwrap();
+        let out = home
+            .warren("sleep 300")
+            .args(["new", "nope", bad])
+            .output()
+            .unwrap();
         assert!(!out.status.success(), "'{bad}' was accepted");
         let why = String::from_utf8_lossy(&out.stderr);
         assert!(!why.is_empty(), "it says why");
@@ -1648,7 +2055,11 @@ fn a_path_that_makes_no_sense_is_refused() {
     // A file is not somewhere to run, either.
     let file = home.dir.join("notes.md");
     std::fs::write(&file, "x").unwrap();
-    let out = home.warren("sleep 300").args(["new", "nope", file.to_str().unwrap()]).output().unwrap();
+    let out = home
+        .warren("sleep 300")
+        .args(["new", "nope", file.to_str().unwrap()])
+        .output()
+        .unwrap();
     assert!(!out.status.success(), "a file was accepted as a directory");
     assert!(!home.sock("nope").exists(), "nothing was started");
 }
@@ -1670,12 +2081,18 @@ fn an_idle_nudge_is_not_a_permission_prompt() {
             .spawn()
             .unwrap();
         let payload = format!(r#"{{"session_id":"s-1","notification_type":"{kind}"}}"#);
-        hook.stdin.take().unwrap().write_all(payload.as_bytes()).unwrap();
+        hook.stdin
+            .take()
+            .unwrap()
+            .write_all(payload.as_bytes())
+            .unwrap();
         assert!(hook.wait().unwrap().success(), "a hook always exits 0");
     };
     let hook_state = || {
         let (_, snap) = Viewer::attach(&sock, 80, 24);
-        let ToClient::Snapshot { state, .. } = snap else { unreachable!() };
+        let ToClient::Snapshot { state, .. } = snap else {
+            unreachable!()
+        };
         state
     };
 
@@ -1686,7 +2103,11 @@ fn an_idle_nudge_is_not_a_permission_prompt() {
         .stdin(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    hook.stdin.take().unwrap().write_all(br#"{"session_id":"s-1"}"#).unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"session_id":"s-1"}"#)
+        .unwrap();
     assert!(hook.wait().unwrap().success());
     assert_eq!(hook_state().hook, Some(HookState::Waiting));
 
@@ -1694,8 +2115,16 @@ fn an_idle_nudge_is_not_a_permission_prompt() {
     // whether this agent is blocked, so nothing changes.
     notify("idle_prompt");
     let state = hook_state();
-    assert_eq!(state.hook, Some(HookState::Waiting), "an idle nudge is not a block");
-    assert_eq!(state.session.as_deref(), Some("s-1"), "the session still comes through");
+    assert_eq!(
+        state.hook,
+        Some(HookState::Waiting),
+        "an idle nudge is not a block"
+    );
+    assert_eq!(
+        state.session.as_deref(),
+        Some("s-1"),
+        "the session still comes through"
+    );
 
     // A permission prompt is the real thing.
     notify("permission_prompt");
@@ -1703,10 +2132,18 @@ fn an_idle_nudge_is_not_a_permission_prompt() {
 
     // And a notification with no type at all still counts, for a Claude too
     // old to say which kind it is.
-    let out = Command::new(BIN).env("WARREN_SOCK", &sock).args(["hook", "waiting"]).output().unwrap();
+    let out = Command::new(BIN)
+        .env("WARREN_SOCK", &sock)
+        .args(["hook", "waiting"])
+        .output()
+        .unwrap();
     assert!(out.status.success());
     assert_eq!(hook_state().hook, Some(HookState::Waiting));
-    let out = Command::new(BIN).env("WARREN_SOCK", &sock).args(["hook", "attention"]).output().unwrap();
+    let out = Command::new(BIN)
+        .env("WARREN_SOCK", &sock)
+        .args(["hook", "attention"])
+        .output()
+        .unwrap();
     assert!(out.status.success());
     assert_eq!(hook_state().hook, Some(HookState::Attention));
 }
@@ -1745,7 +2182,9 @@ fn an_omp_agent_lost_with_the_machine_comes_back_too() {
     )
     .unwrap();
     let note = record_note(&home, "spore", &file.display().to_string());
-    let body = std::fs::read_to_string(&note).unwrap().replace("\"kind\":\"claude\"", "\"kind\":\"omp\"");
+    let body = std::fs::read_to_string(&note)
+        .unwrap()
+        .replace("\"kind\":\"claude\"", "\"kind\":\"omp\"");
     std::fs::write(&note, body).unwrap();
 
     let out = home
@@ -1754,7 +2193,11 @@ fn an_omp_agent_lost_with_the_machine_comes_back_too() {
         .arg("restore")
         .output()
         .unwrap();
-    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(said.contains("restored 'spore'"), "{said}");
 }
 
@@ -1765,11 +2208,19 @@ fn an_agent_titled_with_an_emoji_comes_up() {
     let home = TestHome::new("emoji");
     let out = home
         .warren("sleep 300")
-        .args(["new", "🎚️ LIMIT: Review new TEAM A report", home.dir.to_str().unwrap()])
+        .args([
+            "new",
+            "🎚️ LIMIT: Review new TEAM A report",
+            home.dir.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
     let said = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "{said}{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{said}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(said.contains("'LIMIT-Review-new-TEAM-A-report'"), "{said}");
     let sock = home.sock("LIMIT-Review-new-TEAM-A-report");
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -1781,8 +2232,14 @@ fn an_agent_titled_with_an_emoji_comes_up() {
 
 /// The pid of an agent's daemon, for killing it the way a shutdown would.
 fn daemon_pid(name: &str) -> Option<String> {
-    let out = Command::new("pgrep").args(["-f", &format!("__daemon {name} ")]).output().ok()?;
-    String::from_utf8_lossy(&out.stdout).split_whitespace().next().map(String::from)
+    let out = Command::new("pgrep")
+        .args(["-f", &format!("__daemon {name} ")])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .map(String::from)
 }
 
 /// An agent is a process, and a machine that restarts kills every one of
@@ -1798,7 +2255,12 @@ fn agents_lost_with_the_machine_come_back_asleep() {
     // having. Restore checks that a note still names something resumable —
     // `claude --resume` on an id that means nothing exits 1, and a tab that
     // can never wake is worse than no tab.
-    let store = home.dir.join("store").join(".claude").join("projects").join("Courses");
+    let store = home
+        .dir
+        .join("store")
+        .join(".claude")
+        .join("projects")
+        .join("Courses");
     std::fs::create_dir_all(&store).unwrap();
     std::fs::write(
         store.join("conv-42.jsonl"),
@@ -1817,7 +2279,11 @@ fn agents_lost_with_the_machine_come_back_asleep() {
         .stdin(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    hook.stdin.take().unwrap().write_all(br#"{"session_id":"conv-42"}"#).unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"session_id":"conv-42"}"#)
+        .unwrap();
     assert!(hook.wait().unwrap().success());
 
     // And a name of its own, as a rename in the dashboard would give it.
@@ -1829,9 +2295,10 @@ fn agents_lost_with_the_machine_come_back_asleep() {
             pinned: Some(true),
             slot: None,
         });
-        let named = viewer.await_frame(5_000, |m| {
-            matches!(m, ToClient::MetaChanged(meta) if meta.display == "ILKD-GRADER")
-        });
+        let named = viewer.await_frame(
+            5_000,
+            |m| matches!(m, ToClient::MetaChanged(meta) if meta.display == "ILKD-GRADER"),
+        );
         assert!(named.is_some(), "the rename landed");
     }
 
@@ -1848,12 +2315,21 @@ fn agents_lost_with_the_machine_come_back_asleep() {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(body.contains("conv-42") && body.contains("ILKD-GRADER"), "{body}");
+    assert!(
+        body.contains("conv-42") && body.contains("ILKD-GRADER"),
+        "{body}"
+    );
 
     // The machine stops. Every daemon dies where it stands, cleaning up
     // nothing: the socket is left stale and the note is left behind.
     let pid = daemon_pid("grader-lost").expect("the daemon is running");
-    assert!(Command::new("kill").args(["-9", &pid]).status().unwrap().success());
+    assert!(
+        Command::new("kill")
+            .args(["-9", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
     let gone = Instant::now() + Duration::from_secs(5);
     while UnixStream::connect(&sock).is_ok() && Instant::now() < gone {
         std::thread::sleep(Duration::from_millis(50));
@@ -1866,11 +2342,22 @@ fn agents_lost_with_the_machine_come_back_asleep() {
     assert!(orphan.exists());
 
     // Back it comes, and asleep: a row and a burrow, with nothing running.
-    let out =
-        home.warren("sleep 300").env("HOME", &fake_home).args(["restore"]).output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = home
+        .warren("sleep 300")
+        .env("HOME", &fake_home)
+        .args(["restore"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let said = String::from_utf8_lossy(&out.stdout);
-    assert!(said.contains("ILKD-GRADER"), "it says what it restored: {said}");
+    assert!(
+        said.contains("ILKD-GRADER"),
+        "it says what it restored: {said}"
+    );
     // The one it cannot resume is not offered — and not thrown away either:
     // "cannot find it" is not "it is not there".
     assert!(orphan.exists(), "the note it could not use is still kept");
@@ -1882,21 +2369,32 @@ fn agents_lost_with_the_machine_come_back_asleep() {
     assert!(!said.contains("ghost"), "and not restored: {said}");
 
     let (mut viewer, snap) = Viewer::attach(&home.sock("grader-lost"), 80, 10);
-    let ToClient::Snapshot { meta, state, .. } = &snap else { unreachable!() };
+    let ToClient::Snapshot { meta, state, .. } = &snap else {
+        unreachable!()
+    };
     assert_eq!(state.power, Power::Asleep, "restored asleep, not running");
     assert_eq!(meta.display, "ILKD-GRADER", "with the name it had");
     assert_eq!(meta.color, 33, "and the colour");
-    assert!(meta.cwd.ends_with("Courses"), "in its own directory: {}", meta.cwd);
-    assert_eq!(state.session.as_deref(), Some("conv-42"), "on its own conversation");
+    assert!(
+        meta.cwd.ends_with("Courses"),
+        "in its own directory: {}",
+        meta.cwd
+    );
+    assert_eq!(
+        state.session.as_deref(),
+        Some("conv-42"),
+        "on its own conversation"
+    );
     assert!(state.resumable, "and it knows it can come back");
 
     // And it wakes exactly as a sleeping tab always has — the dashboard
     // sends this the moment you type at one.
     viewer.send(&ToDaemon::Wake);
     viewer.send(&ToDaemon::Input(proto::b64_encode(b"x")));
-    let awake = viewer.await_frame(15_000, |m| {
-        matches!(m, ToClient::StateChanged(s) if s.power != Power::Asleep)
-    });
+    let awake = viewer.await_frame(
+        15_000,
+        |m| matches!(m, ToClient::StateChanged(s) if s.power != Power::Asleep),
+    );
     assert!(awake.is_some(), "a keystroke woke it");
 }
 
@@ -1912,7 +2410,11 @@ fn an_agent_that_ends_on_purpose_is_not_restored() {
         .stdin(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    hook.stdin.take().unwrap().write_all(br#"{"session_id":"conv-7"}"#).unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"session_id":"conv-7"}"#)
+        .unwrap();
     assert!(hook.wait().unwrap().success());
     let note = home.dir.join("notes").join("shortlived.json");
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -1921,8 +2423,16 @@ fn an_agent_that_ends_on_purpose_is_not_restored() {
     }
     assert!(note.exists(), "it was written down while it lived");
 
-    let out = home.warren("unused").args(["kill", "shortlived"]).output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = home
+        .warren("unused")
+        .args(["kill", "shortlived"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let deadline = Instant::now() + Duration::from_secs(5);
     while note.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
@@ -1965,7 +2475,11 @@ fn a_refused_sleep_says_why_it_was_refused() {
         apply_frame(&grid, m);
         grid.borrow().iter().any(|r| r.contains("tick"))
     });
-    assert!(up.is_some(), "the agent is printing: {:?}", grid.borrow().clone());
+    assert!(
+        up.is_some(),
+        "the agent is printing: {:?}",
+        grid.borrow().clone()
+    );
 
     // ^Z at something that is painting: refused, and told why.
     viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x1a")));
@@ -1974,7 +2488,12 @@ fn a_refused_sleep_says_why_it_was_refused() {
         grid.borrow().iter().any(|r| r.contains("AGENT BUSY"))
     });
     assert!(said.is_some(), "it refused: {:?}", grid.borrow().last());
-    let status: String = grid.borrow().iter().find(|r| r.contains("AGENT BUSY")).cloned().unwrap();
+    let status: String = grid
+        .borrow()
+        .iter()
+        .find(|r| r.contains("AGENT BUSY"))
+        .cloned()
+        .unwrap();
     assert!(
         status.contains("painted") && status.contains("s ago"),
         "and said which kind of busy: {status:?}"
@@ -1984,7 +2503,12 @@ fn a_refused_sleep_says_why_it_was_refused() {
 #[test]
 fn shift_z_sleeps_an_agent_even_mid_turn() {
     let inner = TestHome::new("forcez");
-    new_agent_in(&inner, "stuck", &inner.dir.join("Burrow"), "printf 'thinking\\r\\n'; sleep 300");
+    new_agent_in(
+        &inner,
+        "stuck",
+        &inner.dir.join("Burrow"),
+        "printf 'thinking\\r\\n'; sleep 300",
+    );
     let sock = inner.sock("stuck");
     // Mid-turn, with a conversation to come back to — as a claude whose turn
     // never ends (or whose Stop hook never arrived) would look.
@@ -1994,7 +2518,11 @@ fn shift_z_sleeps_an_agent_even_mid_turn() {
         .stdin(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    hook.stdin.take().unwrap().write_all(br#"{"session_id":"conv-9"}"#).unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"session_id":"conv-9"}"#)
+        .unwrap();
     assert!(hook.wait().unwrap().success());
     let (mut agent, _) = Viewer::attach(&sock, 80, 24);
 
@@ -2008,21 +2536,28 @@ fn shift_z_sleeps_an_agent_even_mid_turn() {
         apply_frame(&grid, m);
         grid.borrow().iter().any(|r| r.contains("thinking"))
     });
-    assert!(up.is_some(), "the dashboard shows the agent: {:?}", grid.borrow().clone());
+    assert!(
+        up.is_some(),
+        "the dashboard shows the agent: {:?}",
+        grid.borrow().clone()
+    );
 
     // `z` mid-turn is refused, and says how to insist.
     viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x00z")));
     let said = viewer.await_frame(10_000, |m| {
         apply_frame(&grid, m);
-        grid.borrow().iter().any(|r| r.contains("AGENT BUSY") && r.contains("Z sleeps it anyway"))
+        grid.borrow()
+            .iter()
+            .any(|r| r.contains("AGENT BUSY") && r.contains("Z sleeps it anyway"))
     });
     assert!(said.is_some(), "z is refused: {:?}", grid.borrow().last());
 
     // `Z` insists.
     viewer.send(&ToDaemon::Input(proto::b64_encode(b"Z")));
-    let asleep = agent.await_frame(10_000, |m| {
-        matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep)
-    });
+    let asleep = agent.await_frame(
+        10_000,
+        |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep),
+    );
     assert!(asleep.is_some(), "Z sleeps it anyway");
 }
 
@@ -2045,29 +2580,51 @@ fn colon_set_moves_the_focused_agent() {
         apply_frame(&grid, m);
         grid.borrow().iter().any(|r| r.contains("here"))
     });
-    assert!(up.is_some(), "the dashboard shows the agent: {:?}", grid.borrow().clone());
+    assert!(
+        up.is_some(),
+        "the dashboard shows the agent: {:?}",
+        grid.borrow().clone()
+    );
 
     // No name: it is the agent you are looking at. A space, not `=`, and a
     // path relative to where the agent already is.
-    viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x00:set dir deeper\r")));
-    let real = std::fs::canonicalize(&moved).unwrap().to_string_lossy().into_owned();
-    let changed = agent.await_frame(10_000, |m| {
-        matches!(m, ToClient::MetaChanged(meta) if meta.cwd == real)
-    });
+    viewer.send(&ToDaemon::Input(proto::b64_encode(
+        b"\x00:set dir deeper\r",
+    )));
+    let real = std::fs::canonicalize(&moved)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let changed = agent.await_frame(
+        10_000,
+        |m| matches!(m, ToClient::MetaChanged(meta) if meta.cwd == real),
+    );
     assert!(changed.is_some(), "the agent now runs in {real}");
     let said = viewer.await_frame(10_000, |m| {
         apply_frame(&grid, m);
-        grid.borrow().iter().any(|r| r.contains("runs in") && r.contains("deeper"))
+        grid.borrow()
+            .iter()
+            .any(|r| r.contains("runs in") && r.contains("deeper"))
     });
-    assert!(said.is_some(), "and the status bar says so: {:?}", grid.borrow().last());
+    assert!(
+        said.is_some(),
+        "and the status bar says so: {:?}",
+        grid.borrow().last()
+    );
 
     // A directory that is not there is refused, by the machine it is not on.
-    viewer.send(&ToDaemon::Input(proto::b64_encode(b":set dir /nowhere/at/all\r")));
+    viewer.send(&ToDaemon::Input(proto::b64_encode(
+        b":set dir /nowhere/at/all\r",
+    )));
     let refused = viewer.await_frame(10_000, |m| {
         apply_frame(&grid, m);
         grid.borrow().iter().any(|r| r.contains("not a directory"))
     });
-    assert!(refused.is_some(), "a missing dir is refused: {:?}", grid.borrow().last());
+    assert!(
+        refused.is_some(),
+        "a missing dir is refused: {:?}",
+        grid.borrow().last()
+    );
 }
 
 #[test]
@@ -2081,16 +2638,42 @@ fn warren_sleep_force_sleeps_a_busy_agent() {
         .stdin(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    hook.stdin.take().unwrap().write_all(br#"{"session_id":"conv-3"}"#).unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"session_id":"conv-3"}"#)
+        .unwrap();
     assert!(hook.wait().unwrap().success());
 
-    let out = home.warren("sleep 300").args(["sleep", "busy"]).output().unwrap();
-    assert!(!out.status.success(), "a busy agent is not slept without --force");
-    assert!(String::from_utf8_lossy(&out.stderr).contains("--force"), "and says how to insist");
+    let out = home
+        .warren("sleep 300")
+        .args(["sleep", "busy"])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "a busy agent is not slept without --force"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--force"),
+        "and says how to insist"
+    );
 
-    let out = home.warren("sleep 300").args(["sleep", "busy", "--force"]).output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("asleep"), "{}", String::from_utf8_lossy(&out.stdout));
+    let out = home
+        .warren("sleep 300")
+        .args(["sleep", "busy", "--force"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("asleep"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
 }
 
 /// The gutter before a machine's name is not part of the name.
@@ -2103,8 +2686,12 @@ fn a_machine_heading_underlines_its_name_and_not_the_space_before_it() {
     new_agent_in(&near, "svm", &near.dir.join("Research"), "sleep 300");
     std::fs::write(near.dir.join("hosts"), format!("faraway  {BIN}\n")).unwrap();
     let shim = fake_ssh(&near, &far);
-    let dash_cmd =
-        format!("WARREN_HOME={} WARREN_SSH={} {} up", near.dir.display(), shim.display(), BIN);
+    let dash_cmd = format!(
+        "WARREN_HOME={} WARREN_SSH={} {} up",
+        near.dir.display(),
+        shim.display(),
+        BIN
+    );
     new_agent(&outer, "dash", &dash_cmd);
     let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 22);
 
@@ -2126,7 +2713,13 @@ fn a_machine_heading_underlines_its_name_and_not_the_space_before_it() {
     };
     keep(&rows, &snap);
     let text_of = |line: &spans::LineSpans| -> String {
-        line.0.iter().map(|s| s.text.as_str()).collect::<String>().chars().take(23).collect()
+        line.0
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<String>()
+            .chars()
+            .take(23)
+            .collect()
     };
     let found = viewer.await_frame(20_000, |m| {
         keep(&rows, m);
@@ -2134,16 +2727,32 @@ fn a_machine_heading_underlines_its_name_and_not_the_space_before_it() {
     });
     assert!(found.is_some(), "the far machine has a heading");
 
-    let heading = rows.borrow().iter().find(|l| text_of(l).trim() == "faraway").cloned().unwrap();
+    let heading = rows
+        .borrow()
+        .iter()
+        .find(|l| text_of(l).trim() == "faraway")
+        .cloned()
+        .unwrap();
     let first = heading.0.first().expect("the row starts with something");
-    assert!(first.text.starts_with(' '), "the gutter comes first: {first:?}");
+    assert!(
+        first.text.starts_with(' '),
+        "the gutter comes first: {first:?}"
+    );
     assert_eq!(
         first.attrs & spans::attr::UNDERLINE,
         0,
         "and is not underlined: {first:?}"
     );
-    let name = heading.0.iter().find(|s| s.text.contains("faraway")).expect("the name is drawn");
-    assert_ne!(name.attrs & spans::attr::UNDERLINE, 0, "the name still is: {name:?}");
+    let name = heading
+        .0
+        .iter()
+        .find(|s| s.text.contains("faraway"))
+        .expect("the name is drawn");
+    assert_ne!(
+        name.attrs & spans::attr::UNDERLINE,
+        0,
+        "the name still is: {name:?}"
+    );
 }
 
 /// Opening one conversation twice makes two agents, not one agent with two
@@ -2162,23 +2771,44 @@ fn two_agents_on_one_conversation_are_still_two_agents() {
             .args(["new", name, work.to_str().unwrap(), "0", "resume", sid])
             .output()
             .unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
     assert!(home.sock("TWIN").exists() && home.sock("TWIN-B").exists());
 
-    let out = home.warren("sleep 300").args(["kill", "TWIN"]).output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = home
+        .warren("sleep 300")
+        .args(["kill", "TWIN"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let deadline = Instant::now() + Duration::from_secs(5);
     while home.sock("TWIN").exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(!home.sock("TWIN").exists(), "the one that was killed is gone");
+    assert!(
+        !home.sock("TWIN").exists(),
+        "the one that was killed is gone"
+    );
     // The other is untouched: still listening, still its own process.
     assert!(home.sock("TWIN-B").exists(), "and the other is not");
     let (_viewer, snap) = Viewer::attach(&home.sock("TWIN-B"), 40, 8);
-    assert!(matches!(snap, ToClient::Snapshot { .. }), "it still answers: {snap:?}");
-    assert!(daemon_pid("TWIN-B").is_some(), "and its daemon is still running");
+    assert!(
+        matches!(snap, ToClient::Snapshot { .. }),
+        "it still answers: {snap:?}"
+    );
+    assert!(
+        daemon_pid("TWIN-B").is_some(),
+        "and its daemon is still running"
+    );
 }
 
 /// A conversation only has one transcript, so resuming one that is already
@@ -2210,7 +2840,11 @@ fn a_conversation_that_is_already_open_is_not_opened_twice_by_accident() {
         .args(["new", "FIRST", work.to_str().unwrap(), "0", "resume", sid])
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let dash_cmd = format!(
         "HOME={} WARREN_HOME={} {} up",
@@ -2226,21 +2860,33 @@ fn a_conversation_that_is_already_open_is_not_opened_twice_by_accident() {
         apply_frame(&grid, m);
         sidebar_of(&grid).iter().any(|r| r.contains("FIRST"))
     });
-    assert!(up.is_some(), "the first agent is up: {:?}", sidebar_of(&grid));
+    assert!(
+        up.is_some(),
+        "the first agent is up: {:?}",
+        sidebar_of(&grid)
+    );
 
     // ^Space n opens the form; Tab reaches Mode, `l` picks resume.
     viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x00n\tl")));
     let listed = viewer.await_frame(10_000, |m| {
         apply_frame(&grid, m);
-        grid.borrow().iter().any(|r| r.contains("the one conversation"))
+        grid.borrow()
+            .iter()
+            .any(|r| r.contains("the one conversation"))
     });
-    assert!(listed.is_some(), "the picker offers it: {:?}", grid.borrow().clone());
+    assert!(
+        listed.is_some(),
+        "the picker offers it: {:?}",
+        grid.borrow().clone()
+    );
 
     // Enter: refused, with the name of the agent that already has it.
     viewer.send(&ToDaemon::Input(proto::b64_encode(b"\r")));
     let warned = viewer.await_frame(10_000, |m| {
         apply_frame(&grid, m);
-        grid.borrow().iter().any(|r| r.contains("already on this conversation"))
+        grid.borrow()
+            .iter()
+            .any(|r| r.contains("already on this conversation"))
     });
     assert!(warned.is_some(), "it warned: {:?}", grid.borrow().clone());
     let said: String = grid
@@ -2251,7 +2897,10 @@ fn a_conversation_that_is_already_open_is_not_opened_twice_by_accident() {
         .unwrap();
     assert!(said.contains("FIRST"), "and said which agent: {said:?}");
     assert!(said.contains("fork"), "and what to do instead: {said:?}");
-    let live = std::fs::read_dir(inner.dir.join("run")).unwrap().flatten().count();
+    let live = std::fs::read_dir(inner.dir.join("run"))
+        .unwrap()
+        .flatten()
+        .count();
     assert_eq!(live, 1, "and made nothing: {said:?}");
 
     // The same key again is how you say you meant it.
@@ -2259,9 +2908,15 @@ fn a_conversation_that_is_already_open_is_not_opened_twice_by_accident() {
     let made = viewer.await_frame(20_000, |m| {
         apply_frame(&grid, m);
         // The sidebar is 23 columns; the name arrives clipped.
-        sidebar_of(&grid).iter().any(|r| r.contains("the-one-conversat"))
+        sidebar_of(&grid)
+            .iter()
+            .any(|r| r.contains("the-one-conversat"))
     });
-    assert!(made.is_some(), "the twin was made after all: {:?}", sidebar_of(&grid));
+    assert!(
+        made.is_some(),
+        "the twin was made after all: {:?}",
+        sidebar_of(&grid)
+    );
 }
 
 /// Fork is Claude Code's `--fork-session`, so it is offered exactly where it
@@ -2283,11 +2938,23 @@ fn the_form_offers_a_fork_only_where_the_harness_has_one() {
         apply_frame(&grid, m);
         grid.borrow().iter().any(|r| r.contains("Mode"))
     });
-    assert!(form.is_some(), "the form is open: {:?}", grid.borrow().clone());
+    assert!(
+        form.is_some(),
+        "the form is open: {:?}",
+        grid.borrow().clone()
+    );
     let mode_row = |grid: &std::cell::RefCell<Vec<String>>| -> String {
-        grid.borrow().iter().find(|r| r.contains("Mode")).cloned().unwrap_or_default()
+        grid.borrow()
+            .iter()
+            .find(|r| r.contains("Mode"))
+            .cloned()
+            .unwrap_or_default()
     };
-    assert!(mode_row(&grid).contains("fork"), "claude can fork: {:?}", mode_row(&grid));
+    assert!(
+        mode_row(&grid).contains("fork"),
+        "claude can fork: {:?}",
+        mode_row(&grid)
+    );
 
     // Land on fork, then switch the harness out from under it. Picking a
     // chip drops the cursor back to the first field, so each step is its own
@@ -2297,15 +2964,27 @@ fn the_form_offers_a_fork_only_where_the_harness_has_one() {
         apply_frame(&grid, m);
         grid.borrow().iter().any(|r| r.contains("Fork of"))
     });
-    assert!(forked.is_some(), "fork picks a conversation too: {:?}", grid.borrow().clone());
+    assert!(
+        forked.is_some(),
+        "fork picks a conversation too: {:?}",
+        grid.borrow().clone()
+    );
 
     viewer.send(&ToDaemon::Input(proto::b64_encode(b"l")));
     let omp = viewer.await_frame(10_000, |m| {
         apply_frame(&grid, m);
         grid.borrow().iter().any(|r| r.contains("new omp agent"))
     });
-    assert!(omp.is_some(), "the harness changed: {:?}", grid.borrow().clone());
-    assert!(!mode_row(&grid).contains("fork"), "omp is offered none: {:?}", mode_row(&grid));
+    assert!(
+        omp.is_some(),
+        "the harness changed: {:?}",
+        grid.borrow().clone()
+    );
+    assert!(
+        !mode_row(&grid).contains("fork"),
+        "omp is offered none: {:?}",
+        mode_row(&grid)
+    );
     assert!(
         !grid.borrow().iter().any(|r| r.contains("Fork of")),
         "and is not left on one: {:?}",
@@ -2338,7 +3017,10 @@ fn an_agent_is_found_by_the_name_it_has_and_not_a_trimmed_one() {
     while !(home.sock(&short).exists() && home.sock(&long).exists()) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(home.sock(&short).exists() && home.sock(&long).exists(), "both are up");
+    assert!(
+        home.sock(&short).exists() && home.sock(&long).exists(),
+        "both are up"
+    );
 
     // The far side of an ssh: `__pipe NAME` must carry the agent named, not
     // whatever that name trims to.
@@ -2373,11 +3055,23 @@ fn an_agent_is_found_by_the_name_it_has_and_not_a_trimmed_one() {
     }
     let _ = pipe.kill();
     let _ = pipe.wait();
-    assert_eq!(piped_to.as_deref(), Some(long.as_str()), "the pipe carried the agent asked for");
+    assert_eq!(
+        piped_to.as_deref(),
+        Some(long.as_str()),
+        "the pipe carried the agent asked for"
+    );
 
     // And killing it kills it, not its shorter neighbour.
-    let out = home.warren("sleep 300").args(["kill", &long]).output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = home
+        .warren("sleep 300")
+        .args(["kill", &long])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let deadline = Instant::now() + Duration::from_secs(5);
     while home.sock(&long).exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
@@ -2400,15 +3094,18 @@ fn a_coloured_agent_wears_its_colour_on_the_rules_of_its_ui() {
     let work = inner.dir.join("Burrow");
     std::fs::create_dir_all(&work).unwrap();
     let rule = "\u{2500}".repeat(30);
-    let script = format!(
-        "printf 'hello\\n{rule}\\n> prompt\\n\u{2500}\u{2500} label {rule}\\n'; sleep 300"
-    );
+    let script =
+        format!("printf 'hello\\n{rule}\\n> prompt\\n\u{2500}\u{2500} label {rule}\\n'; sleep 300");
     let out = inner
         .warren(&script)
         .args(["new", "painted", work.to_str().unwrap(), "34"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let dash_cmd = format!("WARREN_HOME={} {} up", inner.dir.display(), BIN);
     new_agent(&outer, "dash", &dash_cmd);
@@ -2440,30 +3137,64 @@ fn a_coloured_agent_wears_its_colour_on_the_rules_of_its_ui() {
     let rows = rows.borrow().clone();
     // The spans that carry a glyph, whatever else they are next to.
     let fg_of = |line: &spans::LineSpans, ch: char| -> Vec<spans::Color> {
-        line.0.iter().filter(|s| s.text.contains(ch)).map(|s| s.fg).collect()
+        line.0
+            .iter()
+            .filter(|s| s.text.contains(ch))
+            .map(|s| s.fg)
+            .collect()
     };
     let bare = rows
         .iter()
         .find(|l| text(l).contains(&rule) && !text(l).contains("label"))
         .expect("the plain rule");
-    let rule_fgs: Vec<_> = bare.0.iter().filter(|s| s.text.contains('\u{2500}')).map(|s| s.fg).collect();
-    assert!(!rule_fgs.is_empty() && rule_fgs.iter().all(|c| *c == green), "the rule: {rule_fgs:?}");
-    assert!(fg_of(bare, '\u{251c}').iter().all(|c| *c == green), "and the junction it meets");
+    let rule_fgs: Vec<_> = bare
+        .0
+        .iter()
+        .filter(|s| s.text.contains('\u{2500}'))
+        .map(|s| s.fg)
+        .collect();
+    assert!(
+        !rule_fgs.is_empty() && rule_fgs.iter().all(|c| *c == green),
+        "the rule: {rule_fgs:?}"
+    );
+    assert!(
+        fg_of(bare, '\u{251c}').iter().all(|c| *c == green),
+        "and the junction it meets"
+    );
 
     let labelled = rows.iter().find(|l| text(l).contains("label")).unwrap();
-    let label = labelled.0.iter().find(|s| s.text.contains("label")).unwrap();
+    let label = labelled
+        .0
+        .iter()
+        .find(|s| s.text.contains("label"))
+        .unwrap();
     // A label is a chip of the agent's colour, as Claude draws one under its
     // own `/color`: the colour behind it, and text that reads on top.
-    assert_eq!(label.bg, green, "a label in a rule sits on the agent's colour: {label:?}");
-    assert_eq!(label.fg, spans::Color::Indexed(16), "in black, on a green that light: {label:?}");
+    assert_eq!(
+        label.bg, green,
+        "a label in a rule sits on the agent's colour: {label:?}"
+    );
+    assert_eq!(
+        label.fg,
+        spans::Color::Indexed(16),
+        "in black, on a green that light: {label:?}"
+    );
     assert!(
-        labelled.0.iter().filter(|s| s.text.contains('\u{2500}')).all(|s| s.fg == green),
+        labelled
+            .0
+            .iter()
+            .filter(|s| s.text.contains('\u{2500}'))
+            .all(|s| s.fg == green),
         "while the rule around it takes the agent's"
     );
 
     let hello = rows.iter().find(|l| text(l).contains("hello")).unwrap();
     assert!(
-        hello.0.iter().filter(|s| s.text.contains("hello")).all(|s| s.fg != green),
+        hello
+            .0
+            .iter()
+            .filter(|s| s.text.contains("hello"))
+            .all(|s| s.fg != green),
         "and text is left alone"
     );
 }
@@ -2508,11 +3239,21 @@ fn a_dashboard_opened_after_a_restart_has_its_agents_back_asleep() {
         apply_frame(&grid, m);
         sidebar_of(&grid).iter().any(|r| r.contains("napper"))
     });
-    assert!(shown.is_some(), "it is in the sidebar unasked: {:?}", sidebar_of(&grid));
+    assert!(
+        shown.is_some(),
+        "it is in the sidebar unasked: {:?}",
+        sidebar_of(&grid)
+    );
 
     let (_agent, snap) = Viewer::attach(&near.sock("napper"), 80, 10);
-    let ToClient::Snapshot { state, .. } = &snap else { unreachable!() };
-    assert_eq!(state.power, Power::Asleep, "back asleep, with nothing running");
+    let ToClient::Snapshot { state, .. } = &snap else {
+        unreachable!()
+    };
+    assert_eq!(
+        state.power,
+        Power::Asleep,
+        "back asleep, with nothing running"
+    );
     assert_eq!(state.session.as_deref(), Some("conv-9"));
 }
 
@@ -2559,21 +3300,40 @@ fn restores_that_race_bring_an_agent_back_once() {
             })
             .collect(),
     );
-    let out = far.warren("sleep 300").env("HOME", &fake_home).arg("restore").output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = far
+        .warren("sleep 300")
+        .env("HOME", &fake_home)
+        .arg("restore")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let sock = far.sock("only-once");
     let deadline = Instant::now() + Duration::from_secs(5);
     while UnixStream::connect(&sock).is_err() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(UnixStream::connect(&sock).is_ok(), "a roster alone brings it back");
+    assert!(
+        UnixStream::connect(&sock).is_ok(),
+        "a roster alone brings it back"
+    );
     // Long enough for a second restore to have spawned a second daemon.
     std::thread::sleep(Duration::from_millis(1_000));
-    let daemons = Command::new("pgrep").args(["-f", "__daemon only-once "]).output().unwrap();
-    let count = String::from_utf8_lossy(&daemons.stdout).split_whitespace().count();
+    let daemons = Command::new("pgrep")
+        .args(["-f", "__daemon only-once "])
+        .output()
+        .unwrap();
+    let count = String::from_utf8_lossy(&daemons.stdout)
+        .split_whitespace()
+        .count();
     if count != 1 {
-        let _ = Command::new("pkill").args(["-f", "__daemon only-once "]).status();
+        let _ = Command::new("pkill")
+            .args(["-f", "__daemon only-once "])
+            .status();
     }
     assert_eq!(count, 1, "one agent, one daemon");
 }
@@ -2588,29 +3348,63 @@ fn a_typed_name_is_the_name_the_agent_keeps() {
     let home = TestHome::new("typedname");
     let meta_of = |name: &str| {
         let (_viewer, snap) = Viewer::attach(&home.sock(name), 80, 10);
-        let ToClient::Snapshot { meta, .. } = snap else { unreachable!() };
+        let ToClient::Snapshot { meta, .. } = snap else {
+            unreachable!()
+        };
         meta
     };
 
     let out = home
         .warren("sleep 300")
-        .args(["new", "open-eq", home.dir.to_str().unwrap(), "0", "new", "--title=Open EQ: v2"])
+        .args([
+            "new",
+            "open-eq",
+            home.dir.to_str().unwrap(),
+            "0",
+            "new",
+            "--title=Open EQ: v2",
+        ])
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let meta = meta_of("open-eq");
-    assert_eq!(meta.display, "Open EQ: v2", "as typed, from the first frame");
-    assert!(!meta.pinned, "claude is told the name, so the row can go on following it");
+    assert_eq!(
+        meta.display, "Open EQ: v2",
+        "as typed, from the first frame"
+    );
+    assert!(
+        !meta.pinned,
+        "claude is told the name, so the row can go on following it"
+    );
 
     let out = home
         .warren("sleep 300")
-        .args(["new", "omp-eq", home.dir.to_str().unwrap(), "0", "new", "--kind=omp", "--title=OMP EQ"])
+        .args([
+            "new",
+            "omp-eq",
+            home.dir.to_str().unwrap(),
+            "0",
+            "new",
+            "--kind=omp",
+            "--title=OMP EQ",
+        ])
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let meta = meta_of("omp-eq");
     assert_eq!(meta.display, "OMP EQ");
-    assert!(meta.pinned, "omp cannot be told, so the row holds the name itself");
+    assert!(
+        meta.pinned,
+        "omp cannot be told, so the row holds the name itself"
+    );
 
     // No name typed: nothing changes — the row follows the harness's title.
     new_agent(&home, "untitled", "sleep 300");
@@ -2638,8 +3432,12 @@ fn shift_j_and_k_move_an_agent_within_its_folder() {
     // Home as the agents see it: their directories are resolved, and /tmp
     // is a link on macOS.
     let home = std::fs::canonicalize(&inner.dir).unwrap();
-    let dash_cmd =
-        format!("HOME={} WARREN_HOME={} {} up", home.display(), inner.dir.display(), BIN);
+    let dash_cmd = format!(
+        "HOME={} WARREN_HOME={} {} up",
+        home.display(),
+        inner.dir.display(),
+        BIN
+    );
     new_agent(&outer, "dash", &dash_cmd);
     let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 20);
     let grid = std::cell::RefCell::new(Vec::<String>::new());
@@ -2652,7 +3450,9 @@ fn shift_j_and_k_move_an_agent_within_its_folder() {
             // Agent rows hang off a branch; the status line names one too.
             .filter(|row| row.contains('├') || row.contains('└'))
             .filter_map(|row| {
-                ["zeta", "alpha", "mid", "other"].into_iter().find(|n| row.contains(n))
+                ["zeta", "alpha", "mid", "other"]
+                    .into_iter()
+                    .find(|n| row.contains(n))
             })
             .map(String::from)
             .collect()
@@ -2669,14 +3469,34 @@ fn shift_j_and_k_move_an_agent_within_its_folder() {
     };
 
     // As made: slot order, whatever the directories are called.
-    expect(&mut viewer, b"", ["zeta", "alpha", "mid", "other"], "they start in the order they were made");
+    expect(
+        &mut viewer,
+        b"",
+        ["zeta", "alpha", "mid", "other"],
+        "they start in the order they were made",
+    );
     // ^Space for NORMAL, `g` for the first agent.
-    expect(&mut viewer, b"\x00gJ", ["alpha", "zeta", "mid", "other"], "shift+j carries it down a row");
-    expect(&mut viewer, b"J", ["alpha", "mid", "zeta", "other"], "and the focus goes with it, so again");
+    expect(
+        &mut viewer,
+        b"\x00gJ",
+        ["alpha", "zeta", "mid", "other"],
+        "shift+j carries it down a row",
+    );
+    expect(
+        &mut viewer,
+        b"J",
+        ["alpha", "mid", "zeta", "other"],
+        "and the focus goes with it, so again",
+    );
     // The bottom of the folder is the end of the road, not a way into the next.
     viewer.send(&ToDaemon::Input(proto::b64_encode(b"J")));
     std::thread::sleep(Duration::from_millis(1_200));
-    expect(&mut viewer, b"K", ["alpha", "zeta", "mid", "other"], "shift+k brings it back up, from where it stopped");
+    expect(
+        &mut viewer,
+        b"K",
+        ["alpha", "zeta", "mid", "other"],
+        "shift+k brings it back up, from where it stopped",
+    );
 }
 
 /// What an agent is launched with can change without making it again: the
@@ -2699,7 +3519,11 @@ fn set_changes_how_an_agent_next_starts() {
         .stdin(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    hook.stdin.take().unwrap().write_all(br#"{"session_id":"conv-m"}"#).unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"session_id":"conv-m"}"#)
+        .unwrap();
     assert!(hook.wait().unwrap().success());
     let note = home.dir.join("notes").join("mentor.json");
     let read_note = || std::fs::read_to_string(&note).unwrap_or_default();
@@ -2709,11 +3533,26 @@ fn set_changes_how_an_agent_next_starts() {
     }
 
     // Extra args land in the note at once — a hand edit there would not.
-    let set = |args: &[&str]| home.warren("unused").arg("set").arg("mentor").args(args).output().unwrap();
+    let set = |args: &[&str]| {
+        home.warren("unused")
+            .arg("set")
+            .arg("mentor")
+            .args(args)
+            .output()
+            .unwrap()
+    };
     let out = set(&["--extra=--mcp-config /x/mcp.json"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(String::from_utf8_lossy(&out.stdout).contains("extra args: --mcp-config /x/mcp.json"));
-    assert!(read_note().contains("--mcp-config /x/mcp.json"), "{}", read_note());
+    assert!(
+        read_note().contains("--mcp-config /x/mcp.json"),
+        "{}",
+        read_note()
+    );
 
     // A directory that is not there is not a place to move an agent to.
     let out = set(&["--dir=/nowhere/at/all"]);
@@ -2723,14 +3562,21 @@ fn set_changes_how_an_agent_next_starts() {
     let mut viewer = Viewer::attach(&sock, 80, 10).0;
     viewer.send(&ToDaemon::Sleep);
     viewer
-        .await_frame(10_000, |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep))
+        .await_frame(
+            10_000,
+            |m| matches!(m, ToClient::StateChanged(s) if s.power == Power::Asleep),
+        )
         .expect("asleep");
     let new = home.dir.join("IAI");
     std::fs::rename(&old, &new).unwrap();
     let new = std::fs::canonicalize(&new).unwrap();
 
     // Waking now would start it somewhere empty; it says so instead.
-    let out = home.warren("unused").args(["wake", "mentor"]).output().unwrap();
+    let out = home
+        .warren("unused")
+        .args(["wake", "mentor"])
+        .output()
+        .unwrap();
     assert!(!out.status.success(), "the command line refuses");
     assert!(String::from_utf8_lossy(&out.stderr).contains("warren set mentor --dir="));
     viewer.send(&ToDaemon::Wake);
@@ -2745,22 +3591,48 @@ fn set_changes_how_an_agent_next_starts() {
 
     // Told where it went, it wakes there.
     let out = set(&[&format!("--dir={}", new.display())]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(read_note().contains(&*new.to_string_lossy()), "{}", read_note());
-    assert!(read_note().contains("--mcp-config"), "what was set before is kept");
-    let out = home.warren("unused").args(["wake", "mentor"]).output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        read_note().contains(&*new.to_string_lossy()),
+        "{}",
+        read_note()
+    );
+    assert!(
+        read_note().contains("--mcp-config"),
+        "what was set before is kept"
+    );
+    let out = home
+        .warren("unused")
+        .args(["wake", "mentor"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let woke_there = viewer.await_frame(10_000, |m| match m {
         ToClient::Damage { lines, .. } => lines
             .iter()
             .any(|(_, l)| screen_text(std::slice::from_ref(l)).contains("/IAI")),
         _ => false,
     });
-    assert!(woke_there.is_some(), "it runs in the directory it was given");
+    assert!(
+        woke_there.is_some(),
+        "it runs in the directory it was given"
+    );
 
     // And an empty value clears.
     let out = set(&["--extra="]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(read_note().contains("\"extra\": null"), "{}", read_note());
 }
 
@@ -2772,12 +3644,25 @@ fn a_daemon_that_cannot_start_says_why() {
     let home = TestHome::new("nostart");
     std::fs::create_dir_all(home.sock("doomed").join("in-the-way")).unwrap();
     let started = Instant::now();
-    let out = home.warren("sleep 300").args(["new", "doomed", home.dir.to_str().unwrap()]).output().unwrap();
+    let out = home
+        .warren("sleep 300")
+        .args(["new", "doomed", home.dir.to_str().unwrap()])
+        .output()
+        .unwrap();
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success());
-    assert!(said.contains("did not start") && said.contains("binding"), "{said}");
-    assert!(started.elapsed() < Duration::from_secs(2), "it did not wait out the clock");
-    assert!(!home.dir.join("run").join("doomed.err").exists(), "the reason is read once");
+    assert!(
+        said.contains("did not start") && said.contains("binding"),
+        "{said}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "it did not wait out the clock"
+    );
+    assert!(
+        !home.dir.join("run").join("doomed.err").exists(),
+        "the reason is read once"
+    );
 }
 
 /// The form does the same: "creating agent…" turns into the reason, rather
@@ -2785,7 +3670,12 @@ fn a_daemon_that_cannot_start_says_why() {
 #[test]
 fn the_form_gives_up_on_an_agent_that_cannot_start() {
     let inner = TestHome::new("formdoom");
-    new_agent_in(&inner, "keeper", &inner.dir.join("Burrow"), "printf 'here\\r\\n'; sleep 300");
+    new_agent_in(
+        &inner,
+        "keeper",
+        &inner.dir.join("Burrow"),
+        "printf 'here\\r\\n'; sleep 300",
+    );
     std::fs::create_dir_all(inner.sock("doomed").join("in-the-way")).unwrap();
 
     let outer = TestHome::new("formdoomout");
@@ -2798,7 +3688,11 @@ fn the_form_gives_up_on_an_agent_that_cannot_start() {
         apply_frame(&grid, m);
         grid.borrow().iter().any(|r| r.contains("here"))
     });
-    assert!(up.is_some(), "the dashboard is up: {:?}", grid.borrow().clone());
+    assert!(
+        up.is_some(),
+        "the dashboard is up: {:?}",
+        grid.borrow().clone()
+    );
 
     // ^Space n, Tab past Kind and Mode to Title, name it, Tab to Root, Enter.
     viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x00n")));
@@ -2806,9 +3700,15 @@ fn the_form_gives_up_on_an_agent_that_cannot_start() {
     viewer.send(&ToDaemon::Input(proto::b64_encode(b"\t\tdoomed\t\r")));
     let said = viewer.await_frame(10_000, |m| {
         apply_frame(&grid, m);
-        grid.borrow().iter().any(|r| r.contains("did not start") && r.contains("binding"))
+        grid.borrow()
+            .iter()
+            .any(|r| r.contains("did not start") && r.contains("binding"))
     });
-    assert!(said.is_some(), "the status bar says why: {:#?}", grid.borrow());
+    assert!(
+        said.is_some(),
+        "the status bar says why: {:#?}",
+        grid.borrow()
+    );
 }
 
 /// Chat is wired into the harness's own command line, not faked: a pretend
@@ -2846,7 +3746,11 @@ fn chat_is_wired_into_each_harness() {
             .args(args)
             .output()
             .unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     };
     let argv = |name: &str| {
         let file = home.dir.join(format!("argv-{name}"));
@@ -2866,13 +3770,24 @@ fn chat_is_wired_into_each_harness() {
     assert!(said.contains(mcp.to_str().unwrap()), "{said}");
     assert!(said.contains("server:warren-matrix"), "{said}");
     let channel: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(home.dir.join("matrix/chatty/config.json")).unwrap()).unwrap();
+        serde_json::from_slice(&std::fs::read(home.dir.join("matrix/chatty/config.json")).unwrap())
+            .unwrap();
     assert_eq!(channel["claim"]["machine"], "smq");
     assert_eq!(channel["rosterRoom"], "!roster:x");
-    assert_eq!(channel["roomDefaults"]["requireMention"], true, "agents need a mention by default");
-    assert_eq!(channel["approvers"], serde_json::json!(["@sam:x"]), "a pattern never approves");
+    assert_eq!(
+        channel["roomDefaults"]["requireMention"], true,
+        "agents need a mention by default"
+    );
+    assert_eq!(
+        channel["approvers"],
+        serde_json::json!(["@sam:x"]),
+        "a pattern never approves"
+    );
     // One agent's own settings, over everyone's: its partner's word, its room.
-    assert_eq!(channel["allowedUsers"], serde_json::json!(["@sam:x", "@*:x", "@hermes:x"]));
+    assert_eq!(
+        channel["allowedUsers"],
+        serde_json::json!(["@sam:x", "@*:x", "@hermes:x"])
+    );
     assert_eq!(channel["agentLoopCap"], 0);
     assert_eq!(channel["rooms"]["!pair:x"]["requireMention"], false);
     use std::os::unix::fs::PermissionsExt;
@@ -2884,8 +3799,13 @@ fn chat_is_wired_into_each_harness() {
     new(&["ompy", work, "--kind=omp"]);
     let said = argv("ompy");
     let ompy: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(home.dir.join("matrix/ompy/config.json")).unwrap()).unwrap();
-    assert_eq!(ompy["allowedUsers"], serde_json::json!(["@sam:x", "@*:x"]), "overrides are one agent's");
+        serde_json::from_slice(&std::fs::read(home.dir.join("matrix/ompy/config.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        ompy["allowedUsers"],
+        serde_json::json!(["@sam:x", "@*:x"]),
+        "overrides are one agent's"
+    );
     assert!(ompy.get("agentLoopCap").is_none());
     let ext = home.dir.join("omp-warren-matrix.ts");
     assert!(said.contains(ext.to_str().unwrap()), "{said}");
@@ -2897,10 +3817,17 @@ fn chat_is_wired_into_each_harness() {
     // Off for one agent, and nothing of chat on its command line.
     new(&["quiet", work, "--no-matrix"]);
     let said = argv("quiet");
-    assert!(!said.contains("warren-matrix") && !said.contains("mcp-config"), "{said}");
+    assert!(
+        !said.contains("warren-matrix") && !said.contains("mcp-config"),
+        "{said}"
+    );
 
     // No name claimed yet: nothing to invite.
-    let out = home.warren("x").args(["join", "chatty", "#lab:x"]).output().unwrap();
+    let out = home
+        .warren("x")
+        .args(["join", "chatty", "#lab:x"])
+        .output()
+        .unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("no chat name yet"));
 
@@ -2912,7 +3839,12 @@ fn chat_is_wired_into_each_harness() {
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(!home.dir.join("matrix/chatty").exists(), "retired");
-    assert_eq!(std::fs::read_dir(home.dir.join("matrix/.ended")).unwrap().count(), 1);
+    assert_eq!(
+        std::fs::read_dir(home.dir.join("matrix/.ended"))
+            .unwrap()
+            .count(),
+        1
+    );
 }
 
 /// `warren renew` puts an agent on a new daemon — the binary it is run from
@@ -2928,10 +3860,20 @@ fn renew_moves_an_agent_onto_a_new_daemon() {
     .unwrap();
     let out = home
         .warren("sleep 300")
-        .args(["new", "renewed", home.dir.join("w").to_str().unwrap(), "42", "--no-matrix"])
+        .args([
+            "new",
+            "renewed",
+            home.dir.join("w").to_str().unwrap(),
+            "42",
+            "--no-matrix",
+        ])
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let sock = home.sock("renewed");
     // A conversation to come back on, as the hooks report one.
     let mut hook = Command::new(BIN)
@@ -2940,7 +3882,11 @@ fn renew_moves_an_agent_onto_a_new_daemon() {
         .stdin(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    hook.stdin.take().unwrap().write_all(br#"{"session_id":"conv-7"}"#).unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"session_id":"conv-7"}"#)
+        .unwrap();
     assert!(hook.wait().unwrap().success());
     let note_path = home.dir.join("notes/renewed.json");
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -2949,7 +3895,11 @@ fn renew_moves_an_agent_onto_a_new_daemon() {
     }
     let before = daemon_pid("renewed").expect("a daemon");
 
-    let out = home.warren("sleep 300").args(["renew", "renewed", "--matrix=on"]).output().unwrap();
+    let out = home
+        .warren("sleep 300")
+        .args(["renew", "renewed", "--matrix=on"])
+        .output()
+        .unwrap();
     assert!(
         out.status.success(),
         "{}{}",
@@ -2959,11 +3909,70 @@ fn renew_moves_an_agent_onto_a_new_daemon() {
     let after = daemon_pid("renewed").expect("a daemon again");
     assert_ne!(before, after, "a new daemon");
 
-    let note: serde_json::Value = serde_json::from_slice(&std::fs::read(&note_path).unwrap()).unwrap();
+    let note: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&note_path).unwrap()).unwrap();
     assert_eq!(note["matrix"], true);
     assert_eq!(note["session"], "conv-7");
     assert_eq!(note["color"], 42);
     let ls = home.warren("x").arg("ls").output().unwrap();
     let ls = String::from_utf8_lossy(&ls.stdout);
-    assert!(ls.contains("renewed") && !ls.contains("asleep"), "woken again: {ls}");
+    assert!(
+        ls.contains("renewed") && !ls.contains("asleep"),
+        "woken again: {ls}"
+    );
+}
+
+#[test]
+fn cycle_waits_for_background_work_before_restarting() {
+    let home = TestHome::new("cycle");
+    // A harness whose turn is over but which still has a shell running in
+    // the background, as a Bash tool command left running would.
+    let cmd = "sh -c 'sleep 4; true' & exec sleep 300";
+    let out = home
+        .warren(cmd)
+        .args(["new", "cyc", home.dir.join("w").to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let sock = home.sock("cyc");
+    let mut hook = Command::new(BIN)
+        .env("WARREN_SOCK", &sock)
+        .args(["hook", "waiting"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"session_id":"conv-9"}"#)
+        .unwrap();
+    assert!(hook.wait().unwrap().success());
+    std::thread::sleep(Duration::from_millis(500));
+
+    let started = Instant::now();
+    let out = home.warren(cmd).args(["cycle", "cyc"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("waiting on cyc (1 background shell)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("'cyc' is asleep") && stdout.contains("'cyc' is waking"),
+        "{stdout}"
+    );
+    // The shell had about 3.5s left, then the agent has to stay quiet for 10s.
+    assert!(
+        started.elapsed() >= Duration::from_secs(12),
+        "{:?}",
+        started.elapsed()
+    );
 }

@@ -45,14 +45,18 @@ fn is_zero(v: &u8) -> bool {
 
 impl Span {
     pub fn plain(text: impl Into<String>) -> Self {
-        Span { text: text.into(), fg: Color::Default, bg: Color::Default, attrs: 0 }
+        Span {
+            text: text.into(),
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: 0,
+        }
     }
 }
 
 /// One terminal row as a sequence of styled runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct LineSpans(pub Vec<Span>);
-
 
 /// Build the SGR escape selecting a span's style (always starts from reset,
 /// so spans are self-contained).
@@ -163,7 +167,11 @@ pub fn color_is_dark(r: u8, g: u8, b: u8) -> bool {
 
 fn srgb_to_linear(c: u8) -> f32 {
     let c = c as f32 / 255.0;
-    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 /// Lightness, chroma and hue (degrees) in OKLCH — the space the colour
@@ -177,7 +185,11 @@ pub fn oklch(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
     let lightness = 0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s;
     let a = 1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s;
     let bb = 0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s;
-    (lightness, a.hypot(bb), bb.atan2(a).to_degrees().rem_euclid(360.0))
+    (
+        lightness,
+        a.hypot(bb),
+        bb.atan2(a).to_degrees().rem_euclid(360.0),
+    )
 }
 
 #[cfg(test)]

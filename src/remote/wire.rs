@@ -155,7 +155,14 @@ pub fn cmd_pipe(args: &[String]) -> Result<()> {
         if trace {
             let keys: Vec<String> = events
                 .iter()
-                .map(|e| format!("{}{}{}", e.key, if e.readable { "r" } else { "" }, if e.writable { "w" } else { "" }))
+                .map(|e| {
+                    format!(
+                        "{}{}{}",
+                        e.key,
+                        if e.readable { "r" } else { "" },
+                        if e.writable { "w" } else { "" }
+                    )
+                })
                 .collect();
             eprintln!(
                 "[pipe] wake [{}] to_agent={} to_ssh={}",
