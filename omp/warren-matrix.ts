@@ -158,7 +158,7 @@ export default function warrenMatrix(pi: ExtensionAPI) {
 			systemPromptAppend:
 				`\n# Matrix chat\n${instructions}\n` +
 				"In this session the chat tools are named matrix_claim_name, matrix_reply, matrix_react, " +
-				"matrix_send_file, matrix_fetch_messages and matrix_download.\n",
+				"matrix_send_file, matrix_fetch_messages, matrix_download and matrix_set_avatar.\n",
 		};
 	});
 
@@ -219,5 +219,14 @@ export default function warrenMatrix(pi: ExtensionAPI) {
 		"Download an mxc:// attachment. Saves under the channel's state dir (downloads/) unless dest_dir is " +
 			"given; never overwrites. Returns the saved path.",
 		z.object({ mxc: z.string(), dest_dir: z.string().optional() }),
+	);
+	tool(
+		"set_avatar",
+		"Set your Matrix profile picture, from a local image file (uploaded first) or an mxc:// URI that is " +
+			"already uploaded. Pass exactly one. Returns the mxc:// URI.",
+		z.object({
+			path: z.string().describe("Local image file (png, jpeg, gif, webp, ...)").optional(),
+			mxc: z.string().describe("An mxc://server/id URI").optional(),
+		}),
 	);
 }
