@@ -88,6 +88,11 @@ pub struct Dash {
     pub started: Instant,
     /// Animation frame the sleep badge was last drawn at.
     pub sheep_frame: u64,
+    /// Where the sidebar's spinners are, as the sidebar last drew them, so a
+    /// tick can turn just those cells.
+    pub spinners: Vec<render::Spinner>,
+    /// Spinner clock reading they were last drawn at.
+    pub spin_drawn: u64,
     pub cols: u16,
     pub rows: u16,
     pub sidebar_dirty: bool,
@@ -530,6 +535,8 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
         form_geom: forms::FormGeom::default(),
         started: Instant::now(),
         sheep_frame: u64::MAX,
+        spinners: Vec::new(),
+        spin_drawn: u64::MAX,
         cols,
         rows,
         sidebar_dirty: true,
@@ -621,7 +628,13 @@ fn run_inner(stdin: &std::io::Stdin) -> Result<input::Outcome> {
         // 250ms tick: busy/idle is time-based (1500ms quiet threshold), so
         // transitions must repaint without any socket activity. v0 polled
         // its meta files at the same cadence.
-        match poller.wait(&mut events, Some(Duration::from_millis(250))) {
+        // A spinner on screen wants the faster tick it turns at.
+        let tick = if dash.spinners.is_empty() {
+            250
+        } else {
+            render::SPIN_MS
+        };
+        match poller.wait(&mut events, Some(Duration::from_millis(tick))) {
             Ok(_) => {}
             Err(e) if e.kind() == ErrorKind::Interrupted => continue,
             Err(e) => return Err(e.into()),

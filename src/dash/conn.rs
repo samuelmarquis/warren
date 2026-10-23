@@ -128,6 +128,7 @@ impl AgentConn {
             },
             have_meta: false,
             state: AgentState {
+                background: None,
                 hook: None,
                 ms_since_output: u64::MAX,
                 power: Power::Awake,
@@ -376,6 +377,12 @@ impl AgentConn {
                     .then(|| format!("painted {:.1}s ago", ms as f64 / 1000.0))
             }
         }
+    }
+
+    /// Its turn is over but work it started is still running: the sidebar's
+    /// slow dot. Daemons that predate this never say so.
+    pub fn background(&self) -> bool {
+        !self.asleep() && self.state.background.is_some()
     }
 
     /// Blocked on a permission prompt and quiet: the sidebar '!' condition.

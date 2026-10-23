@@ -31,9 +31,10 @@ everything outlives the connection it was started in.
   `^Space 1 2` is folder one, agent two, and clicking a folder folds it
   away.
 - **One row per agent**, state pushed by Claude Code's own lifecycle hooks —
-  no polling. Bold = ready for you, plain = working, `!` = blocked on a
-  permission prompt, `*` = finished while you were looking elsewhere,
-  `z` = asleep.
+  no polling. Bold = ready for you, plain with a spinner = working, `!` =
+  blocked on a permission prompt, `*` = finished while you were looking
+  elsewhere, `z` = asleep, and a slow dot = turn over but a background
+  command or subagent still running.
 - **Sleep the agents you aren't using.** `z` stops a tab's claude process and
   gives its memory back; the tab stays, and waking it resumes the same
   conversation where it left off.

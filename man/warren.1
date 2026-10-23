@@ -316,13 +316,15 @@ Everything on a form is clickable.
 .SH SIDEBAR
 Agents are grouped into folders by the directory directly under home that
 their working directory is in.
-A bold row is ready for you, plain is working,
+A bold row is ready for you, plain is working (and turning a spinner),
 .B !
 is blocked on a permission prompt,
 .B *
 finished while you were elsewhere, and
 .B z
 is asleep.
+A slow dot means the turn is over but something the agent started is still
+running: a background command or monitor, or a subagent.
 .SH HOSTS
 .I ~/.warren/hosts
 lists other machines, one ssh destination per line, with an optional second

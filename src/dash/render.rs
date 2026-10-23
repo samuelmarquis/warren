@@ -13,6 +13,65 @@ use super::{Dash, Mode, Sub};
 
 pub const SIDEBAR_WIDTH: u16 = 24;
 
+/// The sidebar spinners' clock: one step per SPIN_MS. Mid-turn turns every
+/// step; work left running after the turn, a lighter glyph, every third.
+pub const SPIN_MS: u64 = 100;
+const TURN_SPIN: [char; 10] = [
+    '\u{280b}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283c}', '\u{2834}', '\u{2826}', '\u{2827}',
+    '\u{2807}', '\u{280f}',
+];
+const AFTER_SPIN: [char; 8] = [
+    '\u{2801}', '\u{2808}', '\u{2810}', '\u{2820}', '\u{2880}', '\u{2840}', '\u{2804}', '\u{2802}',
+];
+const AFTER_EVERY: u64 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spin {
+    /// Mid-turn.
+    Turn,
+    /// Turn over, but background shells or a subagent still running.
+    After,
+}
+
+/// One spinner cell in the sidebar, as it was last drawn.
+#[derive(Debug, Clone)]
+pub struct Spinner {
+    pub row: u16,
+    pub col: u16,
+    pub style: String,
+    pub spin: Spin,
+}
+
+pub fn spin_glyph(spin: Spin, step: u64) -> char {
+    match spin {
+        Spin::Turn => TURN_SPIN[(step % TURN_SPIN.len() as u64) as usize],
+        Spin::After => AFTER_SPIN[((step / AFTER_EVERY) % AFTER_SPIN.len() as u64) as usize],
+    }
+}
+
+fn spin_step(dash: &Dash) -> u64 {
+    dash.started.elapsed().as_millis() as u64 / SPIN_MS
+}
+
+/// Turn the sidebar's spinners without redrawing the rows around them.
+fn turn_spinners(dash: &mut Dash, out: &mut String) {
+    let step = spin_step(dash);
+    if step == dash.spin_drawn {
+        return;
+    }
+    dash.spin_drawn = step;
+    for s in &dash.spinners {
+        let _ = write!(
+            out,
+            "\x1b[{};{}H{}{}\x1b[0m",
+            s.row,
+            s.col,
+            s.style,
+            spin_glyph(s.spin, step)
+        );
+    }
+}
+
 pub fn paint(dash: &mut Dash) -> String {
     let mut out = String::new();
     let _ = write!(out, "\x1b[?2026h\x1b[?25l"); // sync update, cursor hidden while painting
@@ -40,6 +99,8 @@ pub fn paint(dash: &mut Dash) -> String {
 
     if dash.sidebar_dirty {
         draw_sidebar(dash, &mut out);
+    } else {
+        turn_spinners(dash, &mut out);
     }
     if dash.editform.is_some() {
         if dash.form_dirty {
@@ -53,6 +114,9 @@ pub fn paint(dash: &mut Dash) -> String {
         }
     } else {
         draw_content(dash, &mut out);
+        // No form on screen, so nothing is waiting on this. Left set, it
+        // would repaint the divider every frame for nothing.
+        dash.form_dirty = false;
     }
     if dash.status_dirty {
         draw_status(dash, &mut out);
@@ -83,6 +147,9 @@ fn draw_sidebar(dash: &mut Dash, out: &mut String) {
     let text_w = (SIDEBAR_WIDTH - 1) as usize;
     let sections = dash.sections();
     let layout = tree::rows(&sections);
+    let step = spin_step(dash);
+    dash.spin_drawn = step;
+    let mut spinners = Vec::new();
 
     for row in 0..height {
         let _ = write!(out, "\x1b[{};1H", row + 1);
@@ -150,18 +217,36 @@ fn draw_sidebar(dash: &mut Dash, out: &mut String) {
                         let agent = &dash.agents[index];
                         let focused = dash.focus == index;
                         // Trailing mark: 'z' = asleep (no process, resumable);
-                        // '!' = blocked on a permission prompt and quiet; '*' =
-                        // went idle while unfocused, not yet examined.
-                        let mark = if agent.asleep() {
-                            " z"
-                        } else if agent.needs_attention() {
-                            " !"
-                        } else if agent.unseen {
-                            " *"
+                        // '!' = blocked on a permission prompt and quiet; a
+                        // spinner = mid-turn; '*' = went idle while unfocused,
+                        // not yet examined; a slow dot = turn over, but work
+                        // it started is still running (beside a '*', if any).
+                        let spin = if agent.asleep() || agent.needs_attention() {
+                            None
+                        } else if agent.busy() {
+                            Some(Spin::Turn)
+                        } else if agent.background() {
+                            Some(Spin::After)
                         } else {
-                            ""
+                            None
                         };
-                        let name_w = text_w.saturating_sub(5 + mark.len());
+                        let mut mark = if agent.asleep() {
+                            " z".to_string()
+                        } else if agent.needs_attention() {
+                            " !".to_string()
+                        } else if agent.unseen && spin != Some(Spin::Turn) {
+                            " *".to_string()
+                        } else {
+                            String::new()
+                        };
+                        if let Some(spin) = spin {
+                            if mark.is_empty() {
+                                mark.push(' ');
+                            }
+                            mark.push(spin_glyph(spin, step));
+                        }
+                        let mark_w = mark.chars().count();
+                        let name_w = text_w.saturating_sub(5 + mark_w);
                         let name: String = agent.meta.display.chars().take(name_w).collect();
                         let label = format!(" {branch} {number} {name}{mark}");
                         let pad = text_w.saturating_sub(label.chars().count());
@@ -195,6 +280,16 @@ fn draw_sidebar(dash: &mut Dash, out: &mut String) {
                             let _ = write!(style, ";38;5;{color}");
                         }
                         style.push('m');
+                        if let Some(spin) = spin {
+                            // The glyph is the label's last character.
+                            let col = label.chars().count() as u16;
+                            spinners.push(Spinner {
+                                row: row + 1,
+                                col,
+                                style: style.clone(),
+                                spin,
+                            });
+                        }
                         let _ = write!(out, "{style}{label}{}\x1b[0m", " ".repeat(pad));
                     }
                     // A machine that isn't answering: its last known rows,
@@ -211,6 +306,7 @@ fn draw_sidebar(dash: &mut Dash, out: &mut String) {
             }
         }
     }
+    dash.spinners = spinners;
 }
 
 /// Horizontal box-drawing leads that should joint into the divider with '├'.

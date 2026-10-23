@@ -117,6 +117,11 @@ pub struct AgentState {
     /// anything else would be a one-way trip, and viewers refuse it.
     #[serde(default)]
     pub resumable: bool,
+    /// Work still running after the turn: background shells, a live
+    /// subagent ("2 background shells", "subagent"). None from daemons that
+    /// predate it, as from an agent with nothing running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<String>,
 }
 
 // --------------------------------------------------------------------- mouse
@@ -436,6 +441,7 @@ mod tests {
                     power: Power::Awake,
                     session: Some("0199b4c1-7f3e-4b2a-9d18-2c6f5a0e77bd".into()),
                     resumable: true,
+                    background: None,
                 },
             },
             ToClient::Damage {
@@ -454,6 +460,7 @@ mod tests {
                 power: Power::Asleep,
                 session: None,
                 resumable: true,
+                background: None,
             }),
             ToClient::Clipboard("aGVsbG8=".into()),
             ToClient::Exited { status: 0 },

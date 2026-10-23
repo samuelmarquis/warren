@@ -78,6 +78,8 @@ const WAKE_GRACE: Duration = Duration::from_secs(5);
 /// covers a slow one without ever becoming a poll loop.
 const SESSION_PROBE_EVERY: Duration = Duration::from_millis(300);
 const SESSION_PROBE_FOR: Duration = Duration::from_secs(20);
+/// How often an awake agent is checked for work left running after its turn.
+const BACKGROUND_EVERY: Duration = Duration::from_secs(3);
 
 /// Keystrokes buffered for a sleeping agent (typing at one wakes it, and the
 /// bytes land in the resumed prompt). Bounded: a stuck wake must not grow a
@@ -276,6 +278,10 @@ struct Daemon {
     pty_started: SystemTime,
     /// Next look for that row, while one is still expected.
     probe_at: Option<Instant>,
+    /// Work left running after the turn, last we looked, and when to look
+    /// again (None while asleep: there is no harness to look under).
+    background: Option<String>,
+    background_at: Option<Instant>,
     probe_until: Instant,
     /// Whether the current sleep has already escalated past SIGTERM.
     sigkilled: bool,
@@ -408,6 +414,8 @@ pub fn run(args: DaemonArgs) -> Result<()> {
         tty,
         pty_started: SystemTime::now(),
         probe_at: (spawn_probe && !args.asleep).then(Instant::now),
+        background: None,
+        background_at: (!args.asleep).then(Instant::now),
         probe_until: Instant::now() + SESSION_PROBE_FOR,
         sigkilled: false,
         wake_after_sleep: false,
@@ -521,7 +529,10 @@ impl Daemon {
             // Wake for whichever comes first: the damage timer, or a stop
             // signal that needs escalating.
             let mut timeout = flush_at.map(|at| at.saturating_duration_since(Instant::now()));
-            for at in [self.sleep_deadline, self.probe_at].into_iter().flatten() {
+            for at in [self.sleep_deadline, self.probe_at, self.background_at]
+                .into_iter()
+                .flatten()
+            {
                 let until = at.saturating_duration_since(Instant::now());
                 timeout = Some(timeout.map_or(until, |t: Duration| t.min(until)));
             }
@@ -598,6 +609,7 @@ impl Daemon {
             self.update_pty_interest()?;
             self.escalate_sleep();
             self.poll_session();
+            self.poll_background();
             self.remember();
 
             // Damage coalescing: first dirtying event arms the timer; the
@@ -894,6 +906,7 @@ impl Daemon {
         if self.pty.is_some() || self.power != Power::Asleep {
             return;
         }
+        self.background_at = Some(Instant::now());
         // With an id we resume exactly this conversation; without one (only
         // reachable via WARREN_AGENT_CMD or a hookless agent) `--continue`
         // is the best available guess.
@@ -1121,6 +1134,10 @@ impl Daemon {
             }
             ToDaemon::HookState(state) => {
                 self.hook = Some(state);
+                // A turn just ended or began: look now, not in a few seconds.
+                if self.background_at.is_some() {
+                    self.background_at = Some(Instant::now());
+                }
                 let update = ToClient::StateChanged(self.state());
                 self.broadcast(&update);
             }
@@ -1313,6 +1330,27 @@ impl Daemon {
         self.noted = Some(note);
     }
 
+    /// Every few seconds while awake: is anything still running under the
+    /// harness? Viewers hear only when the answer changes.
+    fn poll_background(&mut self) {
+        let Some(at) = self.background_at else { return };
+        if Instant::now() < at {
+            return;
+        }
+        let now = if self.power == Power::Awake && self.pty.is_some() {
+            self.background_at = Some(Instant::now() + BACKGROUND_EVERY);
+            crate::procs::background_work(std::process::id() as i32, self.sid.as_deref())
+        } else {
+            self.background_at = None;
+            None
+        };
+        if now != self.background {
+            self.background = now;
+            let update = ToClient::StateChanged(self.state());
+            self.broadcast(&update);
+        }
+    }
+
     fn state(&self) -> AgentState {
         AgentState {
             hook: self.hook,
@@ -1320,6 +1358,7 @@ impl Daemon {
             power: self.power,
             session: self.sid.clone(),
             resumable: self.sid.is_some() || self.spawn.custom.is_some(),
+            background: self.background.clone(),
         }
     }
 

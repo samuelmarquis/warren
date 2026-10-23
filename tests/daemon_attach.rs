@@ -2907,10 +2907,11 @@ fn a_conversation_that_is_already_open_is_not_opened_twice_by_accident() {
     viewer.send(&ToDaemon::Input(proto::b64_encode(b"\r")));
     let made = viewer.await_frame(20_000, |m| {
         apply_frame(&grid, m);
-        // The sidebar is 23 columns; the name arrives clipped.
+        // The sidebar is 23 columns; the name arrives clipped, the more so beside a
+        // spinner.
         sidebar_of(&grid)
             .iter()
-            .any(|r| r.contains("the-one-conversat"))
+            .any(|r| r.contains("the-one-conversa"))
     });
     assert!(
         made.is_some(),
@@ -3974,5 +3975,52 @@ fn cycle_waits_for_background_work_before_restarting() {
         started.elapsed() >= Duration::from_secs(12),
         "{:?}",
         started.elapsed()
+    );
+}
+
+#[test]
+fn work_left_running_after_a_turn_shows_in_ls_and_the_sidebar() {
+    let inner = TestHome::new("bgin");
+    let outer = TestHome::new("bgout");
+    // Turn over (it paints nothing), a shell still going underneath.
+    new_agent_in(
+        &inner,
+        "bg",
+        &inner.dir.join("Research"),
+        "sh -c 'sleep 60; true' & exec sleep 300",
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut ls = String::new();
+    while Instant::now() < deadline {
+        let out = inner.warren("x").arg("ls").output().unwrap();
+        ls = String::from_utf8_lossy(&out.stdout).into_owned();
+        if ls.contains("(1 background shell)") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(ls.contains("idle (1 background shell)"), "{ls}");
+
+    let dash_cmd = format!("WARREN_HOME={} {} up", inner.dir.display(), BIN);
+    new_agent(&outer, "dash", &dash_cmd);
+    let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 22);
+    let grid = std::cell::RefCell::new(Vec::<String>::new());
+    apply_frame(&grid, &snap);
+    // The slow dot: one of the single-dot braille cells.
+    let dot = |r: &String| {
+        r.contains(" bg")
+            && r.chars().any(|c| {
+                "\u{2801}\u{2808}\u{2810}\u{2820}\u{2880}\u{2840}\u{2804}\u{2802}".contains(c)
+            })
+    };
+    let seen = viewer.await_frame(15_000, |m| {
+        apply_frame(&grid, m);
+        sidebar_of(&grid).iter().any(dot)
+    });
+    assert!(
+        seen.is_some(),
+        "a slow dot beside it: {:?}",
+        sidebar_of(&grid)
     );
 }

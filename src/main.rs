@@ -22,6 +22,7 @@ mod kind;
 mod matrix;
 mod names;
 mod paths;
+mod procs;
 mod proto;
 mod record;
 mod remote;
