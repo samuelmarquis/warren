@@ -484,6 +484,10 @@ It is all off until `~/.warren/matrix.json` exists:
 their own where they hear each other without mentions or a loop cap. A
 partner listed this way is trusted like you, but can never approve tools.
 
+The loop cap can also be changed per room from the chat, live: post
+`!loopcap 20`, `!loopcap off` or `!loopcap default` in the room, and each agent
+that applied it reacts with a check mark (see `man warren`, CHAT).
+
 `newAgents` is whether agents made from now on get chat; `warren new
 --matrix`/`--no-matrix` and `:set matrix on|off` decide for one.
 `warrenAccount` is warren's own Matrix login (`access_token`, `homeserver`):

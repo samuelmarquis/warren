@@ -396,6 +396,22 @@ Messages from roster members are marked untrusted, and more than
 .B agentLoopCap
 of them in a row in one room, with nothing from a listed person between,
 are dropped.
+A listed person can change that limit for one room from the chat:
+.B !loopcap
+.IR N ,
+.B !loopcap off
+(no limit) or
+.B !loopcap default
+(back to
+.BR agentLoopCap ).
+Every agent in the room that applied it reacts with a check mark, and the setting
+outlasts restarts.
+An agent that joins the room later starts at the default until the command is
+sent again, unless the room carries an
+.B institute.immanence.loop_cap
+state event
+.RB ( {"cap":\ N} )
+set by a room admin.
 In rooms a message must mention the agent unless
 .B requireMention
 is false.
