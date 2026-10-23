@@ -129,6 +129,7 @@ impl AgentConn {
             have_meta: false,
             state: AgentState {
                 background: None,
+                daemon_started: 0,
                 hook: None,
                 ms_since_output: u64::MAX,
                 power: Power::Awake,

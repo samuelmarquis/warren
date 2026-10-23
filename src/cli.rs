@@ -578,20 +578,16 @@ pub fn cmd_ls() -> Result<()> {
     println!("agents (in {}):", crate::paths::run_dir().display());
     for a in &agents {
         let state = match a.state.power {
-            Power::Awake => {
-                match a.state.hook {
-                    Some(h) => format!("{h:?}").to_lowercase(),
-                    None if a.state.ms_since_output < 1500 => "working".to_string(),
-                    None => "idle".to_string(),
-                }
-                .to_string()
-                    + &a.state
-                        .background
-                        .as_ref()
-                        .map(|b| format!(" ({b})"))
-                        .unwrap_or_default()
-            }
+            Power::Awake => match a.state.hook {
+                Some(h) => format!("{h:?}").to_lowercase(),
+                None if a.state.ms_since_output < 1500 => "working".to_string(),
+                None => "idle".to_string(),
+            },
             power => format!("{power:?}").to_lowercase(),
+        };
+        let state = match &a.state.background {
+            Some(b) if !a.state.power.is_down() => format!("{state} ({b})"),
+            _ => state,
         };
         let label = if a.meta.display != a.meta.name {
             format!("{} ({})", a.meta.name, a.meta.display)

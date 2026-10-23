@@ -4002,6 +4002,42 @@ fn work_left_running_after_a_turn_shows_in_ls_and_the_sidebar() {
     }
     assert!(ls.contains("idle (1 background shell)"), "{ls}");
 
+    // And again after a wake, which starts out Waking rather than Awake.
+    let mut hook = Command::new(BIN)
+        .env("WARREN_SOCK", inner.sock("bg"))
+        .args(["hook", "waiting"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"session_id":"conv-bg"}"#)
+        .unwrap();
+    assert!(hook.wait().unwrap().success());
+    for verb in ["sleep", "wake"] {
+        let out = inner
+            .warren("sh -c 'sleep 60; true' & exec sleep 300")
+            .args([verb, "bg"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{verb}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let out = inner.warren("x").arg("ls").output().unwrap();
+        ls = String::from_utf8_lossy(&out.stdout).into_owned();
+        if ls.contains("(1 background shell)") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(ls.contains("(1 background shell)"), "after a wake: {ls}");
+
     let dash_cmd = format!("WARREN_HOME={} {} up", inner.dir.display(), BIN);
     new_agent(&outer, "dash", &dash_cmd);
     let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 22);
@@ -4136,4 +4172,25 @@ fn an_agent_started_from_inside_claude_code_is_not_a_child_session() {
     assert!(!env.contains("CLAUDE_CODE_CHILD_SESSION"), "{env}");
     assert!(!env.contains("CLAUDECODE="), "{env}");
     assert!(env.contains("CLAUDE_CONFIG_DIR=/kept"), "{env}");
+}
+
+#[test]
+fn cycle_renew_leaves_an_agent_already_on_this_warren() {
+    let home = TestHome::new("uptodate");
+    new_agent(&home, "fresh", "sleep 300");
+    let out = home
+        .warren("sleep 300")
+        .args(["cycle", "--renew", "fresh"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("skipping 'fresh': already on this warren"),
+        "{stdout}"
+    );
 }

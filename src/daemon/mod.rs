@@ -106,6 +106,13 @@ pub fn inherited_session_var(key: &str) -> bool {
             || matches!(rest, "ENTRYPOINT" | "EXECPATH" | "SSE_PORT"))
 }
 
+static DAEMON_STARTED: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+});
+
 /// STALE_WORKING, or WARREN_STALE_WORKING_MS (tests).
 fn stale_working() -> Duration {
     std::env::var("WARREN_STALE_WORKING_MS")
@@ -352,6 +359,7 @@ struct Daemon {
 }
 
 pub fn run(args: DaemonArgs) -> Result<()> {
+    std::sync::LazyLock::force(&DAEMON_STARTED);
     // A dead viewer's socket must never kill us with SIGPIPE.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
     // Still one thread: nothing else is reading the environment yet.
@@ -1388,12 +1396,17 @@ impl Daemon {
             let update = ToClient::StateChanged(self.state());
             self.broadcast(&update);
         }
-        let now = if self.power == Power::Awake && self.pty.is_some() {
-            self.background_at = Some(Instant::now() + BACKGROUND_EVERY);
-            crate::procs::background_work(std::process::id() as i32, self.sid.as_deref())
-        } else {
-            self.background_at = None;
-            None
+        // Waking counts: a woken agent is Waking until it first paints, and
+        // giving up then would leave it unwatched for good.
+        let now = match self.power {
+            Power::Awake | Power::Waking if self.pty.is_some() => {
+                self.background_at = Some(Instant::now() + BACKGROUND_EVERY);
+                crate::procs::background_work(std::process::id() as i32, self.sid.as_deref())
+            }
+            _ => {
+                self.background_at = None;
+                None
+            }
         };
         if now != self.background {
             self.background = now;
@@ -1410,6 +1423,7 @@ impl Daemon {
             session: self.sid.clone(),
             resumable: self.sid.is_some() || self.spawn.custom.is_some(),
             background: self.background.clone(),
+            daemon_started: *DAEMON_STARTED,
         }
     }
 

@@ -122,6 +122,11 @@ pub struct AgentState {
     /// predate it, as from an agent with nothing running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<String>,
+    /// When this daemon started, unix seconds: a daemon older than the
+    /// warren binary is still running the one before. 0 from daemons that
+    /// predate it.
+    #[serde(default)]
+    pub daemon_started: u64,
 }
 
 // --------------------------------------------------------------------- mouse
@@ -442,6 +447,7 @@ mod tests {
                     session: Some("0199b4c1-7f3e-4b2a-9d18-2c6f5a0e77bd".into()),
                     resumable: true,
                     background: None,
+                    daemon_started: 0,
                 },
             },
             ToClient::Damage {
@@ -461,6 +467,7 @@ mod tests {
                 session: None,
                 resumable: true,
                 background: None,
+                daemon_started: 0,
             }),
             ToClient::Clipboard("aGVsbG8=".into()),
             ToClient::Exited { status: 0 },

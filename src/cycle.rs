@@ -134,6 +134,9 @@ fn at_rest(name: &str, renew: bool) -> Rest {
     let Some((_, state)) = query_agent(&sock) else {
         return Rest::Gone;
     };
+    if renew && state.daemon_started > 0 && state.daemon_started >= binary_built() {
+        return Rest::Skip("already on this warren".into());
+    }
     if state.power.is_down() {
         // A sleeping agent loads everything fresh when it wakes anyway; only
         // a new binary needs its daemon replaced.
@@ -156,6 +159,16 @@ fn at_rest(name: &str, renew: bool) -> Rest {
         Some(why) => Rest::Busy(why),
         None => Rest::Calm,
     }
+}
+
+/// When the warren binary running this was last replaced, unix seconds.
+fn binary_built() -> u64 {
+    std::env::current_exe()
+        .and_then(std::fs::metadata)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(u64::MAX, |d| d.as_secs())
 }
 
 fn restart(name: &str, renew: bool) -> Result<()> {
