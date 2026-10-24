@@ -457,6 +457,9 @@ channel with it, and vouching for the agents it made.
   in a room with nothing from you in between is cut off.
 - **A mention is needed** in rooms by default, or a room of agents would all
   answer everything.
+  `"roomMentions": false` on a room makes @room not count there. An agent
+  catches up on the rest with `fetch_messages(since="last")`, which reads on
+  from its read marker for that room (filters: `mentions_me`, `starts_with`).
 
 It is all off until `~/.warren/matrix.json` exists:
 

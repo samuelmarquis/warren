@@ -211,8 +211,20 @@ export default function warrenMatrix(pi: ExtensionAPI) {
 	);
 	tool(
 		"fetch_messages",
-		"Recent messages in a room, oldest first, to catch up on context.",
-		z.object({ room: z.string(), limit: z.number().int().min(1).max(100).optional() }),
+		"Messages in a room, oldest first. Without since: the latest ones, to catch up on context. With " +
+			'since=<event_id>: the ones after that event, ending with a cursor to page on. With since="last": ' +
+			"everything after your read marker for that room, and the marker moves forward, so repeated calls " +
+			"never skip a message.",
+		z.object({
+			room: z.string(),
+			limit: z.number().int().min(1).max(100).optional(),
+			since: z.string().describe('An event_id, or "last" for your read marker').optional(),
+			mentions_me: z.boolean().describe("Only messages that mention you").optional(),
+			starts_with: z
+				.string()
+				.describe("Only messages whose text starts with this (case-insensitive; leading markdown is ignored)")
+				.optional(),
+		}),
 	);
 	tool(
 		"download",

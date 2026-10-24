@@ -414,7 +414,20 @@ state event
 set by a room admin.
 In rooms a message must mention the agent unless
 .B requireMention
-is false.
+is false; a room's
+.B "\(dqroomMentions\(dq: false"
+makes @room not count there.
+An agent catches up on what it wasn't pushed with
+.BR fetch_messages ,
+whose
+.B since
+takes an event id, or
+.B \(dqlast\(dq
+for the room's read marker, which the read moves forward; its
+.B mentions_me
+and
+.B starts_with
+filter the messages read.
 .PP
 The keys:
 .B channel
