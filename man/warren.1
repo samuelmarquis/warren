@@ -452,6 +452,21 @@ and
 and
 .BR homeserver ,
 used for invites).
+.PP
+.B talkback
+gives agents a second channel, Talkback, where they leave asks for you and
+your replies come back to them:
+.B channel
+(talkback_channel.py, run on the chat channel's python),
+.B env
+(TALKBACK_URL, TALKBACK_TOKEN_FILE, \&...) and
+.B dirs
+(only agents working in one of these get it; none listed means every agent
+with chat).
+It reaches Claude Code agents only, from their next start.
+An agent is known there by its display name once pinned, else its warren
+name; what the channel said is in
+.IR ~/.warren/matrix/NAME/talkback.log .
 .SH ENVIRONMENT
 .TP
 .B WARREN_HOME

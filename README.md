@@ -499,6 +499,23 @@ default power level, or the channel refuses to trust it. An agent's channel
 state is in `~/.warren/matrix/NAME/`, with what the channel said in
 `channel.log`; ending the agent archives it, and the account stays taken.
 
+A `talkback` key adds a second channel beside chat: Talkback, where agents
+leave asks for you and your replies come back to them. It reaches Claude
+Code agents only, from their next start, under their pinned display name
+(else their warren name):
+
+```json
+"talkback": {
+  "channel": "/path/to/talkback/channel/talkback_channel.py",
+  "env": { "TALKBACK_URL": "https://talkback.example.org",
+           "TALKBACK_TOKEN_FILE": "~/.config/talkback/token" },
+  "dirs": ["~/Developer/open-audio"]
+}
+```
+
+`dirs` limits it to agents working in those directories; leave it out and
+every agent with chat gets it.
+
 
 ### How agent states work
 

@@ -3848,6 +3848,99 @@ fn chat_is_wired_into_each_harness() {
     );
 }
 
+/// Talkback rides beside chat: an agent working under one of its dirs gets a
+/// second server in its MCP file, named for talkback by its warren name (its
+/// display name once pinned), and Claude Code takes both as channels. One
+/// working elsewhere, and an OMP agent, get chat alone.
+#[test]
+fn talkback_is_wired_beside_chat_for_agents_under_its_dirs() {
+    let home = TestHome::new("talkback");
+    let bin = home.dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for h in ["claude", "omp"] {
+        let script = bin.join(h);
+        std::fs::write(&script, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$WARREN_HOME/argv-$WARREN_AGENT\"\nexec sleep 300\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let studio = home.dir.join("studio");
+    let elsewhere = home.dir.join("elsewhere");
+    std::fs::create_dir_all(studio.join("plug")).unwrap();
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(
+        home.dir.join("matrix.json"),
+        format!(
+            r#"{{"channel": "/opt/matrix_channel.py", "python": "/usr/bin/python3", "machine": "smq",
+                "allowedUsers": ["@sam:x"], "inviters": ["@sam:x"],
+                "talkback": {{"channel": "/opt/talkback_channel.py",
+                             "env": {{"TALKBACK_URL": "https://tb.x"}},
+                             "dirs": ["{}"]}}}}"#,
+            studio.display()
+        ),
+    )
+    .unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let new = |args: &[&str]| {
+        let out = Command::new(BIN)
+            .env("WARREN_HOME", &home.dir)
+            .env("PATH", &path)
+            .env_remove("WARREN_AGENT_CMD")
+            .arg("new")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let argv = |name: &str| {
+        let file = home.dir.join(format!("argv-{name}"));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !file.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::fs::read_to_string(&file).unwrap_or_default()
+    };
+    let mcp = |name: &str| -> serde_json::Value {
+        serde_json::from_slice(
+            &std::fs::read(home.dir.join(format!("matrix/{name}/mcp.json"))).unwrap(),
+        )
+        .unwrap()
+    };
+
+    new(&["plugger", studio.join("plug").to_str().unwrap()]);
+    let said = argv("plugger");
+    assert!(
+        said.contains("server:warren-matrix\nserver:talkback"),
+        "{said}"
+    );
+    let tb = &mcp("plugger")["mcpServers"]["talkback"];
+    let args: Vec<&str> = tb["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        &args[2..5],
+        ["/usr/bin/python3", "/opt/talkback_channel.py", "plugger"]
+    );
+    assert_eq!(tb["env"]["TALKBACK_URL"], "https://tb.x");
+
+    new(&["outsider", elsewhere.to_str().unwrap()]);
+    let said = argv("outsider");
+    assert!(
+        said.contains("server:warren-matrix") && !said.contains("server:talkback"),
+        "{said}"
+    );
+    assert!(mcp("outsider")["mcpServers"].get("talkback").is_none());
+
+    new(&["ompy", studio.to_str().unwrap(), "--kind=omp"]);
+    assert!(!argv("ompy").contains("server:talkback"));
+}
+
 /// `warren renew` puts an agent on a new daemon — the binary it is run from
 /// — without losing anything: same name, slot, colour and conversation, chat
 /// turned on as asked, and awake again because it was awake before.

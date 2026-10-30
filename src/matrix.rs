@@ -82,6 +82,48 @@ pub struct Config {
     /// mention, no loop cap, and each other's word.
     #[serde(default)]
     pub agents: BTreeMap<String, AgentOverride>,
+    /// Talkback, where agents leave asks for you and your replies come back:
+    /// a second channel beside the chat one, for Claude Code agents.
+    #[serde(default)]
+    pub talkback: Option<Talkback>,
+}
+
+/// The `talkback` key of `~/.warren/matrix.json`.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Talkback {
+    /// talkback_channel.py. It runs on the chat channel's python.
+    pub channel: String,
+    /// Its environment: TALKBACK_URL, TALKBACK_TOKEN_FILE, SSL_CERT_FILE, …
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Only agents working in one of these directories (or below) get it;
+    /// with none listed, every agent with chat does.
+    #[serde(default)]
+    pub dirs: Vec<String>,
+}
+
+/// What talkback calls this agent: the name on your cards, and what your
+/// replies are routed by. A pinned display name (kiln, nullset) is the one the
+/// room knows; an unpinned one follows the session's title, so it would move.
+fn talkback_name(name: &str) -> String {
+    match crate::record::get(name) {
+        Some(rec) if rec.pinned && !rec.display.trim().is_empty() => rec.display,
+        _ => name.to_string(),
+    }
+}
+
+/// Does an agent working in `cwd` get talkback?
+fn talkback_covers(tb: &Talkback, cwd: &str) -> bool {
+    // Resolved, where they can be: the same directory can be spelled two
+    // ways (on macOS, /tmp is /private/tmp).
+    let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let cwd = real(Path::new(cwd));
+    tb.dirs.is_empty()
+        || tb
+            .dirs
+            .iter()
+            .any(|d| cwd.starts_with(real(&expand_home(d))))
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -161,26 +203,39 @@ pub fn agent_dir(name: &str) -> PathBuf {
 /// The command-line flags that give this agent its channel, writing the
 /// files they point at. Called on every start, so a change to the setup
 /// reaches an agent the next time it wakes.
-pub fn launch_flags(kind: Kind, name: &str) -> Result<String> {
+pub fn launch_flags(kind: Kind, name: &str, cwd: &str) -> Result<String> {
     let cfg =
         config()?.context("chat is on for this agent, but ~/.warren/matrix.json is missing")?;
-    let dir = write_agent_files(&cfg, name)?;
+    // OMP has no way in for a second channel yet: talkback is Claude Code's.
+    let talkback = cfg
+        .talkback
+        .as_ref()
+        .filter(|tb| kind == Kind::Claude && talkback_covers(tb, cwd));
+    let dir = write_agent_files(&cfg, name, talkback)?;
     let mcp = dir.join("mcp.json");
     Ok(match kind {
         Kind::Claude => format!(
-            "--mcp-config {} --dangerously-load-development-channels server:{SERVER}",
-            quote(&mcp)
+            "--mcp-config {} --dangerously-load-development-channels server:{SERVER}{}",
+            quote(&mcp),
+            if talkback.is_some() {
+                format!(" server:{TALKBACK}")
+            } else {
+                String::new()
+            }
         ),
         Kind::Omp => format!("-e {}", quote(&omp_extension()?)),
     })
 }
+
+/// Talkback's name in the MCP config, and on the channels flag.
+pub const TALKBACK: &str = "talkback";
 
 fn quote(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', r"'\''"))
 }
 
 /// The channel config and the MCP config for one agent.
-fn write_agent_files(cfg: &Config, name: &str) -> Result<PathBuf> {
+fn write_agent_files(cfg: &Config, name: &str, talkback: Option<&Talkback>) -> Result<PathBuf> {
     let dir = agent_dir(name);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     private(&dir, 0o700)?;
@@ -232,7 +287,7 @@ fn write_agent_files(cfg: &Config, name: &str) -> Result<PathBuf> {
         "MATRIX_CHANNEL_DIR".into(),
         crate::paths::home().join("matrix").display().to_string(),
     );
-    let mcp = json!({
+    let mut mcp = json!({
         "mcpServers": {
             SERVER: {
                 "command": "/bin/sh",
@@ -245,6 +300,19 @@ fn write_agent_files(cfg: &Config, name: &str) -> Result<PathBuf> {
             }
         }
     });
+    if let Some(tb) = talkback {
+        // Its log beside the chat channel's; its own state (the reply cursor)
+        // stays where the plugin keeps it, under the talkback name.
+        mcp["mcpServers"][TALKBACK] = json!({
+            "command": "/bin/sh",
+            "args": [
+                "-c", r#"exec "$0" -I "$1" --agent "$2" 2>>"$3""#,
+                cfg.python, tb.channel, talkback_name(name),
+                dir.join("talkback.log").display().to_string(),
+            ],
+            "env": tb.env,
+        });
+    }
     write_private(&dir.join("mcp.json"), &serde_json::to_vec_pretty(&mcp)?)?;
     Ok(dir)
 }
@@ -520,5 +588,21 @@ mod tests {
         assert!(cfg.new_agents);
         assert_eq!(cfg.python, "python3");
         assert!(cfg.roster_room.is_none() && cfg.warren_account.is_none());
+        assert!(cfg.talkback.is_none(), "talkback is opt-in");
+    }
+
+    #[test]
+    fn talkback_reaches_only_agents_under_its_dirs() {
+        let tb: Talkback =
+            serde_json::from_str(r#"{"channel":"/t.py","dirs":["/w/open-audio"]}"#).unwrap();
+        assert!(talkback_covers(&tb, "/w/open-audio"));
+        assert!(talkback_covers(&tb, "/w/open-audio/open-eq"));
+        assert!(
+            !talkback_covers(&tb, "/w/open-audio-out"),
+            "a sibling with the same prefix"
+        );
+        assert!(!talkback_covers(&tb, "/w/pancake"));
+        let everyone: Talkback = serde_json::from_str(r#"{"channel":"/t.py"}"#).unwrap();
+        assert!(talkback_covers(&everyone, "/anywhere"));
     }
 }

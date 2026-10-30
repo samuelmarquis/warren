@@ -245,7 +245,7 @@ impl Spawn {
                 .get("WARREN_AGENT")
                 .map(String::as_str)
                 .unwrap_or_default();
-            let flags = crate::matrix::launch_flags(self.kind, name)
+            let flags = crate::matrix::launch_flags(self.kind, name, &self.dir)
                 .context("setting up chat (`:set matrix off` starts it without)")?;
             cmd.push(' ');
             cmd.push_str(&flags);

@@ -71,6 +71,11 @@ pub fn save(rec: &Record) {
     }
 }
 
+/// One agent's note, if it has one.
+pub fn get(name: &str) -> Option<Record> {
+    serde_json::from_slice(&std::fs::read(path(name)).ok()?).ok()
+}
+
 /// The agent ended on purpose; there is nothing to come back to.
 pub fn forget(name: &str) {
     let _ = std::fs::remove_file(path(name));
