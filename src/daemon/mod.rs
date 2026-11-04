@@ -307,6 +307,8 @@ struct Daemon {
     /// The session to `--resume`: seeded by `warren new … resume SID`, then
     /// kept current by every lifecycle hook the agent fires.
     sid: Option<String>,
+    /// A newer id claude has reported but not yet written a transcript for.
+    unwritten_sid: Option<String>,
     /// When the current stop signal stops being polite (SIGTERM -> SIGKILL).
     sleep_deadline: Option<Instant>,
     /// When the last wake spawned, to catch a resume that dies on arrival.
@@ -457,6 +459,7 @@ pub fn run(args: DaemonArgs) -> Result<()> {
             Power::Awake
         },
         sid,
+        unwritten_sid: None,
         sleep_deadline: None,
         woke_at: None,
         tty,
@@ -1193,7 +1196,24 @@ impl Daemon {
             // a `new`/`continue` agent becomes resumable — and how the id
             // stays right if claude ever moves the conversation.
             ToDaemon::Session(sid) => {
-                if !sid.is_empty() && self.sid.as_deref() != Some(sid.as_str()) {
+                // Claude names a session before it writes a byte of it. While
+                // the new one has no transcript and the current one does, keep
+                // the current one: a sleep now would otherwise `--resume` a
+                // file that doesn't exist and lose the conversation. Every
+                // hook carries the id, so the switch comes with the next one
+                // after the first turn is written.
+                let unwritten = |id: &str| crate::procs::transcript(id).is_none();
+                if !sid.is_empty()
+                    && self.sid.as_deref() != Some(sid.as_str())
+                    && self.spawn.kind == crate::kind::Kind::Claude
+                    && unwritten(&sid)
+                    && self.sid.as_deref().is_some_and(|cur| !unwritten(cur))
+                {
+                    if self.unwritten_sid.as_deref() != Some(sid.as_str()) {
+                        self.logf(&format!("session id: {sid} (keeping the current one until it is written)"));
+                        self.unwritten_sid = Some(sid);
+                    }
+                } else if !sid.is_empty() && self.sid.as_deref() != Some(sid.as_str()) {
                     self.logf(&format!("session id: {sid}"));
                     self.sid = Some(sid);
                     let update = ToClient::StateChanged(self.state());

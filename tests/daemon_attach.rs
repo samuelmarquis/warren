@@ -4287,3 +4287,58 @@ fn cycle_renew_leaves_an_agent_already_on_this_warren() {
         "{stdout}"
     );
 }
+
+/// Claude can report a new session id before it has written anything to it.
+/// Taking that id at once would make the next wake `--resume` a file that
+/// doesn't exist and lose the conversation, so the written one is kept until
+/// the new one has a transcript.
+#[test]
+fn an_unwritten_session_id_does_not_replace_a_written_one() {
+    let home = TestHome::new("unwritten");
+    let claude = home.dir.join("claude");
+    let proj = claude.join("projects").join("-w");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(proj.join("conv-old.jsonl"), "{}\n").unwrap();
+    let out = home
+        .warren("sleep 300")
+        .env("CLAUDE_CONFIG_DIR", &claude)
+        .args(["new", "keeper", home.dir.join("w").to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let hook = |sid: &str| {
+        let mut h = Command::new(BIN)
+            .env("WARREN_SOCK", home.sock("keeper"))
+            .args(["hook", "waiting"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        h.stdin
+            .take()
+            .unwrap()
+            .write_all(format!(r#"{{"session_id":"{sid}"}}"#).as_bytes())
+            .unwrap();
+        assert!(h.wait().unwrap().success());
+    };
+    let noted = || {
+        std::fs::read_to_string(home.dir.join("notes").join("keeper.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v["session"].as_str().map(str::to_string))
+    };
+    let wait_for = |want: &str| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while noted().as_deref() != Some(want) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        noted()
+    };
+    hook("conv-old");
+    assert_eq!(wait_for("conv-old").as_deref(), Some("conv-old"));
+    hook("conv-new"); // named, never written
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(noted().as_deref(), Some("conv-old"), "kept the written session");
+    std::fs::write(proj.join("conv-new.jsonl"), "{}\n").unwrap();
+    hook("conv-new"); // its first turn is on disk now
+    assert_eq!(wait_for("conv-new").as_deref(), Some("conv-new"), "and moved once it was written");
+}

@@ -146,7 +146,7 @@ fn claude_projects() -> PathBuf {
         .join("projects")
 }
 
-fn transcript(session: &str) -> Option<PathBuf> {
+pub(crate) fn transcript(session: &str) -> Option<PathBuf> {
     std::fs::read_dir(claude_projects())
         .ok()?
         .flatten()
