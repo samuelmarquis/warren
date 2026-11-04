@@ -516,6 +516,21 @@ Code agents only, from their next start, under their pinned display name
 `dirs` limits it to agents working in those directories; leave it out and
 every agent with chat gets it.
 
+More channels of the same shape (a plugin taking `--agent NAME`, such as
+marginalia) go under `sidecars`, keyed by their MCP server name. Each one takes
+the same `channel`, `env` and `dirs`, and logs to `~/.warren/matrix/NAME/<server>.log`:
+
+```json
+"sidecars": {
+  "marginalia": {
+    "channel": "/path/to/marginalia/channel/marginalia_channel.py",
+    "env": { "MARGINALIA_URL": "https://marginalia.example.org",
+             "MARGINALIA_TOKEN_FILE": "~/.config/marginalia/token" },
+    "dirs": ["~/Research"]
+  }
+}
+```
+
 
 ### How agent states work
 

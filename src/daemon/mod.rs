@@ -1210,7 +1210,9 @@ impl Daemon {
                     && self.sid.as_deref().is_some_and(|cur| !unwritten(cur))
                 {
                     if self.unwritten_sid.as_deref() != Some(sid.as_str()) {
-                        self.logf(&format!("session id: {sid} (keeping the current one until it is written)"));
+                        self.logf(&format!(
+                            "session id: {sid} (keeping the current one until it is written)"
+                        ));
                         self.unwritten_sid = Some(sid);
                     }
                 } else if !sid.is_empty() && self.sid.as_deref() != Some(sid.as_str()) {

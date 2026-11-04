@@ -86,6 +86,36 @@ pub struct Config {
     /// a second channel beside the chat one, for Claude Code agents.
     #[serde(default)]
     pub talkback: Option<Talkback>,
+    /// More channels like talkback (marginalia, …), by their MCP server name:
+    /// each one an `--agent NAME` plugin beside chat, for Claude Code agents
+    /// under its dirs.
+    #[serde(default)]
+    pub sidecars: BTreeMap<String, Talkback>,
+}
+
+impl Config {
+    /// Talkback and the other sidecars, under their server names, in order.
+    fn all_sidecars(&self) -> Vec<(&str, &Talkback)> {
+        let mut out: Vec<(&str, &Talkback)> = self.talkback.iter().map(|t| (TALKBACK, t)).collect();
+        out.extend(
+            self.sidecars
+                .iter()
+                .filter(|(k, _)| {
+                    k.as_str() != TALKBACK && k.as_str() != SERVER && valid_server_name(k)
+                })
+                .map(|(k, v)| (k.as_str(), v)),
+        );
+        out
+    }
+}
+
+/// An MCP server name that can sit on the channels flag and in a file name.
+fn valid_server_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// The `talkback` key of `~/.warren/matrix.json`.
@@ -206,22 +236,22 @@ pub fn agent_dir(name: &str) -> PathBuf {
 pub fn launch_flags(kind: Kind, name: &str, cwd: &str) -> Result<String> {
     let cfg =
         config()?.context("chat is on for this agent, but ~/.warren/matrix.json is missing")?;
-    // OMP has no way in for a second channel yet: talkback is Claude Code's.
-    let talkback = cfg
-        .talkback
-        .as_ref()
-        .filter(|tb| kind == Kind::Claude && talkback_covers(tb, cwd));
-    let dir = write_agent_files(&cfg, name, talkback)?;
+    // OMP has no way in for a second channel yet: sidecars are Claude Code's.
+    let sidecars: Vec<(&str, &Talkback)> = cfg
+        .all_sidecars()
+        .into_iter()
+        .filter(|(_, tb)| kind == Kind::Claude && talkback_covers(tb, cwd))
+        .collect();
+    let dir = write_agent_files(&cfg, name, &sidecars)?;
     let mcp = dir.join("mcp.json");
     Ok(match kind {
         Kind::Claude => format!(
             "--mcp-config {} --dangerously-load-development-channels server:{SERVER}{}",
             quote(&mcp),
-            if talkback.is_some() {
-                format!(" server:{TALKBACK}")
-            } else {
-                String::new()
-            }
+            sidecars
+                .iter()
+                .map(|(n, _)| format!(" server:{n}"))
+                .collect::<String>()
         ),
         Kind::Omp => format!("-e {}", quote(&omp_extension()?)),
     })
@@ -235,7 +265,7 @@ fn quote(path: &Path) -> String {
 }
 
 /// The channel config and the MCP config for one agent.
-fn write_agent_files(cfg: &Config, name: &str, talkback: Option<&Talkback>) -> Result<PathBuf> {
+fn write_agent_files(cfg: &Config, name: &str, sidecars: &[(&str, &Talkback)]) -> Result<PathBuf> {
     let dir = agent_dir(name);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     private(&dir, 0o700)?;
@@ -300,15 +330,15 @@ fn write_agent_files(cfg: &Config, name: &str, talkback: Option<&Talkback>) -> R
             }
         }
     });
-    if let Some(tb) = talkback {
-        // Its log beside the chat channel's; its own state (the reply cursor)
-        // stays where the plugin keeps it, under the talkback name.
-        mcp["mcpServers"][TALKBACK] = json!({
+    for (server, tb) in sidecars {
+        // Its log beside the chat channel's; its own state (a reply cursor)
+        // stays where the plugin keeps it, under the agent's name there.
+        mcp["mcpServers"][*server] = json!({
             "command": "/bin/sh",
             "args": [
                 "-c", r#"exec "$0" -I "$1" --agent "$2" 2>>"$3""#,
                 cfg.python, tb.channel, talkback_name(name),
-                dir.join("talkback.log").display().to_string(),
+                dir.join(format!("{server}.log")).display().to_string(),
             ],
             "env": tb.env,
         });

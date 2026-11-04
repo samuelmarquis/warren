@@ -467,6 +467,17 @@ It reaches Claude Code agents only, from their next start.
 An agent is known there by its display name once pinned, else its warren
 name; what the channel said is in
 .IR ~/.warren/matrix/NAME/talkback.log .
+.PP
+.B sidecars
+holds more channels of the same shape (a plugin taking
+.BR "\-\-agent NAME" ,
+such as marginalia), keyed by their MCP server name, each with its own
+.BR channel ,
+.B env
+and
+.BR dirs .
+Each logs to
+.IR ~/.warren/matrix/NAME/SERVER.log .
 .SH ENVIRONMENT
 .TP
 .B WARREN_HOME

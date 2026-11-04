@@ -3874,8 +3874,13 @@ fn talkback_is_wired_beside_chat_for_agents_under_its_dirs() {
                 "allowedUsers": ["@sam:x"], "inviters": ["@sam:x"],
                 "talkback": {{"channel": "/opt/talkback_channel.py",
                              "env": {{"TALKBACK_URL": "https://tb.x"}},
-                             "dirs": ["{}"]}}}}"#,
-            studio.display()
+                             "dirs": ["{}"]}},
+                "sidecars": {{"marginalia": {{"channel": "/opt/marginalia_channel.py",
+                                             "env": {{"MARGINALIA_URL": "https://mg.x"}},
+                                             "dirs": ["{}"]}},
+                              "bad name": {{"channel": "/opt/x.py"}}}}}}"#,
+            studio.display(),
+            elsewhere.display()
         ),
     )
     .unwrap();
@@ -3929,16 +3934,29 @@ fn talkback_is_wired_beside_chat_for_agents_under_its_dirs() {
     );
     assert_eq!(tb["env"]["TALKBACK_URL"], "https://tb.x");
 
+    assert!(
+        !said.contains("server:marginalia"),
+        "marginalia is for elsewhere: {said}"
+    );
+    assert!(!said.contains("bad name"), "{said}");
+
     new(&["outsider", elsewhere.to_str().unwrap()]);
     let said = argv("outsider");
     assert!(
-        said.contains("server:warren-matrix") && !said.contains("server:talkback"),
+        said.contains("server:warren-matrix\nserver:marginalia")
+            && !said.contains("server:talkback"),
         "{said}"
     );
     assert!(mcp("outsider")["mcpServers"].get("talkback").is_none());
+    let mg = &mcp("outsider")["mcpServers"]["marginalia"];
+    assert_eq!(mg["args"][3], "/opt/marginalia_channel.py");
+    assert_eq!(mg["args"][4], "outsider");
+    assert!(mg["args"][5].as_str().unwrap().ends_with("marginalia.log"));
+    assert_eq!(mg["env"]["MARGINALIA_URL"], "https://mg.x");
 
     new(&["ompy", studio.to_str().unwrap(), "--kind=omp"]);
-    assert!(!argv("ompy").contains("server:talkback"));
+    let said = argv("ompy");
+    assert!(!said.contains("server:talkback") && !said.contains("server:marginalia"));
 }
 
 /// `warren renew` puts an agent on a new daemon — the binary it is run from
@@ -4305,7 +4323,11 @@ fn an_unwritten_session_id_does_not_replace_a_written_one() {
         .args(["new", "keeper", home.dir.join("w").to_str().unwrap()])
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let hook = |sid: &str| {
         let mut h = Command::new(BIN)
             .env("WARREN_SOCK", home.sock("keeper"))
@@ -4337,8 +4359,16 @@ fn an_unwritten_session_id_does_not_replace_a_written_one() {
     assert_eq!(wait_for("conv-old").as_deref(), Some("conv-old"));
     hook("conv-new"); // named, never written
     std::thread::sleep(Duration::from_millis(1500));
-    assert_eq!(noted().as_deref(), Some("conv-old"), "kept the written session");
+    assert_eq!(
+        noted().as_deref(),
+        Some("conv-old"),
+        "kept the written session"
+    );
     std::fs::write(proj.join("conv-new.jsonl"), "{}\n").unwrap();
     hook("conv-new"); // its first turn is on disk now
-    assert_eq!(wait_for("conv-new").as_deref(), Some("conv-new"), "and moved once it was written");
+    assert_eq!(
+        wait_for("conv-new").as_deref(),
+        Some("conv-new"),
+        "and moved once it was written"
+    );
 }
