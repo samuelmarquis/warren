@@ -28,6 +28,9 @@ let child: ChildProcess | undefined;
 let ready: Promise<void> | undefined;
 let instructions = "";
 let nextId = 1;
+let stopping = false; // set when OMP itself exits; until then a dead channel is restarted
+let restartDelay = 1000;
+let exitHooked = false;
 const waiting = new Map<number, Pending>();
 
 /** The agent's channel profile, worked out as warren's `matrix::profile`
@@ -123,10 +126,19 @@ export default function warrenMatrix(pi: ExtensionAPI) {
 				if (line.trim()) onLine(line);
 			}
 		});
+		const started = Date.now();
 		proc.on("exit", () => {
 			if (child === proc) {
 				child = undefined;
-				ready = undefined; // the next tool call starts it again
+				ready = undefined;
+				// Messages only arrive while it runs, so bring it back rather than
+				// waiting for the next tool call; back off if it keeps dying.
+				if (!stopping) {
+					restartDelay = Date.now() - started > 60_000 ? 1000 : Math.min(restartDelay * 2, 60_000);
+					setTimeout(() => {
+						if (!stopping && !child) start().catch(() => {});
+					}, restartDelay).unref?.();
+				}
 			}
 			for (const w of waiting.values()) w.reject(new Error("the chat channel stopped"));
 			waiting.clear();
@@ -146,9 +158,15 @@ export default function warrenMatrix(pi: ExtensionAPI) {
 	pi.on("session_start", async () => {
 		await start().catch(() => {});
 	});
-	pi.on("session_shutdown", () => {
-		child?.kill();
-	});
+	// Not on session_shutdown: subagent sessions end inside the main one and
+	// share this channel. It stops with OMP (and on its own when its stdin closes).
+	if (!exitHooked) {
+		exitHooked = true;
+		process.on("exit", () => {
+			stopping = true;
+			child?.kill();
+		});
+	}
 
 	// The channel's instructions, as Claude Code would have put them in front
 	// of the model, plus the one difference: the tools' names here.
