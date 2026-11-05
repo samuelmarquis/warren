@@ -40,16 +40,78 @@ function profile(agent: string): string {
 	return /^[a-z0-9]/.test(p) ? p : `w${p}`;
 }
 
-function readSpec(): Spec | undefined {
+function readServers(): Record<string, Spec> {
 	const agent = process.env.WARREN_AGENT;
-	if (!agent) return undefined;
+	if (!agent) return {};
 	const home = process.env.WARREN_HOME || join(homedir(), ".warren");
 	try {
 		const mcp = JSON.parse(readFileSync(join(home, "matrix", profile(agent), "mcp.json"), "utf8"));
-		return mcp?.mcpServers?.[SERVER];
+		return mcp?.mcpServers ?? {};
 	} catch {
-		return undefined;
+		return {};
 	}
+}
+
+function readSpec(): Spec | undefined {
+	return readServers()[SERVER];
+}
+
+// Sidecars (talkback, marginalia, …): the other servers in the same file.
+// Only what they push comes through here; their tools stay on their HTTP
+// APIs, which an OMP agent can call directly.
+let sidecarsStarted = false;
+const sidecarProcs = new Set<ChildProcess>();
+const sidecarNotes = new Map<string, string>();
+
+function startSidecar(name: string, spec: Spec, deliver: (source: string, params: any) => void) {
+	let delay = 1000;
+	const launch = () => {
+		if (stopping) return;
+		const started = Date.now();
+		const proc = spawn(spec.command, spec.args ?? [], {
+			env: { ...process.env, ...(spec.env ?? {}) },
+			stdio: ["pipe", "pipe", "ignore"],
+		});
+		sidecarProcs.add(proc);
+		const write = (m: object) => proc.stdin?.write(`${JSON.stringify(m)}\n`);
+		let buf = "";
+		proc.stdout!.setEncoding("utf8");
+		proc.stdout!.on("data", (chunk: string) => {
+			buf += chunk;
+			for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
+				const line = buf.slice(0, i).trim();
+				buf = buf.slice(i + 1);
+				if (!line) continue;
+				let msg: any;
+				try {
+					msg = JSON.parse(line);
+				} catch {
+					continue;
+				}
+				if (msg.id === 1 && !msg.method) {
+					if (msg.result?.instructions) sidecarNotes.set(name, msg.result.instructions);
+					write({ jsonrpc: "2.0", method: "notifications/initialized" });
+				} else if (msg.method === "notifications/claude/channel") {
+					deliver(name, msg.params);
+				} else if (msg.id != null && msg.method) {
+					write({ jsonrpc: "2.0", id: msg.id, result: {} });
+				}
+			}
+		});
+		proc.on("exit", () => {
+			sidecarProcs.delete(proc);
+			if (stopping) return;
+			delay = Date.now() - started > 60_000 ? 1000 : Math.min(delay * 2, 60_000);
+			setTimeout(launch, delay).unref?.();
+		});
+		write({
+			jsonrpc: "2.0",
+			id: 1,
+			method: "initialize",
+			params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "warren-omp", version: "1" } },
+		});
+	};
+	launch();
 }
 
 function send(msg: object) {
@@ -66,13 +128,13 @@ function rpc(method: string, params: object): Promise<any> {
 
 /** A chat message as Claude Code shows a channel event, so the channel's own
  *  instructions read the same in both harnesses. */
-function asChannelEvent(params: any): string {
+function asChannelEvent(params: any, source: string = SERVER): string {
 	const meta: Record<string, unknown> = params?.meta ?? {};
 	const esc = (v: unknown) => String(v).replaceAll("&", "&amp;").replaceAll('"', "&quot;");
 	const attrs = Object.entries(meta)
 		.map(([k, v]) => ` ${k}="${esc(v)}"`)
 		.join("");
-	return `<channel source="${SERVER}"${attrs}>${params?.content ?? ""}</channel>`;
+	return `<channel source="${source}"${attrs}>${params?.content ?? ""}</channel>`;
 }
 
 export default function warrenMatrix(pi: ExtensionAPI) {
@@ -80,11 +142,16 @@ export default function warrenMatrix(pi: ExtensionAPI) {
 	if (!spec) return;
 	const z = pi.zod;
 
-	function deliver(params: any) {
+	function deliver(params: any, source: string = SERVER) {
 		// "aside": between steps of whatever the agent is doing, without cutting
 		// a tool batch short; a turn of its own when it is idle.
 		pi.sendMessage(
-			{ customType: "matrix", content: asChannelEvent(params), display: true, attribution: "agent" },
+			{
+				customType: source === SERVER ? "matrix" : source,
+				content: asChannelEvent(params, source),
+				display: true,
+				attribution: "agent",
+			},
 			{ deliverAs: "aside", triggerTurn: true },
 		);
 	}
@@ -156,6 +223,12 @@ export default function warrenMatrix(pi: ExtensionAPI) {
 	}
 
 	pi.on("session_start", async () => {
+		if (!sidecarsStarted) {
+			sidecarsStarted = true;
+			for (const [name, sc] of Object.entries(readServers())) {
+				if (name !== SERVER && sc?.command) startSidecar(name, sc, (src, p) => deliver(p, src));
+			}
+		}
 		await start().catch(() => {});
 	});
 	// Not on session_shutdown: subagent sessions end inside the main one and
@@ -165,19 +238,26 @@ export default function warrenMatrix(pi: ExtensionAPI) {
 		process.on("exit", () => {
 			stopping = true;
 			child?.kill();
+			for (const p of sidecarProcs) p.kill();
 		});
 	}
 
 	// The channel's instructions, as Claude Code would have put them in front
 	// of the model, plus the one difference: the tools' names here.
 	pi.on("before_agent_start", async () => {
-		if (!instructions) return;
-		return {
-			systemPromptAppend:
-				`\n# Matrix chat\n${instructions}\n` +
+		if (!instructions && sidecarNotes.size === 0) return;
+		let append = instructions
+			? `\n# Matrix chat\n${instructions}\n` +
 				"In this session the chat tools are named matrix_claim_name, matrix_reply, matrix_react, " +
-				"matrix_send_file, matrix_fetch_messages, matrix_download, matrix_set_avatar and matrix_search.\n",
-		};
+				"matrix_send_file, matrix_fetch_messages, matrix_download, matrix_set_avatar and matrix_search.\n"
+			: "";
+		for (const [name, note] of sidecarNotes) {
+			append +=
+				`\n# ${name}\n${note}\n` +
+				`In this session ${name}'s events arrive as <channel source="${name}"> messages, but its tools are ` +
+				"not loaded: do what they would do through its HTTP API.\n";
+		}
+		return { systemPromptAppend: append };
 	});
 
 	// The channel's tools, declared here: OMP wants its own schemas, and

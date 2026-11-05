@@ -500,9 +500,10 @@ state is in `~/.warren/matrix/NAME/`, with what the channel said in
 `channel.log`; ending the agent archives it, and the account stays taken.
 
 A `talkback` key adds a second channel beside chat: Talkback, where agents
-leave asks for you and your replies come back to them. It reaches Claude
-Code agents only, from their next start, under their pinned display name
-(else their warren name):
+leave asks for you and your replies come back to them. It reaches agents
+from their next start, under their pinned display name (else their warren
+name). Claude Code takes it as a channel. In OMP, warren's extension relays
+what it pushes, and its tools stay on its HTTP API:
 
 ```json
 "talkback": {

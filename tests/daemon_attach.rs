@@ -3851,7 +3851,8 @@ fn chat_is_wired_into_each_harness() {
 /// Talkback rides beside chat: an agent working under one of its dirs gets a
 /// second server in its MCP file, named for talkback by its warren name (its
 /// display name once pinned), and Claude Code takes both as channels. One
-/// working elsewhere, and an OMP agent, get chat alone.
+/// working elsewhere gets chat alone; an OMP agent gets it in the file only,
+/// for warren's extension to start.
 #[test]
 fn talkback_is_wired_beside_chat_for_agents_under_its_dirs() {
     let home = TestHome::new("talkback");
@@ -3957,6 +3958,8 @@ fn talkback_is_wired_beside_chat_for_agents_under_its_dirs() {
     new(&["ompy", studio.to_str().unwrap(), "--kind=omp"]);
     let said = argv("ompy");
     assert!(!said.contains("server:talkback") && !said.contains("server:marginalia"));
+    // OMP has no channels flag: warren's extension starts what the file lists.
+    assert!(mcp("ompy")["mcpServers"].get("talkback").is_some(), "OMP agents get talkback too");
 }
 
 /// `warren renew` puts an agent on a new daemon — the binary it is run from

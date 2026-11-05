@@ -236,11 +236,12 @@ pub fn agent_dir(name: &str) -> PathBuf {
 pub fn launch_flags(kind: Kind, name: &str, cwd: &str) -> Result<String> {
     let cfg =
         config()?.context("chat is on for this agent, but ~/.warren/matrix.json is missing")?;
-    // OMP has no way in for a second channel yet: sidecars are Claude Code's.
+    // Both harnesses get them in the MCP file: Claude Code as channels, OMP
+    // through warren's extension, which relays what they push.
     let sidecars: Vec<(&str, &Talkback)> = cfg
         .all_sidecars()
         .into_iter()
-        .filter(|(_, tb)| kind == Kind::Claude && talkback_covers(tb, cwd))
+        .filter(|(_, tb)| talkback_covers(tb, cwd))
         .collect();
     let dir = write_agent_files(&cfg, name, &sidecars)?;
     let mcp = dir.join("mcp.json");
