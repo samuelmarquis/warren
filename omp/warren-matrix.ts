@@ -318,9 +318,13 @@ export default function warrenMatrix(pi: ExtensionAPI) {
 			"room (id !..., alias #...:server, or name), optionally followed by a space and the event_id to reply " +
 			"to; every later line is the message, sent exactly as written. Write TeX as you would in a .tex file, " +
 			"with single backslashes: nothing is unescaped.",
+		// OMP checks a freeform call's { input } against this schema too, and drops
+		// keys it doesn't list, so input is here and the rest are optional; the
+		// channel itself refuses a reply without a room or text.
 		z.object({
-			room: z.string().describe("Room id (!...) or alias (#name:server)"),
-			text: z.string(),
+			input: z.string().describe("Freeform form: the room line, then the message").optional(),
+			room: z.string().describe("Room id (!...) or alias (#name:server)").optional(),
+			text: z.string().optional(),
 			reply_to: z.string().describe("event_id to reply to (optional)").optional(),
 		}),
 		{
