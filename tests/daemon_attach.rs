@@ -3959,7 +3959,10 @@ fn talkback_is_wired_beside_chat_for_agents_under_its_dirs() {
     let said = argv("ompy");
     assert!(!said.contains("server:talkback") && !said.contains("server:marginalia"));
     // OMP has no channels flag: warren's extension starts what the file lists.
-    assert!(mcp("ompy")["mcpServers"].get("talkback").is_some(), "OMP agents get talkback too");
+    assert!(
+        mcp("ompy")["mcpServers"].get("talkback").is_some(),
+        "OMP agents get talkback too"
+    );
 }
 
 /// `warren renew` puts an agent on a new daemon — the binary it is run from

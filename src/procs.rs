@@ -227,6 +227,18 @@ fn move_conversation_in(
 /// following them. Returns how many files or index lines came in.
 fn merge_memories(old: &Path, new: &Path, tag: &str) -> std::io::Result<usize> {
     std::fs::create_dir_all(new)?;
+    // A folder made as a copy of `old`, and maybe pruned since, already has
+    // what it wants from it: merging would bring back what was pruned.
+    let mut notes = std::fs::read_dir(new)?
+        .flatten()
+        .filter(|e| e.file_name() != "MEMORY.md" && e.path().is_file())
+        .peekable();
+    if notes.peek().is_some()
+        && notes
+            .all(|e| std::fs::read(e.path()).ok() == std::fs::read(old.join(e.file_name())).ok())
+    {
+        return Ok(0);
+    }
     let (mut count, mut renamed) = (0, Vec::new());
     for e in std::fs::read_dir(old)?.flatten() {
         let (p, name) = (e.path(), e.file_name().to_string_lossy().into_owned());
@@ -358,6 +370,21 @@ mod tests {
             "- [Farm](farm.md) — x\n- [Same](same.md) — z\n- [Farm](farm-open-comp.md) — x\n- [Mine](mine.md) — y\n"
         );
         assert!(old.join("memory/farm.md").is_file(), "the old folder stays");
+        // A folder copied from the old one and pruned since stays pruned.
+        let pool = tmp.join("-r-pool");
+        std::fs::create_dir_all(pool.join("memory")).unwrap();
+        w(&pool, "MEMORY.md", "- [A](a.md)\n- [B](b.md)\n");
+        w(&pool, "a.md", "a");
+        w(&pool, "b.md", "b");
+        let pruned = tmp.join("pruned");
+        std::fs::create_dir_all(&pruned).unwrap();
+        std::fs::write(pruned.join("MEMORY.md"), "- [A](a.md)\n").unwrap();
+        std::fs::write(pruned.join("a.md"), "a").unwrap();
+        assert_eq!(
+            merge_memories(&pool.join("memory"), &pruned, "pool").unwrap(),
+            0
+        );
+        assert!(!pruned.join("b.md").exists());
         // Again: nothing left to move, and a pruned folder stays pruned.
         std::fs::remove_file(new.join("memory/mine.md")).unwrap();
         assert_eq!(
