@@ -150,8 +150,8 @@ dashboard (or `warren set NAME --dir=…`), then sleep and wake it. Claude
 finds the conversation by its id wherever the agent now runs. Its memory,
 though, is keyed by directory: to give it the old directory's memories too,
 sleep it and run `warren set NAME --dir=… --move`, which moves the
-transcript to the new directory's folder and copies the memories (unless the
-new directory already has some), then wake it.
+transcript to the new directory's folder and merges the old memories in
+(a file whose name is taken comes in as `<name>-<old dir>.md`), then wake it.
 
 ### Inside the dashboard
 

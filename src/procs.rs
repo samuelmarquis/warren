@@ -165,7 +165,7 @@ fn project_key(cwd: &Path) -> String {
 
 /// Move a conversation's transcript (and its folder of subagents and tool
 /// results) from wherever it is filed to `to`'s project folder, and copy
-/// `from`'s memories there if `to` has none yet. Says what it did.
+/// `from`'s memories into its memory folder (see `merge_memories`). Says what it did.
 pub(crate) fn move_conversation(session: &str, from: &Path, to: &Path) -> anyhow::Result<String> {
     move_conversation_in(&claude_projects(), session, from, to)
 }
@@ -200,12 +200,19 @@ fn move_conversation_in(
         }
         said.push(format!("moved its conversation to {}", dst_dir.display()));
     }
+    // The old directory's memories join the new folder's once, with the
+    // conversation: a file already there under its name, with other content,
+    // comes in renamed, and the index gains the lines it lacks.
     let (old_mem, new_mem) = (project_dir(from).join("memory"), dst_dir.join("memory"));
-    // Claude makes an empty memory folder wherever it starts, so empty counts as none.
-    let empty = |d: &Path| std::fs::read_dir(d).map_or(true, |mut e| e.next().is_none());
-    if old_mem.is_dir() && old_mem != new_mem && empty(&new_mem) {
-        copy_tree(&old_mem, &new_mem)?;
-        said.push(format!("copied {}'s memories", from.display()));
+    if said.len() == 1 && old_mem.is_dir() && old_mem != new_mem {
+        let tag = from
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let n = merge_memories(&old_mem, &new_mem, &tag)?;
+        if n > 0 {
+            said.push(format!("merged {n} of {}'s memories", from.display()));
+        }
     }
     Ok(if said.is_empty() {
         "nothing to move".into()
@@ -214,17 +221,68 @@ fn move_conversation_in(
     })
 }
 
-fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(to)?;
-    for e in std::fs::read_dir(from)?.flatten() {
-        let (p, q) = (e.path(), to.join(e.file_name()));
-        if p.is_dir() {
-            copy_tree(&p, &q)?
-        } else {
-            std::fs::copy(&p, &q).map(|_| ())?
+/// Bring `old`'s memory files into `new`, keeping everything already in `new`.
+/// A name clash with different content comes in as `<stem>-<tag>.<ext>`;
+/// MEMORY.md, the index, gains the lines it lacks, with links to renamed files
+/// following them. Returns how many files or index lines came in.
+fn merge_memories(old: &Path, new: &Path, tag: &str) -> std::io::Result<usize> {
+    std::fs::create_dir_all(new)?;
+    let (mut count, mut renamed) = (0, Vec::new());
+    for e in std::fs::read_dir(old)?.flatten() {
+        let (p, name) = (e.path(), e.file_name().to_string_lossy().into_owned());
+        if name == "MEMORY.md" || !p.is_file() {
+            continue;
+        }
+        let q = new.join(&name);
+        if !q.exists() {
+            std::fs::copy(&p, &q)?;
+            count += 1;
+        } else if std::fs::read(&p)? != std::fs::read(&q)? {
+            let path = Path::new(&name);
+            let stem = path
+                .file_stem()
+                .map_or(name.clone(), |s| s.to_string_lossy().into_owned());
+            let ext = path
+                .extension()
+                .map(|x| format!(".{}", x.to_string_lossy()))
+                .unwrap_or_default();
+            let mut alt = format!("{stem}-{tag}{ext}");
+            let mut i = 2;
+            while new.join(&alt).exists() {
+                alt = format!("{stem}-{tag}-{i}{ext}");
+                i += 1;
+            }
+            std::fs::copy(&p, new.join(&alt))?;
+            renamed.push((name, alt));
+            count += 1;
         }
     }
-    Ok(())
+    let Ok(index) = std::fs::read_to_string(old.join("MEMORY.md")) else {
+        return Ok(count);
+    };
+    let have = std::fs::read_to_string(new.join("MEMORY.md")).unwrap_or_default();
+    let known: std::collections::HashSet<&str> = have.lines().collect();
+    let mut add = String::new();
+    for line in index.lines().filter(|l| !l.trim().is_empty()) {
+        let mut line = line.to_string();
+        for (from, to) in &renamed {
+            line = line.replace(&format!("({from})"), &format!("({to})"));
+        }
+        if !known.contains(line.as_str()) {
+            add.push_str(&line);
+            add.push('\n');
+            count += 1;
+        }
+    }
+    if !add.is_empty() {
+        let mut out = have;
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&add);
+        std::fs::write(new.join("MEMORY.md"), out)?;
+    }
+    Ok(count)
 }
 
 /// Claude Code writes each subagent's transcript under
@@ -259,43 +317,54 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn a_conversation_moves_with_its_folder_and_the_old_memories_are_copied() {
+    fn a_conversation_moves_with_its_folder_and_the_old_memories_merge_in() {
         let tmp = std::env::temp_dir().join(format!("warren-move-{}", std::process::id()));
-        let (from, to) = (
-            Path::new("/r/open-audio"),
-            Path::new("/r/open-audio/agents/my.celium"),
-        );
-        assert_eq!(project_key(to), "-r-open-audio-agents-my-celium");
-        let old = tmp.join("-r-open-audio");
+        let (from, to) = (Path::new("/r/open-comp"), Path::new("/r/agents/my.celium"));
+        assert_eq!(project_key(to), "-r-agents-my-celium");
+        let (old, new) = (tmp.join("-r-open-comp"), tmp.join("-r-agents-my-celium"));
         std::fs::create_dir_all(old.join("s1/subagents")).unwrap();
         std::fs::create_dir_all(old.join("memory")).unwrap();
+        std::fs::create_dir_all(new.join("memory")).unwrap();
         std::fs::write(old.join("s1.jsonl"), "{}").unwrap();
-        std::fs::write(old.join("memory/MEMORY.md"), "- a note").unwrap();
+        let w = |d: &Path, f: &str, t: &str| std::fs::write(d.join("memory").join(f), t).unwrap();
+        w(
+            &old,
+            "MEMORY.md",
+            "- [Farm](farm.md) — x\n- [Mine](mine.md) — y\n- [Same](same.md) — z\n",
+        );
+        w(&old, "farm.md", "comp's farm note");
+        w(&old, "mine.md", "only comp has this");
+        w(&old, "same.md", "shared");
+        // The pool copied in already: its own farm.md, and same.md alike.
+        w(
+            &new,
+            "MEMORY.md",
+            "- [Farm](farm.md) — x\n- [Same](same.md) — z\n",
+        );
+        w(&new, "farm.md", "the pool's farm note");
+        w(&new, "same.md", "shared");
         let said = move_conversation_in(&tmp, "s1", from, to).unwrap();
-        let new = tmp.join("-r-open-audio-agents-my-celium");
         assert!(
             new.join("s1.jsonl").is_file() && new.join("s1/subagents").is_dir(),
             "{said}"
         );
         assert!(!old.join("s1.jsonl").exists() && !old.join("s1").exists());
+        let r = |f: &str| std::fs::read_to_string(new.join("memory").join(f)).unwrap();
+        assert_eq!(r("farm.md"), "the pool's farm note");
+        assert_eq!(r("farm-open-comp.md"), "comp's farm note");
+        assert_eq!(r("mine.md"), "only comp has this");
         assert_eq!(
-            std::fs::read_to_string(new.join("memory/MEMORY.md")).unwrap(),
-            "- a note"
+            r("MEMORY.md"),
+            "- [Farm](farm.md) — x\n- [Same](same.md) — z\n- [Farm](farm-open-comp.md) — x\n- [Mine](mine.md) — y\n"
         );
-        assert!(
-            old.join("memory/MEMORY.md").is_file(),
-            "the pool stays for the others"
-        );
-        // Again: nothing left to move, and memories already there are kept.
-        std::fs::write(new.join("memory/MEMORY.md"), "- pruned").unwrap();
+        assert!(old.join("memory/farm.md").is_file(), "the old folder stays");
+        // Again: nothing left to move, and a pruned folder stays pruned.
+        std::fs::remove_file(new.join("memory/mine.md")).unwrap();
         assert_eq!(
             move_conversation_in(&tmp, "s1", from, to).unwrap(),
             "nothing to move"
         );
-        assert_eq!(
-            std::fs::read_to_string(new.join("memory/MEMORY.md")).unwrap(),
-            "- pruned"
-        );
+        assert!(!new.join("memory/mine.md").exists());
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 

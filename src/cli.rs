@@ -731,7 +731,7 @@ pub fn cmd_power(args: &[String], wake: bool) -> Result<()> {
 /// `--dir` must already exist. Claude resumes a conversation by its id from
 /// any directory, but files it, and keys the agent's memory, by directory:
 /// `--move` (asleep only) moves the transcript to the new directory's folder
-/// and copies the old directory's memories there, if it has none yet.
+/// and merges the old directory's memories into the new one's.
 pub fn cmd_set(args: &[String]) -> Result<()> {
     let usage = "usage: warren set NAME [--dir=DIR [--move]] [--extra=ARGS] [--sys=PROMPT] [--matrix=on|off]  \
                  (an empty --extra= or --sys= clears it)";
