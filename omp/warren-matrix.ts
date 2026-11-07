@@ -137,6 +137,15 @@ function asChannelEvent(params: any, source: string = SERVER): string {
 	return `<channel source="${source}"${attrs}>${params?.content ?? ""}</channel>`;
 }
 
+/** A freeform matrix_reply input: "ROOM [REPLY_TO]\nTEXT", the text untouched. */
+export function replyFromInput(input: string): { room: string; text: string; reply_to?: string } {
+	const nl = input.indexOf("\n");
+	const head = (nl < 0 ? input : input.slice(0, nl)).trim();
+	const text = nl < 0 ? "" : input.slice(nl + 1);
+	const [room, replyTo] = head.split(/\s+/);
+	return replyTo ? { room, text, reply_to: replyTo } : { room, text };
+}
+
 export default function warrenMatrix(pi: ExtensionAPI) {
 	const spec = readSpec();
 	if (!spec) return;
@@ -249,7 +258,9 @@ export default function warrenMatrix(pi: ExtensionAPI) {
 		let append = instructions
 			? `\n# Matrix chat\n${instructions}\n` +
 				"In this session the chat tools are named matrix_claim_name, matrix_reply, matrix_react, " +
-				"matrix_send_file, matrix_fetch_messages, matrix_download, matrix_set_avatar and matrix_search.\n"
+				"matrix_send_file, matrix_fetch_messages, matrix_download, matrix_set_avatar and matrix_search.\n" +
+				"Send messages by calling matrix_reply directly, not from eval code: its input is plain text (the " +
+				"room on the first line, the message after it), so TeX is written as is, with single backslashes.\n"
 			: "";
 		for (const [name, note] of sidecarNotes) {
 			append +=
@@ -263,14 +274,22 @@ export default function warrenMatrix(pi: ExtensionAPI) {
 	// The channel's tools, declared here: OMP wants its own schemas, and
 	// these are stable. Before the agent claims a name, every one but
 	// claim_name answers with the channel's own "claim a name first".
-	const tool = (name: string, description: string, parameters: any) =>
+	const tool = (
+		name: string,
+		description: string,
+		parameters: any,
+		{ fromInput, ...extra }: { fromInput?: (input: string) => any; [k: string]: any } = {},
+	) =>
 		pi.registerTool({
 			name: `matrix_${name}`,
 			label: `Matrix ${name.replaceAll("_", " ")}`,
 			description,
 			parameters,
+			...extra,
 			async execute(_id: string, params: any) {
 				await start();
+				// A freeform call arrives as { input: "<the raw text>" }.
+				if (fromInput && typeof params?.input === "string") params = fromInput(params.input);
 				const res = await rpc("tools/call", { name, arguments: params ?? {} });
 				const content = res?.content ?? [{ type: "text", text: JSON.stringify(res) }];
 				if (res?.isError) {
@@ -287,14 +306,38 @@ export default function warrenMatrix(pi: ExtensionAPI) {
 			"display name.",
 		z.object({ name: z.string().describe("2-24 characters: lowercase letters, digits, - or _") }),
 	);
+	// reply is a top-level tool, not one reached from eval, and on models that
+	// take freeform tools (GPT on the Responses API) its input is plain text:
+	// the room line, then the message as written. Nothing between the model and
+	// the channel then reads escapes, so TeX like \rho or \frac arrives intact.
+	// A message written as a JSON string, or as a string in eval code, has had
+	// its backslashes read as escapes (\r a carriage return, \\ one backslash).
 	tool(
 		"reply",
-		"Send a text message (Markdown allowed) to a Matrix room.",
+		"Send a text message (Markdown allowed) to a Matrix room. As freeform input: the first line is the " +
+			"room (id !..., alias #...:server, or name), optionally followed by a space and the event_id to reply " +
+			"to; every later line is the message, sent exactly as written. Write TeX as you would in a .tex file, " +
+			"with single backslashes: nothing is unescaped.",
 		z.object({
 			room: z.string().describe("Room id (!...) or alias (#name:server)"),
 			text: z.string(),
 			reply_to: z.string().describe("event_id to reply to (optional)").optional(),
 		}),
+		{
+			loadMode: "essential",
+			customWireName: "matrix_reply",
+			customFormat: {
+				syntax: "lark",
+				definition: [
+					"start: ROOM REPLY_TO? NEWLINE TEXT",
+					"ROOM: /[^\\s$][^\\s]*/",
+					"REPLY_TO: / +\\$[^\\s]+/",
+					"NEWLINE: /\\r?\\n/",
+					"TEXT: /[\\s\\S]+/",
+				].join("\n"),
+			},
+			fromInput: replyFromInput,
+		},
 	);
 	tool(
 		"react",
