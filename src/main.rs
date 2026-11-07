@@ -42,8 +42,10 @@ warren - a Claude Code agent multiplexer
                          stop the agent's claude process, keep the agent
                          (--force: even mid-turn, losing the turn)
   warren wake NAME       start it again on the same conversation
-  warren set NAME [--dir=DIR] [--extra=ARGS] [--sys=PROMPT] [--matrix=on|off]
+  warren set NAME [--dir=DIR [--move]] [--extra=ARGS] [--sys=PROMPT] [--matrix=on|off]
                          change how an agent starts, from its next start on
+                         (--move, while asleep: carry the conversation and a
+                         copy of the old directory's memories to DIR)
   warren join NAME ROOM  invite an agent to a Matrix room (chat; see man warren)
   warren renew NAME [--matrix=on|off] [--force]
                          move an agent onto this warren (its daemon keeps the

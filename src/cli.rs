@@ -728,12 +728,12 @@ pub fn cmd_power(args: &[String], wake: bool) -> Result<()> {
 /// restarted — a running agent goes on as it is and picks the change up
 /// when it next wakes, which is also when it would matter.
 ///
-/// `--dir` must already exist. The usual reason to change it is that the
-/// directory was renamed under the agent, and a conversation is filed by
-/// where it ran: pointing the agent at an empty new directory would only
-/// make it resume into nothing.
+/// `--dir` must already exist. Claude resumes a conversation by its id from
+/// any directory, but files it, and keys the agent's memory, by directory:
+/// `--move` (asleep only) moves the transcript to the new directory's folder
+/// and copies the old directory's memories there, if it has none yet.
 pub fn cmd_set(args: &[String]) -> Result<()> {
-    let usage = "usage: warren set NAME [--dir=DIR] [--extra=ARGS] [--sys=PROMPT] [--matrix=on|off]  \
+    let usage = "usage: warren set NAME [--dir=DIR [--move]] [--extra=ARGS] [--sys=PROMPT] [--matrix=on|off]  \
                  (an empty --extra= or --sys= clears it)";
     let Some(raw) = args.iter().find(|a| !a.starts_with("--")) else {
         bail!(usage)
@@ -745,6 +745,10 @@ pub fn cmd_set(args: &[String]) -> Result<()> {
             .map(str::to_string)
     };
     let (dir, extra, sys) = (flag("--dir="), flag("--extra="), flag("--sys="));
+    let carry = args.iter().any(|a| a == "--move");
+    if carry && dir.is_none() {
+        bail!("--move goes with --dir: it carries the conversation to the new directory");
+    }
     let matrix = match flag("--matrix=").as_deref().map(str::trim) {
         None => None,
         Some("on" | "yes" | "true" | "1") => Some(true),
@@ -773,7 +777,48 @@ pub fn cmd_set(args: &[String]) -> Result<()> {
     };
 
     let sock = crate::paths::sock_path(name);
-    let (_, state) = query_agent(&sock).with_context(|| format!("no live agent named '{name}'"))?;
+    let (meta, state) =
+        query_agent(&sock).with_context(|| format!("no live agent named '{name}'"))?;
+    // A Claude conversation is filed by the directory it ran in, so --move
+    // carries it (and the old directory's memories, as a copy) to the new one.
+    // Only while asleep: a running claude is still writing the transcript.
+    let carried = match (&dir, carry) {
+        (Some(new), true) => {
+            let kind = crate::record::all()
+                .into_iter()
+                .find(|n| n.name == name)
+                .map(|n| n.kind);
+            if kind.as_deref().is_some_and(|k| k != "claude") {
+                println!(
+                    "warren: (--move: '{name}' is not a Claude agent; its sessions are not filed by directory)"
+                );
+                None
+            } else {
+                // One still falling asleep gets a moment to finish.
+                let deadline = Instant::now() + Duration::from_secs(30);
+                let mut power = state.power;
+                while power == Power::Sleeping && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(250));
+                    power = query_agent(&sock).map_or(power, |(_, s)| s.power);
+                }
+                if power != Power::Asleep {
+                    bail!(
+                        "'{name}' is running; `warren sleep {name}` first, then --move, then `warren wake {name}`"
+                    );
+                }
+                let session = state
+                    .session
+                    .clone()
+                    .with_context(|| format!("'{name}' has no conversation to move"))?;
+                Some(crate::procs::move_conversation(
+                    &session,
+                    Path::new(&meta.cwd),
+                    Path::new(new),
+                )?)
+            }
+        }
+        _ => None,
+    };
     let mut stream = UnixStream::connect(&sock)?;
     stream.set_write_timeout(Some(Duration::from_millis(500)))?;
     let msg = ToDaemon::SetLaunch {
@@ -842,6 +887,9 @@ pub fn cmd_set(args: &[String]) -> Result<()> {
         "from its next start (it is running now; sleep and wake it to apply)"
     };
     println!("warren: '{name}' {} — {when}", what.join(", "));
+    if let Some(note) = carried {
+        println!("warren: {note}");
+    }
     if !landed {
         println!("warren: (sent; '{name}' has no conversation yet, so there was no note to check)");
     }

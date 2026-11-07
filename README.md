@@ -124,7 +124,7 @@ warren kill NAME       terminate an agent
 warren sleep NAME      stop its claude process, keep the agent (resumable)
                        --force: even mid-turn
 warren wake NAME       start it again on the same conversation
-warren set NAME [--dir=DIR] [--extra=ARGS] [--sys=PROMPT] [--matrix=on|off]
+warren set NAME [--dir=DIR [--move]] [--extra=ARGS] [--sys=PROMPT] [--matrix=on|off]
                        change how an agent starts, from its next start on
                        (an empty --extra= or --sys= clears it)
 warren join NAME ROOM  invite an agent to a Matrix room (see Chat)
@@ -147,7 +147,11 @@ the page.
 
 To move an agent to another directory, `:set dir ~/new/place` on it in the
 dashboard (or `warren set NAME --dir=…`), then sleep and wake it. Claude
-finds the conversation by its id wherever the agent now runs.
+finds the conversation by its id wherever the agent now runs. Its memory,
+though, is keyed by directory: to give it the old directory's memories too,
+sleep it and run `warren set NAME --dir=… --move`, which moves the
+transcript to the new directory's folder and copies the memories (unless the
+new directory already has some), then wake it.
 
 ### Inside the dashboard
 

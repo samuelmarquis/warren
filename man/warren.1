@@ -34,7 +34,8 @@ warren \- a colony of Claude Code and OMP agents from one terminal
 .B warren set
 .I NAME
 .RB [ \-\-dir=\c
-.IR DIR ]
+.IR DIR
+.RB [ \-\-move ]]
 .RB [ \-\-extra=\c
 .IR ARGS ]
 .RB [ \-\-sys=\c
@@ -156,6 +157,14 @@ or
 clears it.
 Nothing restarts; sleep and wake a running agent to apply it.
 Agents whose daemon predates this command say so, and must be made again.
+Claude resumes a conversation by its id from any directory, but keys memory
+by directory.
+.B \-\-move
+(with
+.BR \-\-dir ,
+on a sleeping Claude agent) moves the transcript to the new directory's
+project folder and copies the old directory's memories there, unless it
+already has some.
 .TP
 .BI "warren join " "NAME ROOM"
 Invite the agent to a Matrix room

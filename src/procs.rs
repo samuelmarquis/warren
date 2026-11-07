@@ -3,7 +3,7 @@
 //! `warren cycle`, which waits for it to end, and the daemon, which reports it
 //! so the sidebar can show it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 /// A subagent transcript written to this recently means the subagent is live.
@@ -154,6 +154,79 @@ pub(crate) fn transcript(session: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// The folder Claude Code files a directory's conversations and memory under:
+/// the path with every character but a letter or digit made a `-`.
+fn project_key(cwd: &Path) -> String {
+    cwd.to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// Move a conversation's transcript (and its folder of subagents and tool
+/// results) from wherever it is filed to `to`'s project folder, and copy
+/// `from`'s memories there if `to` has none yet. Says what it did.
+pub(crate) fn move_conversation(session: &str, from: &Path, to: &Path) -> anyhow::Result<String> {
+    move_conversation_in(&claude_projects(), session, from, to)
+}
+
+fn move_conversation_in(
+    projects: &Path,
+    session: &str,
+    from: &Path,
+    to: &Path,
+) -> anyhow::Result<String> {
+    use anyhow::{Context, bail};
+    let src = std::fs::read_dir(projects)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|p| p.path().join(format!("{session}.jsonl")))
+        .find(|p| p.is_file())
+        .with_context(|| format!("no transcript for session {session}"))?;
+    let project_dir = |d: &Path| projects.join(project_key(d));
+    let dst_dir = project_dir(to);
+    std::fs::create_dir_all(&dst_dir)?;
+    let dst = dst_dir.join(format!("{session}.jsonl"));
+    let mut said = Vec::new();
+    if src != dst {
+        if dst.exists() {
+            bail!("{} already exists", dst.display());
+        }
+        std::fs::rename(&src, &dst).with_context(|| format!("moving {}", src.display()))?;
+        let side = src.with_extension("");
+        if side.is_dir() {
+            std::fs::rename(&side, dst_dir.join(session))?;
+        }
+        said.push(format!("moved its conversation to {}", dst_dir.display()));
+    }
+    let (old_mem, new_mem) = (project_dir(from).join("memory"), dst_dir.join("memory"));
+    // Claude makes an empty memory folder wherever it starts, so empty counts as none.
+    let empty = |d: &Path| std::fs::read_dir(d).map_or(true, |mut e| e.next().is_none());
+    if old_mem.is_dir() && old_mem != new_mem && empty(&new_mem) {
+        copy_tree(&old_mem, &new_mem)?;
+        said.push(format!("copied {}'s memories", from.display()));
+    }
+    Ok(if said.is_empty() {
+        "nothing to move".into()
+    } else {
+        said.join("; ")
+    })
+}
+
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for e in std::fs::read_dir(from)?.flatten() {
+        let (p, q) = (e.path(), to.join(e.file_name()));
+        if p.is_dir() {
+            copy_tree(&p, &q)?
+        } else {
+            std::fs::copy(&p, &q).map(|_| ())?
+        }
+    }
+    Ok(())
+}
+
 /// Claude Code writes each subagent's transcript under
 /// `projects/<project>/<session>/subagents/` as it goes.
 fn subagent_live(session: &str) -> bool {
@@ -184,6 +257,47 @@ fn subagent_live(session: &str) -> bool {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn a_conversation_moves_with_its_folder_and_the_old_memories_are_copied() {
+        let tmp = std::env::temp_dir().join(format!("warren-move-{}", std::process::id()));
+        let (from, to) = (
+            Path::new("/r/open-audio"),
+            Path::new("/r/open-audio/agents/my.celium"),
+        );
+        assert_eq!(project_key(to), "-r-open-audio-agents-my-celium");
+        let old = tmp.join("-r-open-audio");
+        std::fs::create_dir_all(old.join("s1/subagents")).unwrap();
+        std::fs::create_dir_all(old.join("memory")).unwrap();
+        std::fs::write(old.join("s1.jsonl"), "{}").unwrap();
+        std::fs::write(old.join("memory/MEMORY.md"), "- a note").unwrap();
+        let said = move_conversation_in(&tmp, "s1", from, to).unwrap();
+        let new = tmp.join("-r-open-audio-agents-my-celium");
+        assert!(
+            new.join("s1.jsonl").is_file() && new.join("s1/subagents").is_dir(),
+            "{said}"
+        );
+        assert!(!old.join("s1.jsonl").exists() && !old.join("s1").exists());
+        assert_eq!(
+            std::fs::read_to_string(new.join("memory/MEMORY.md")).unwrap(),
+            "- a note"
+        );
+        assert!(
+            old.join("memory/MEMORY.md").is_file(),
+            "the pool stays for the others"
+        );
+        // Again: nothing left to move, and memories already there are kept.
+        std::fs::write(new.join("memory/MEMORY.md"), "- pruned").unwrap();
+        assert_eq!(
+            move_conversation_in(&tmp, "s1", from, to).unwrap(),
+            "nothing to move"
+        );
+        assert_eq!(
+            std::fs::read_to_string(new.join("memory/MEMORY.md")).unwrap(),
+            "- pruned"
+        );
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
 
     fn tree(rows: &[(i32, i32, &str)]) -> (impl Fn(i32) -> Vec<i32>, impl Fn(i32) -> String) {
         let mut kids: HashMap<i32, Vec<i32>> = HashMap::new();
