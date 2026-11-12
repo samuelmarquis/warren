@@ -245,6 +245,7 @@ fn rename_key(dash: &mut Dash, bytes: &[u8]) -> (usize, Option<Outcome>) {
                         color: None,
                         pinned: Some(true),
                         slot: None,
+                        retitle: true,
                     });
                 }
             }
@@ -317,6 +318,7 @@ fn run_command(dash: &mut Dash, cmd: &str) -> Option<Outcome> {
                         color: Some(color),
                         pinned: None,
                         slot: None,
+                        retitle: false,
                     });
                 }
             }

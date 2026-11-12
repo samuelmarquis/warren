@@ -458,6 +458,7 @@ impl Dash {
             color: None,
             pinned: None,
             slot: Some(a_slot),
+            retitle: false,
         });
         let focused = &mut self.agents[self.focus];
         focused.send(&ToDaemon::SetMeta {
@@ -465,6 +466,7 @@ impl Dash {
             color: None,
             pinned: None,
             slot: Some(b_slot),
+            retitle: false,
         });
     }
 }

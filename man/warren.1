@@ -45,6 +45,10 @@ warren \- a colony of Claude Code and OMP agents from one terminal
 .B warren join
 .I NAME ROOM
 .br
+.B warren rename
+.I NAME NEW-NAME
+.RB [ \-\-force ]
+.br
 .B warren renew
 .I NAME
 .RB [ \-\-matrix=on | off ]
@@ -173,6 +177,22 @@ or
 .IR !room-id ),
 from warren's own account, which must be in that room.
 The agent must have claimed a chat name.
+.TP
+.BI "warren rename " "NAME NEW-NAME"
+Give the agent a new name: the one
+.B warren
+takes on the command line, its row's label, and its Claude Code session's
+title.
+It is put to sleep (refused mid-turn without
+.BR \-\-force ),
+and what is kept under its name \(em its note, its chat profile directory,
+its socket \(em moves to the new one; then it is restored and woken if it
+was awake.
+The conversation, directory, colour, slot and chat account stay.
+Claude Code hears the name as
+.B /rename
+once the agent sits idle with nothing typed in its prompt, as it does after
+a rename in the dashboard.
 .TP
 .BI "warren renew " NAME
 Move the agent onto the warren this command runs from.

@@ -1109,6 +1109,7 @@ pub fn edit_key(dash: &mut Dash, bytes: &[u8]) -> usize {
                     color: Some(color),
                     pinned: rename.then_some(true),
                     slot: None,
+                    retitle: rename,
                 });
                 agent.full_dirty = true;
             }

@@ -541,7 +541,7 @@ pub fn restore_agent(note: &crate::record::Record) -> Result<String> {
     while Instant::now() < deadline {
         if query_agent(&sock).is_some() {
             if note.display != note.name {
-                let _ = rename_to(&sock, &note.display, note.pinned);
+                let _ = rename_to(&sock, &note.display, note.pinned, false);
             }
             return Ok(note.name.clone());
         }
@@ -550,8 +550,9 @@ pub fn restore_agent(note: &crate::record::Record) -> Result<String> {
     bail!("agent '{}' did not come up", note.name)
 }
 
-/// The label the row had, handed back to the daemon that now owns it.
-fn rename_to(sock: &Path, display: &str, pinned: bool) -> Result<()> {
+/// The label the row had, handed back to the daemon that now owns it — or,
+/// with `retitle`, a new name, which Claude Code is told as well.
+fn rename_to(sock: &Path, display: &str, pinned: bool, retitle: bool) -> Result<()> {
     let mut stream = UnixStream::connect(sock)?;
     stream.set_write_timeout(Some(Duration::from_millis(500)))?;
     let frame = proto::encode_frame(&ToDaemon::SetMeta {
@@ -559,6 +560,7 @@ fn rename_to(sock: &Path, display: &str, pinned: bool) -> Result<()> {
         color: None,
         pinned: Some(pinned),
         slot: None,
+        retitle,
     })?;
     stream.write_all(&frame)?;
     Ok(())
@@ -1122,6 +1124,96 @@ pub fn cmd_join(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+// --------------------------------------------------------------------- rename
+
+/// `warren rename OLD NEW`: give an agent a new name — the one `warren` takes
+/// on the command line, its row's label, and its Claude Code session's title.
+/// The conversation, directory, colour, slot and chat account all stay; what
+/// is keyed by the name (the note, the chat profile directory, the socket)
+/// moves to the new one. It is renew's stop and restore, under the new name.
+pub fn cmd_rename(args: &[String]) -> Result<()> {
+    let usage = "usage: warren rename NAME NEW-NAME [--force]";
+    let names: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+    let [old, new] = names.as_slice() else {
+        bail!(usage)
+    };
+    let force = args.iter().any(|a| a == "--force");
+    let (old, new) = (named(old)?, named(new)?);
+    if old == new {
+        bail!("'{old}' is its name already");
+    }
+    let new_sock = crate::paths::sock_path(new);
+    if query_agent(&new_sock).is_some() {
+        bail!("there is an agent named '{new}' already");
+    }
+    if crate::record::get(new).is_some() {
+        bail!(
+            "'{new}' has a note from an agent this machine lost — `warren restore {new}` or remove it first"
+        );
+    }
+    let (old_chat, new_chat) = (crate::matrix::agent_dir(old), crate::matrix::agent_dir(new));
+    if old_chat != new_chat && new_chat.exists() {
+        bail!("{} exists already; nothing was changed", new_chat.display());
+    }
+    if crate::matrix::config()?.is_some_and(|c| c.agents.contains_key(old)) {
+        eprintln!(
+            "warren: note: ~/.warren/matrix.json has settings under agents.\"{old}\" — rename that key to \"{new}\" by hand"
+        );
+    }
+
+    let (note, was_awake, _lock) = stop_keeping_note(old, force)?;
+    let moved_chat = old_chat != new_chat && old_chat.exists();
+    let renamed = crate::record::Record {
+        name: new.to_string(),
+        display: new.to_string(),
+        pinned: true,
+        ..note.clone()
+    };
+    let up = (|| -> Result<()> {
+        if moved_chat {
+            std::fs::rename(&old_chat, &new_chat)
+                .with_context(|| format!("moving {}", old_chat.display()))?;
+        }
+        crate::record::save(&renamed);
+        restore_agent(&renamed)?;
+        Ok(())
+    })();
+    if let Err(e) = up {
+        // Put it back the way it was, under the old name.
+        crate::record::forget(new);
+        let _ = std::fs::remove_file(&new_sock);
+        if moved_chat && new_chat.exists() && !old_chat.exists() {
+            let _ = std::fs::rename(&new_chat, &old_chat);
+        }
+        crate::record::save(&note);
+        let back = restore_agent(&note);
+        bail!(
+            "could not bring it up as '{new}': {e:#}; {}",
+            match back {
+                Ok(_) => format!("it is back as '{old}' (asleep)"),
+                Err(e2) => format!("and not as '{old}' either ({e2:#}): `warren restore {old}`"),
+            }
+        );
+    }
+    crate::record::forget(old);
+    // The conversation still calls itself by the old name: have Claude Code
+    // take the new one when it is next idle.
+    let _ = rename_to(&new_sock, new, true, true);
+    drop(_lock);
+    if was_awake {
+        cmd_power(&[new.to_string()], true)?;
+    }
+    println!(
+        "warren: '{old}' is now '{new}'{}",
+        if moved_chat {
+            ", with its chat profile"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
 // ---------------------------------------------------------------------- renew
 
 /// `warren renew NAME [--matrix=on|off] [--force]`: the same agent, on this
@@ -1155,6 +1247,36 @@ pub fn cmd_renew(args: &[String]) -> Result<()> {
         );
     }
 
+    let (mut note, was_awake, _lock) = stop_keeping_note(name, force)?;
+
+    if let Some(on) = matrix {
+        note.matrix = on;
+        crate::record::save(&note);
+    }
+    restore_agent(&note)?;
+    if was_awake {
+        cmd_power(&[name.to_string()], true)?;
+    }
+    println!(
+        "warren: renewed '{name}'{}",
+        match matrix {
+            Some(true) => ", with chat",
+            Some(false) => ", without chat",
+            None => "",
+        }
+    );
+    Ok(())
+}
+
+/// Put the agent to sleep if it is awake (refusing mid-turn unless forced),
+/// then stop its daemon the way a shutdown would, so its note stays. Hands
+/// back the note to restore it from, whether it was awake, and the notes
+/// lock, which the caller holds until the agent is up again: a dashboard
+/// opening in between would otherwise restore the note as well.
+fn stop_keeping_note(
+    name: &str,
+    force: bool,
+) -> Result<(crate::record::Record, bool, Option<std::fs::File>)> {
     let sock = crate::paths::sock_path(name);
     let (_, state) = query_agent(&sock).with_context(|| format!("no live agent named '{name}'"))?;
     let was_awake = !state.power.is_down();
@@ -1185,7 +1307,7 @@ pub fn cmd_renew(args: &[String]) -> Result<()> {
     // What it will come back from. An asleep agent with a session has one;
     // if it is missing, stop here, while the agent is still whole.
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut note = loop {
+    let note = loop {
         let session = query_agent(&sock).and_then(|(_, s)| s.session);
         let found = crate::record::all().into_iter().find(|n| n.name == name);
         match (found, session) {
@@ -1195,9 +1317,7 @@ pub fn cmd_renew(args: &[String]) -> Result<()> {
         }
     };
 
-    // Held from the old daemon's end to the new one's start: a dashboard
-    // opening in between would otherwise restore this note as well.
-    let _lock = crate::record::lock();
+    let lock = crate::record::lock();
     let pid =
         daemon_pid(&sock).with_context(|| format!("could not find the process behind '{name}'"))?;
     // SIGKILL, as a shutdown would: the daemon gets no chance to treat this
@@ -1213,24 +1333,7 @@ pub fn cmd_renew(args: &[String]) -> Result<()> {
         std::thread::sleep(Duration::from_millis(50));
     }
     let _ = std::fs::remove_file(&sock);
-
-    if let Some(on) = matrix {
-        note.matrix = on;
-        crate::record::save(&note);
-    }
-    restore_agent(&note)?;
-    if was_awake {
-        cmd_power(&[name.to_string()], true)?;
-    }
-    println!(
-        "warren: renewed '{name}'{}",
-        match matrix {
-            Some(true) => ", with chat",
-            Some(false) => ", without chat",
-            None => "",
-        }
-    );
-    Ok(())
+    Ok((note, was_awake, lock))
 }
 
 /// The process listening on an agent's socket: its daemon.

@@ -185,6 +185,11 @@ pub enum ToDaemon {
         color: Option<u8>,
         pinned: Option<bool>,
         slot: Option<u8>,
+        /// The name is a rename someone asked for, so Claude Code is told
+        /// too (`/rename`). Off for the row's label being handed back, as a
+        /// restore does: the conversation already has its name.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        retitle: bool,
     },
     /// From `warren hook` (Claude lifecycle hooks).
     HookState(HookState),
@@ -400,6 +405,7 @@ mod tests {
                 color: None,
                 pinned: Some(true),
                 slot: None,
+                retitle: true,
             },
             ToDaemon::HookState(HookState::Attention),
             ToDaemon::Session("0199b4c1-7f3e-4b2a-9d18-2c6f5a0e77bd".into()),

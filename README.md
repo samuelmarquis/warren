@@ -128,6 +128,10 @@ warren set NAME [--dir=DIR [--move]] [--extra=ARGS] [--sys=PROMPT] [--matrix=on|
                        change how an agent starts, from its next start on
                        (an empty --extra= or --sys= clears it)
 warren join NAME ROOM  invite an agent to a Matrix room (see Chat)
+warren rename NAME NEW-NAME [--force]
+                       a new name everywhere: what warren calls it, its row,
+                       and its Claude session's title (told with /rename once
+                       it is idle); conversation, chat account and slot stay
 warren renew NAME [--matrix=on|off] [--force]
                        the same agent on a fresh daemon from this warren; a
                        daemon keeps the binary it started from, so this is
@@ -169,7 +173,7 @@ color-coded (CLAUDE orange, NORMAL green, EDIT purple):
 | `g` / `G` | first / last agent |
 | `n` | new-agent form |
 | `i` `a` `l` `Enter` `Esc` | back to CLAUDE |
-| `r` | rename (pins the name against Claude's title sync) |
+| `r` | rename (pins the name against Claude's title sync, and tells Claude with `/rename` once it is idle) |
 | `e` / `c` | edit form: title + 256-color picker |
 | `z` | sleep the agent (or wake a sleeping one) |
 | `Z` | sleep it even mid-turn, losing the turn (restart a stuck or updated claude) |

@@ -80,6 +80,11 @@ const SESSION_PROBE_EVERY: Duration = Duration::from_millis(300);
 const SESSION_PROBE_FOR: Duration = Duration::from_secs(20);
 /// How often an awake agent is checked for work left running after its turn.
 const BACKGROUND_EVERY: Duration = Duration::from_secs(3);
+/// How long the screen must sit still before a `/rename` is typed: a prompt
+/// still being drawn may not be taking keys yet.
+const RETITLE_QUIET: Duration = Duration::from_secs(2);
+/// The gap between typing `/rename NAME` and pressing Enter.
+const RETITLE_ENTER_AFTER: Duration = Duration::from_millis(400);
 /// Claude Code repaints at least every second all through a turn (the
 /// spinner and its timer run even while a tool is silent). A "working" hook
 /// with the screen this still for this long, and a transcript that ends its
@@ -358,6 +363,17 @@ struct Daemon {
     /// The note last written to disk, so an unchanged one is not rewritten
     /// on every turn of the loop.
     noted: Option<crate::record::Record>,
+    /// A name given to the row that Claude Code has not heard yet. It is
+    /// typed in as `/rename` once the agent sits idle at an empty prompt, so
+    /// the session's own title (its terminal title, the resume picker, every
+    /// later resume) says the same as the sidebar.
+    retitle: Option<String>,
+    /// `/rename …` is typed; the Enter goes in a moment later, apart from the
+    /// text, so it reads as a keypress rather than part of a paste.
+    retitle_enter_at: Option<Instant>,
+    /// Someone typed at the agent since its last turn began: the prompt may
+    /// hold a draft, and a `/rename` typed over it would mangle both.
+    typed_since_turn: bool,
 }
 
 pub fn run(args: DaemonArgs) -> Result<()> {
@@ -503,6 +519,9 @@ pub fn run(args: DaemonArgs) -> Result<()> {
         log,
         started: Instant::now(),
         noted: None,
+        retitle: None,
+        retitle_enter_at: None,
+        typed_since_turn: false,
     };
 
     // Up: anything said on stderr from here on is not a reason it failed to
@@ -580,9 +599,14 @@ impl Daemon {
             // Wake for whichever comes first: the damage timer, or a stop
             // signal that needs escalating.
             let mut timeout = flush_at.map(|at| at.saturating_duration_since(Instant::now()));
-            for at in [self.sleep_deadline, self.probe_at, self.background_at]
-                .into_iter()
-                .flatten()
+            for at in [
+                self.sleep_deadline,
+                self.probe_at,
+                self.background_at,
+                self.retitle_enter_at,
+            ]
+            .into_iter()
+            .flatten()
             {
                 let until = at.saturating_duration_since(Instant::now());
                 timeout = Some(timeout.map_or(until, |t: Duration| t.min(until)));
@@ -661,6 +685,7 @@ impl Daemon {
             self.escalate_sleep();
             self.poll_session();
             self.poll_background();
+            self.deliver_retitle();
             self.remember();
 
             // Damage coalescing: first dirtying event arms the timer; the
@@ -1098,6 +1123,7 @@ impl Daemon {
                     // cap keeps a wake that never lands from growing a heap.
                     if self.pty.is_some() || self.pty_in.len() + bytes.len() <= ASLEEP_INPUT_CAP {
                         self.pty_in.extend_from_slice(&bytes);
+                        self.typed_since_turn = true;
                     }
                 }
                 self.unscroll(key);
@@ -1136,8 +1162,14 @@ impl Daemon {
                 color,
                 pinned,
                 slot,
+                retitle,
             } => {
                 if let Some(n) = name {
+                    // Claude Code can be told; OMP has no rename, and the
+                    // pinned row is all it gets.
+                    if retitle && self.spawn.kind == crate::kind::Kind::Claude {
+                        self.retitle = Some(n.clone());
+                    }
                     self.meta.display = n;
                 }
                 if let Some(c) = color {
@@ -1185,6 +1217,10 @@ impl Daemon {
             }
             ToDaemon::HookState(state) => {
                 self.hook = Some(state);
+                if state == HookState::Working {
+                    // Whatever was typed went in with the prompt.
+                    self.typed_since_turn = false;
+                }
                 // A turn just ended or began: look now, not in a few seconds.
                 if self.background_at.is_some() {
                     self.background_at = Some(Instant::now());
@@ -1598,6 +1634,44 @@ impl Daemon {
                 _ => {}
             }
         }
+    }
+
+    /// Type a pending `/rename` into Claude Code, when that cannot land in
+    /// the middle of anything: awake, idle by the hooks' word, the screen
+    /// settled, and nothing typed since the last prompt went in.
+    fn deliver_retitle(&mut self) {
+        if let Some(at) = self.retitle_enter_at {
+            if Instant::now() >= at {
+                self.retitle_enter_at = None;
+                if self.pty.is_some() {
+                    self.pty_in.push(b'\r');
+                    // Our own keys, not a draft of someone's.
+                    self.typed_since_turn = false;
+                }
+            }
+            return;
+        }
+        if self.retitle.is_none()
+            || self.pty.is_none()
+            || self.power != Power::Awake
+            || self.hook != Some(HookState::Waiting)
+            || self.typed_since_turn
+            || self.last_output.elapsed() < RETITLE_QUIET
+        {
+            return;
+        }
+        let Some(name) = self.retitle.take() else {
+            return;
+        };
+        let name: String = name.chars().filter(|c| !c.is_control()).collect();
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        self.logf(&format!("retitle: /rename {name}"));
+        self.pty_in
+            .extend_from_slice(format!("/rename {name}").as_bytes());
+        self.retitle_enter_at = Some(Instant::now() + RETITLE_ENTER_AFTER);
     }
 
     /// v0 dvtm's warren_sync_name: mirror Claude's terminal title into the

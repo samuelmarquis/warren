@@ -47,6 +47,9 @@ warren - a Claude Code agent multiplexer
                          (--move, while asleep: carry the conversation to DIR
                          and merge the old directory's memories into DIR's)
   warren join NAME ROOM  invite an agent to a Matrix room (chat; see man warren)
+  warren rename NAME NEW-NAME [--force]
+                         give an agent a new name: the command line's, the
+                         row's and its Claude session's; same conversation
   warren renew NAME [--matrix=on|off] [--force]
                          move an agent onto this warren (its daemon keeps the
                          binary it started from), optionally turning chat on
@@ -81,6 +84,7 @@ fn main() {
         "wake" => cli::cmd_power(rest, true),
         "set" => cli::cmd_set(rest),
         "join" => cli::cmd_join(rest),
+        "rename" => cli::cmd_rename(rest),
         "renew" => cli::cmd_renew(rest),
         "cycle" => cycle::cmd_cycle(rest),
         "attach" => cli::cmd_attach(rest),

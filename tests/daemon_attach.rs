@@ -909,6 +909,7 @@ fn pinned_name_resists_title_sync() {
         color: None,
         pinned: Some(true),
         slot: None,
+        retitle: false,
     });
     let renamed = viewer.await_frame(
         5_000,
@@ -2294,6 +2295,7 @@ fn agents_lost_with_the_machine_come_back_asleep() {
             color: Some(33),
             pinned: Some(true),
             slot: None,
+            retitle: false,
         });
         let named = viewer.await_frame(
             5_000,
@@ -4377,4 +4379,169 @@ fn an_unwritten_session_id_does_not_replace_a_written_one() {
         Some("conv-new"),
         "and moved once it was written"
     );
+}
+
+/// `warren hook STATE`, as Claude Code's hooks run it, with a session id.
+fn hook(sock: &Path, state: &str, sid: &str) {
+    let mut hook = Command::new(BIN)
+        .env("WARREN_SOCK", sock)
+        .args(["hook", state])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(format!(r#"{{"session_id":"{sid}"}}"#).as_bytes())
+        .unwrap();
+    assert!(hook.wait().unwrap().success());
+}
+
+fn screen_of(sock: &Path) -> String {
+    let (_, snap) = Viewer::attach(sock, 80, 24);
+    let ToClient::Snapshot { screen, .. } = snap else {
+        unreachable!()
+    };
+    screen_text(&screen)
+}
+
+fn wait_for_screen(sock: &Path, needle: &str, ms: u64) -> bool {
+    let deadline = Instant::now() + Duration::from_millis(ms);
+    while Instant::now() < deadline {
+        if screen_of(sock).contains(needle) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    false
+}
+
+#[test]
+fn a_rename_reaches_claude_code_once_it_sits_idle_at_an_empty_prompt() {
+    let home = TestHome::new("retitle");
+    // The terminal echoes what is typed, so the screen shows what Claude
+    // would get; cat's own copy of each line goes nowhere.
+    new_agent(&home, "retitled", "cat >/dev/null");
+    let sock = home.sock("retitled");
+    hook(&sock, "working", "conv-r");
+
+    let (mut viewer, _) = Viewer::attach(&sock, 80, 24);
+    viewer.send(&ToDaemon::SetMeta {
+        name: Some("fresh-name".into()),
+        color: None,
+        pinned: Some(true),
+        slot: None,
+        retitle: true,
+    });
+    // Mid-turn, nothing is typed.
+    std::thread::sleep(Duration::from_millis(3_000));
+    assert!(!screen_of(&sock).contains("/rename"), "not while it works");
+
+    // Idle, but with a draft in the prompt: still nothing.
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"a draft")));
+    hook(&sock, "waiting", "conv-r");
+    std::thread::sleep(Duration::from_millis(3_000));
+    assert!(
+        !screen_of(&sock).contains("/rename"),
+        "not over someone's draft"
+    );
+
+    // The draft goes in with the next prompt; when that turn ends, it lands.
+    hook(&sock, "working", "conv-r");
+    hook(&sock, "waiting", "conv-r");
+    assert!(
+        wait_for_screen(&sock, "/rename fresh-name", 6_000),
+        "typed once idle: {}",
+        screen_of(&sock)
+    );
+    // Once.
+    std::thread::sleep(Duration::from_millis(3_000));
+    assert_eq!(screen_of(&sock).matches("/rename").count(), 1);
+}
+
+#[test]
+fn a_label_handed_back_is_not_a_rename() {
+    let home = TestHome::new("relabel");
+    new_agent(&home, "relabelled", "cat");
+    let sock = home.sock("relabelled");
+    let (mut viewer, _) = Viewer::attach(&sock, 80, 24);
+    viewer.send(&ToDaemon::SetMeta {
+        name: Some("same-as-ever".into()),
+        color: None,
+        pinned: Some(true),
+        slot: None,
+        retitle: false,
+    });
+    hook(&sock, "waiting", "conv-l");
+    std::thread::sleep(Duration::from_millis(3_500));
+    assert!(!screen_of(&sock).contains("/rename"));
+}
+
+#[test]
+fn rename_moves_the_agent_and_what_is_kept_under_its_name() {
+    let home = TestHome::new("rename");
+    new_agent(&home, "oldname", "cat");
+    let sock = home.sock("oldname");
+    hook(&sock, "waiting", "conv-n");
+    let note = home.dir.join("notes").join("oldname.json");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !std::fs::read_to_string(&note)
+        .unwrap_or_default()
+        .contains("conv-n")
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // A chat profile, as one with an account would have.
+    let chat = home.dir.join("matrix").join("oldname");
+    std::fs::create_dir_all(&chat).unwrap();
+    std::fs::write(chat.join("identity.json"), "{}").unwrap();
+
+    // Not over another agent.
+    new_agent(&home, "taken", "cat");
+    let out = home
+        .warren("cat")
+        .args(["rename", "oldname", "taken"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "a name in use is refused");
+    assert!(sock.exists(), "and nothing changed");
+
+    let out = home
+        .warren("cat")
+        .args(["rename", "oldname", "newname"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let new_sock = home.sock("newname");
+    assert!(new_sock.exists(), "it answers to the new name");
+    assert!(!sock.exists(), "and not the old one");
+    assert!(!note.exists(), "the old note is gone");
+    let new_note = std::fs::read_to_string(home.dir.join("notes").join("newname.json")).unwrap();
+    assert!(
+        new_note.contains("\"name\": \"newname\"") && new_note.contains("conv-n"),
+        "{new_note}"
+    );
+    assert!(!chat.exists(), "the chat profile moved");
+    assert!(
+        home.dir
+            .join("matrix")
+            .join("newname")
+            .join("identity.json")
+            .exists()
+    );
+
+    // Awake again, on the same conversation, under the new label.
+    let (_, snap) = Viewer::attach(&new_sock, 80, 24);
+    let ToClient::Snapshot { meta, state, .. } = snap else {
+        unreachable!()
+    };
+    assert_eq!(meta.display, "newname");
+    assert_eq!(state.session.as_deref(), Some("conv-n"));
+    assert_ne!(state.power, Power::Asleep, "it was awake, so it is woken");
 }
