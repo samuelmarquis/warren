@@ -85,6 +85,9 @@ const BACKGROUND_EVERY: Duration = Duration::from_secs(3);
 const RETITLE_QUIET: Duration = Duration::from_secs(2);
 /// The gap between typing `/rename NAME` and pressing Enter.
 const RETITLE_ENTER_AFTER: Duration = Duration::from_millis(400);
+/// Hold off pasting a `<channel …>` wake while someone is actively typing in
+/// the prompt, without letting an old stray keypress deafen the agent forever.
+const CHANNEL_TYPING_QUIET: Duration = Duration::from_secs(10);
 /// Claude Code repaints at least every second all through a turn (the
 /// spinner and its timer run even while a tool is silent). A "working" hook
 /// with the screen this still for this long, and a transcript that ends its
@@ -380,6 +383,9 @@ struct Daemon {
     /// Someone typed at the agent since its last turn began: the prompt may
     /// hold a draft, and a `/rename` typed over it would mangle both.
     typed_since_turn: bool,
+    /// Last printable keypress from a viewer: holds off idle `<channel …>`
+    /// pastes mid-sentence without blocking permanently on stray keys.
+    last_typed: Option<Instant>,
     /// Pushed `<channel …>` events from `warren __mcp`, waiting either for an
     /// idle Antigravity prompt (woken via bracketed paste) or for a mid-turn
     /// hook (`PreInvocation` / `PostInvocation` / `Stop`) to drain them.
@@ -534,6 +540,7 @@ pub fn run(args: DaemonArgs) -> Result<()> {
         retitle: None,
         retitle_enter_at: None,
         typed_since_turn: false,
+        last_typed: None,
         channel_queue: VecDeque::new(),
         channel_enter_at: None,
     };
@@ -616,6 +623,10 @@ impl Daemon {
             let settle_at = (!self.channel_queue.is_empty() || self.retitle.is_some())
                 .then(|| self.last_output + RETITLE_QUIET)
                 .filter(|&at| at > Instant::now());
+            let typing_at = (!self.channel_queue.is_empty())
+                .then(|| self.last_typed.map(|t| t + CHANNEL_TYPING_QUIET))
+                .flatten()
+                .filter(|&at| at > Instant::now());
             for at in [
                 self.sleep_deadline,
                 self.probe_at,
@@ -623,6 +634,7 @@ impl Daemon {
                 self.retitle_enter_at,
                 self.channel_enter_at,
                 settle_at,
+                typing_at,
             ]
             .into_iter()
             .flatten()
@@ -992,6 +1004,7 @@ impl Daemon {
         self.retitle_enter_at = None;
         self.channel_enter_at = None;
         self.typed_since_turn = !self.pty_in.is_empty();
+        self.last_typed = None;
         self.hook = None; // no process, no lifecycle state
         self.power = Power::Asleep;
         self.flush_frame(); // the frozen screen is the agent's last word
@@ -1147,6 +1160,16 @@ impl Daemon {
                     if self.pty.is_some() || self.pty_in.len() + bytes.len() <= ASLEEP_INPUT_CAP {
                         self.pty_in.extend_from_slice(&bytes);
                         self.typed_since_turn = true;
+                        if bytes
+                            .iter()
+                            .any(|b| matches!(b, b'\r' | b'\n' | 0x03 | 0x15))
+                        {
+                            self.last_typed = None;
+                        } else if !bytes.starts_with(b"\x1b")
+                            && bytes.iter().any(|&b| b >= 0x20 || b == b'\t')
+                        {
+                            self.last_typed = Some(Instant::now());
+                        }
                     }
                 }
                 self.unscroll(key);
@@ -1243,6 +1266,7 @@ impl Daemon {
                 if state == HookState::Working {
                     // Whatever was typed went in with the prompt.
                     self.typed_since_turn = false;
+                    self.last_typed = None;
                 }
                 // A turn just ended or began: look now, not in a few seconds.
                 if self.background_at.is_some() {
@@ -1734,17 +1758,22 @@ impl Daemon {
                 if self.pty.is_some() {
                     self.pty_in.push(b'\r');
                     self.typed_since_turn = false;
+                    self.last_typed = None;
                 }
             }
             return;
         }
+        let idle_prompt = self.hook == Some(HookState::Waiting)
+            || (self.hook.is_none() && self.term.bracketed_paste());
         if self.channel_queue.is_empty()
             || self.retitle.is_some()
             || self.retitle_enter_at.is_some()
             || self.pty.is_none()
             || self.power != Power::Awake
-            || self.hook != Some(HookState::Waiting)
-            || self.typed_since_turn
+            || !idle_prompt
+            || self
+                .last_typed
+                .is_some_and(|t| t.elapsed() < CHANNEL_TYPING_QUIET)
             || self.last_output.elapsed() < RETITLE_QUIET
         {
             return;

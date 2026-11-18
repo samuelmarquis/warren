@@ -4678,11 +4678,12 @@ fn agy_matrix_push_drains_mid_turn_and_wakes_idle_prompt() {
     let noop_txt = String::from_utf8_lossy(&noop_out.stdout);
     assert!(noop_txt.contains("\"tools\":[]"), "{noop_txt}");
 
-    // Fake `matrix_channel.py`: answers MCP initialize, then emits two channel
+    // Fake `matrix_channel.py`: answers MCP initialize, then emits three channel
     // pushes when triggered by files on disk.
     let fake_channel = home.dir.join("fake_channel.sh");
     let trig_mid = home.dir.join("push_mid");
     let trig_idle = home.dir.join("push_idle");
+    let trig_resumed = home.dir.join("push_resumed");
     std::fs::write(
         &fake_channel,
         format!(
@@ -4694,9 +4695,12 @@ fn agy_matrix_push_drains_mid_turn_and_wakes_idle_prompt() {
              printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/claude/channel\",\"params\":{{\"content\":\"mid-turn ping\",\"meta\":{{\"room\":\"!r:x\",\"sender\":\"@sam:x\"}}}}}}'\n\
              while [ ! -f '{idle}' ]; do sleep 0.05; done\n\
              printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/claude/channel\",\"params\":{{\"content\":\"wake up ada\",\"meta\":{{\"room\":\"!r:x\",\"sender\":\"@sam:x\"}}}}}}'\n\
+             while [ ! -f '{resumed}' ]; do sleep 0.05; done\n\
+             printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/claude/channel\",\"params\":{{\"content\":\"after resume\",\"meta\":{{\"room\":\"!r:x\",\"sender\":\"@sam:x\"}}}}}}'\n\
              sleep 30\n",
             mid = trig_mid.display(),
             idle = trig_idle.display(),
+            resumed = trig_resumed.display(),
         ),
     )
     .unwrap();
@@ -4805,13 +4809,15 @@ fn agy_matrix_push_drains_mid_turn_and_wakes_idle_prompt() {
         "expected PostInvocation drain, got: {drained_out}"
     );
 
-    // 2) Idle: agent is Waiting and screen has settled, so a push wakes the pty directly!
+    // 2) Idle: agent is Waiting and screen has settled (even after a stray
+    // escape sequence like an arrow key), so a push wakes the pty directly!
     let (mut viewer, _) = Viewer::attach(&sock, 80, 24);
     let _ = Command::new(BIN)
         .env("WARREN_SOCK", &sock)
         .args(["hook", "waiting"])
         .output()
         .unwrap();
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x1b[A")));
     std::fs::write(&trig_idle, b"1").unwrap();
     let woke = viewer.await_frame(8_000, |m| match m {
         ToClient::Damage { lines, .. } => lines
@@ -4823,6 +4829,44 @@ fn agy_matrix_push_drains_mid_turn_and_wakes_idle_prompt() {
     assert!(
         woke.is_some(),
         "idle pty should be woken by pushed channel message; screen:\n{}",
+        screen_of(&sock)
+    );
+
+    // 3) Resumed from sleep: `finish_sleep` resets `hook` to `None`, and
+    // `agy --conversation <id>` does not fire `SessionStart` on resume. Once
+    // the prompt re-enables bracketed paste and settles, a synced Matrix push
+    // still wakes the pty without waiting for a manual turn.
+    viewer.send(&ToDaemon::Sleep);
+    assert!(
+        viewer
+            .await_frame(8_000, |m| matches!(
+                m,
+                ToClient::StateChanged(s) if s.power == proto::Power::Asleep
+            ))
+            .is_some(),
+        "ada should fall asleep"
+    );
+    viewer.send(&ToDaemon::Wake);
+    assert!(
+        viewer
+            .await_frame(8_000, |m| matches!(
+                m,
+                ToClient::StateChanged(s) if s.power == proto::Power::Awake && s.hook.is_none()
+            ))
+            .is_some(),
+        "ada should wake with hook == None"
+    );
+    std::fs::write(&trig_resumed, b"1").unwrap();
+    let woke_resumed = viewer.await_frame(8_000, |m| match m {
+        ToClient::Damage { lines, .. } => lines
+            .iter()
+            .any(|(_, l)| screen_text(std::slice::from_ref(l)).contains("after resume")),
+        ToClient::Snapshot { screen, .. } => screen_text(screen).contains("after resume"),
+        _ => false,
+    });
+    assert!(
+        woke_resumed.is_some(),
+        "resumed pty with hook == None should be woken by pushed channel message; screen:\n{}",
         screen_of(&sock)
     );
 
