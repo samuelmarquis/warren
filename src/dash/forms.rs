@@ -42,7 +42,7 @@ pub const MODE_FORK: u8 = 3;
 const MODE_LABELS: [&str; 4] = ["new", "resume", "continue", "fork"];
 
 /// The harnesses the form offers, in the order it cycles them.
-pub const KINDS: [Kind; 2] = [Kind::Claude, Kind::Omp];
+pub const KINDS: [Kind; 3] = [Kind::Claude, Kind::Omp, Kind::Agy];
 
 /// A machine one hop away, answering a question the form asked it. Both
 /// kinds of job are polled, never waited on: the dashboard does not block on
@@ -134,8 +134,8 @@ impl NewForm {
         } else {
             self.mode
         };
-        match (self.machines.is_empty(), mode) {
-            (true, MODE_RESUME) => &[
+        match (self.machines.is_empty(), self.agent_kind().has_sys(), mode) {
+            (true, true, MODE_RESUME) => &[
                 NField::Kind,
                 NField::Mode,
                 NField::List,
@@ -143,7 +143,14 @@ impl NewForm {
                 NField::Extra,
                 NField::Color,
             ],
-            (false, MODE_RESUME) => &[
+            (true, false, MODE_RESUME) => &[
+                NField::Kind,
+                NField::Mode,
+                NField::List,
+                NField::Extra,
+                NField::Color,
+            ],
+            (false, true, MODE_RESUME) => &[
                 NField::Machine,
                 NField::Kind,
                 NField::Mode,
@@ -152,7 +159,15 @@ impl NewForm {
                 NField::Extra,
                 NField::Color,
             ],
-            (true, MODE_CONTINUE) => &[
+            (false, false, MODE_RESUME) => &[
+                NField::Machine,
+                NField::Kind,
+                NField::Mode,
+                NField::List,
+                NField::Extra,
+                NField::Color,
+            ],
+            (true, true, MODE_CONTINUE) => &[
                 NField::Kind,
                 NField::Mode,
                 NField::Root,
@@ -160,7 +175,14 @@ impl NewForm {
                 NField::Extra,
                 NField::Color,
             ],
-            (false, MODE_CONTINUE) => &[
+            (true, false, MODE_CONTINUE) => &[
+                NField::Kind,
+                NField::Mode,
+                NField::Root,
+                NField::Extra,
+                NField::Color,
+            ],
+            (false, true, MODE_CONTINUE) => &[
                 NField::Machine,
                 NField::Kind,
                 NField::Mode,
@@ -169,7 +191,15 @@ impl NewForm {
                 NField::Extra,
                 NField::Color,
             ],
-            (true, _) => &[
+            (false, false, MODE_CONTINUE) => &[
+                NField::Machine,
+                NField::Kind,
+                NField::Mode,
+                NField::Root,
+                NField::Extra,
+                NField::Color,
+            ],
+            (true, true, _) => &[
                 NField::Kind,
                 NField::Mode,
                 NField::Title,
@@ -178,13 +208,30 @@ impl NewForm {
                 NField::Extra,
                 NField::Color,
             ],
-            (false, _) => &[
+            (true, false, _) => &[
+                NField::Kind,
+                NField::Mode,
+                NField::Title,
+                NField::Root,
+                NField::Extra,
+                NField::Color,
+            ],
+            (false, true, _) => &[
                 NField::Machine,
                 NField::Kind,
                 NField::Mode,
                 NField::Title,
                 NField::Root,
                 NField::Sys,
+                NField::Extra,
+                NField::Color,
+            ],
+            (false, false, _) => &[
+                NField::Machine,
+                NField::Kind,
+                NField::Mode,
+                NField::Title,
+                NField::Root,
                 NField::Extra,
                 NField::Color,
             ],
@@ -630,7 +677,6 @@ pub fn new_key(dash: &mut Dash, bytes: &[u8]) -> usize {
                     form.follow_machine();
                     form.forget_sessions(); // another machine, other sessions
                     want_sessions = form.picks_session();
-                    form.field = 0;
                 }
             }
             NField::Kind => {
@@ -647,19 +693,19 @@ pub fn new_key(dash: &mut Dash, bytes: &[u8]) -> usize {
                         form.mode = MODE_RESUME;
                     }
                     want_sessions = form.picks_session();
-                    form.field = 0;
                 }
             }
             NField::Mode => {
-                let modes = form.mode_labels().len() as u8;
-                if matches!(key, Key::Char(b'l') | Key::Right) {
-                    form.mode = (form.mode + 1) % modes;
-                    form.field = 0;
-                } else if matches!(key, Key::Char(b'h') | Key::Left) {
-                    form.mode = (form.mode + modes - 1) % modes;
-                    form.field = 0;
+                let modes = form.mode_labels().len();
+                let step = match key {
+                    Key::Char(b'l') | Key::Right | Key::Char(b' ') => 1,
+                    Key::Char(b'h') | Key::Left => modes - 1,
+                    _ => 0,
+                };
+                if step != 0 {
+                    form.mode = ((form.mode as usize + step) % modes) as u8;
+                    want_sessions = form.picks_session();
                 }
-                want_sessions = form.picks_session();
             }
             NField::Title => line_edit(&mut form.title, key),
             NField::Root => line_edit(&mut form.root, key),
@@ -740,7 +786,11 @@ fn submit_new(dash: &mut Dash) {
     let dest = form.dest().map(str::to_string);
     let color = form.color.min(255) as u8;
     let kind = form.agent_kind();
-    let sys = form.sys.trim().to_string();
+    let sys = if kind.has_sys() {
+        form.sys.trim().to_string()
+    } else {
+        String::new()
+    };
     let extra = form.extra.trim().to_string();
     let acked = form.dup_ack.clone();
 
@@ -939,11 +989,11 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
                 field_label(active == NField::List)
             );
             row += 1;
-            // What still has to fit below: the "… N more" line, then Sys,
-            // Extra and Color at two rows each.
-            const BELOW_LIST: usize = 1 + 2 + 2 + 2;
+            // What still has to fit below: the "… N more" line, then (where
+            // offered) Sys, Extra and Color at two rows each.
+            let below_list: usize = 1 + if form.agent_kind().has_sys() { 2 } else { 0 } + 2 + 2;
             let visible = (pane_h as usize)
-                .saturating_sub(row as usize + BELOW_LIST)
+                .saturating_sub(row as usize + below_list)
                 .clamp(1, 12);
             let first = form.sess_sel.saturating_sub(visible - 1);
             for (i, sess) in sessions.iter().enumerate().skip(first).take(visible) {
@@ -1010,17 +1060,19 @@ pub fn draw_new_form(dash: &mut Dash, out: &mut String) {
             );
         }
     }
-    geom.fields.push((row - 1, NField::Sys, Vec::new()));
-    row = draw_text_field(
-        out,
-        row,
-        x0,
-        pane_h,
-        "Sys prompt",
-        &form.sys,
-        active == NField::Sys,
-        insert,
-    );
+    if form.agent_kind().has_sys() {
+        geom.fields.push((row - 1, NField::Sys, Vec::new()));
+        row = draw_text_field(
+            out,
+            row,
+            x0,
+            pane_h,
+            "Sys prompt",
+            &form.sys,
+            active == NField::Sys,
+            insert,
+        );
+    }
     geom.fields.push((row - 1, NField::Extra, Vec::new()));
     row = draw_text_field(
         out,

@@ -31,7 +31,7 @@ let
 in
 {
   options.programs.warren = {
-    enable = lib.mkEnableOption "warren, a dashboard for a colony of Claude Code / OMP agents";
+    enable = lib.mkEnableOption "warren, a dashboard for a colony of Claude Code / OMP / Antigravity agents";
     package = lib.mkOption {
       type = lib.types.package;
       default = self.packages.${pkgs.stdenv.hostPlatform.system}.warren;

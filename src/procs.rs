@@ -98,33 +98,50 @@ pub fn name(pid: i32) -> String {
         .unwrap_or_default()
 }
 
-/// Whether a Claude session's transcript says its last turn is over: an
-/// end-of-turn record (the Stop hook's summary, or the turn's duration)
-/// after the last message. A turn stopped on a permission prompt or a
-/// question has a tool call with nothing after it, and is not over. No
-/// transcript, or one that can't be read, is not evidence either way, so
-/// it says no.
-pub fn turn_ended(session: &str) -> bool {
+/// Whether a session's transcript says its last turn is over: for Claude, an
+/// end-of-turn record (`stop_hook_summary` or `turn_duration`) after the last
+/// message; for Antigravity, a completed `PLANNER_RESPONSE` with no tool calls.
+/// A turn stopped on a permission prompt or a question has a tool call with
+/// nothing after it, and is not over. No transcript, or one that can't be
+/// read, is not evidence either way, so it says no.
+pub fn turn_ended(kind: crate::kind::Kind, session: &str) -> bool {
+    match kind {
+        crate::kind::Kind::Claude => claude_turn_ended(session),
+        crate::kind::Kind::Agy => agy_turn_ended(
+            &crate::paths::agy_brain()
+                .join(session)
+                .join(".system_generated/logs/transcript.jsonl"),
+        ),
+        crate::kind::Kind::Omp => false,
+    }
+}
+
+fn read_tail_lines(path: &Path) -> Option<Vec<String>> {
     use std::io::{Read, Seek, SeekFrom};
-    let Some(path) = transcript(session) else {
-        return false;
-    };
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return false;
-    };
+    let mut f = std::fs::File::open(path).ok()?;
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
     let start = len.saturating_sub(256 * 1024);
     let mut tail = Vec::new();
     if f.seek(SeekFrom::Start(start)).is_err() || f.read_to_end(&mut tail).is_err() {
-        return false;
+        return None;
     }
     let text = String::from_utf8_lossy(&tail);
     let mut lines = text.lines();
     if start > 0 {
         lines.next(); // cut mid-record
     }
-    for line in lines.collect::<Vec<_>>().into_iter().rev() {
-        let Ok(rec) = serde_json::from_str::<serde_json::Value>(line) else {
+    Some(lines.map(str::to_string).collect())
+}
+
+fn claude_turn_ended(session: &str) -> bool {
+    let Some(path) = transcript(session) else {
+        return false;
+    };
+    let Some(lines) = read_tail_lines(&path) else {
+        return false;
+    };
+    for line in lines.into_iter().rev() {
+        let Ok(rec) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
         match (
@@ -133,6 +150,30 @@ pub fn turn_ended(session: &str) -> bool {
         ) {
             (Some("system"), Some("stop_hook_summary" | "turn_duration")) => return true,
             (Some("user" | "assistant"), _) => return false,
+            _ => continue,
+        }
+    }
+    false
+}
+
+fn agy_turn_ended(path: &Path) -> bool {
+    let Some(lines) = read_tail_lines(path) else {
+        return false;
+    };
+    for line in lines.into_iter().rev() {
+        let Ok(rec) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        match rec.get("type").and_then(|v| v.as_str()) {
+            Some("PLANNER_RESPONSE") => {
+                let done = rec.get("status").and_then(|v| v.as_str()) == Some("DONE");
+                let has_tools = rec
+                    .get("tool_calls")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|a| !a.is_empty());
+                return done && !has_tools;
+            }
+            Some("USER_INPUT" | "GENERIC") => return false,
             _ => continue,
         }
     }
@@ -152,6 +193,20 @@ pub(crate) fn transcript(session: &str) -> Option<PathBuf> {
         .flatten()
         .map(|p| p.path().join(format!("{session}.jsonl")))
         .find(|p| p.is_file())
+}
+
+/// Does the harness have a persisted conversation on disk for `session`?
+pub(crate) fn has_transcript(kind: crate::kind::Kind, session: &str) -> bool {
+    match kind {
+        crate::kind::Kind::Claude => transcript(session).is_some(),
+        crate::kind::Kind::Agy => {
+            crate::paths::agy_conversations()
+                .join(format!("{session}.db"))
+                .is_file()
+                || crate::paths::agy_brain().join(session).is_dir()
+        }
+        crate::kind::Kind::Omp => Path::new(session).is_file(),
+    }
 }
 
 /// The folder Claude Code files a directory's conversations and memory under:
@@ -435,5 +490,40 @@ mod tests {
         let parent = unsafe { libc::getppid() };
         assert!(children(parent).contains(&me), "{:?}", children(parent));
         assert!(!name(me).is_empty());
+    }
+
+    #[test]
+    fn agy_transcript_knows_when_its_turn_has_finished() {
+        let tmp = std::env::temp_dir().join(format!("warren-agy-turn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("transcript.jsonl");
+
+        // Mid-turn: model emitted tool_calls and has not answered yet.
+        std::fs::write(
+            &file,
+            concat!(
+                r#"{"step_index":0,"type":"USER_INPUT","status":"DONE"}"#,
+                "\n",
+                r#"{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","tool_calls":[{"name":"run_command"}]}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        assert!(!agy_turn_ended(&file));
+
+        // Turn over: final PLANNER_RESPONSE with no tool_calls.
+        std::fs::write(
+            &file,
+            concat!(
+                r#"{"step_index":0,"type":"USER_INPUT","status":"DONE"}"#,
+                "\n",
+                r#"{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","content":"All green."}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        assert!(agy_turn_ended(&file));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

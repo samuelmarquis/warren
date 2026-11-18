@@ -224,6 +224,14 @@ pub enum ToDaemon {
         #[serde(default)]
         matrix: Option<bool>,
     },
+    /// A pushed `<channel …>` message from `warren __mcp` (Matrix or a
+    /// sidecar) for an Antigravity agent: wakes an idle prompt directly, or
+    /// waits in the daemon's queue for the next lifecycle hook to drain it.
+    ChannelPush(String),
+    /// Atomically drain queued `ChannelPush` messages (`warren hook` during
+    /// `PreInvocation` / `PostInvocation` / `Stop`), answered with one
+    /// `ChannelBatch` frame before closing.
+    DrainChannel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,6 +268,8 @@ pub enum ToClient {
     Exited {
         status: i32,
     },
+    /// Reply to `DrainChannel`: the queued `<channel …>` events, in order.
+    ChannelBatch(Vec<String>),
 }
 
 // ------------------------------------------------------------------- framing

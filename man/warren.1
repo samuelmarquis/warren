@@ -1,6 +1,6 @@
 .TH WARREN 1 2026-10-21 "warren" "User Commands"
 .SH NAME
-warren \- a colony of Claude Code and OMP agents from one terminal
+warren \- a colony of Claude Code, OMP, and Antigravity agents from one terminal
 .SH SYNOPSIS
 .B warren
 .br
@@ -10,7 +10,7 @@ warren \- a colony of Claude Code and OMP agents from one terminal
 .RI [ COLOR ]
 .RB [ new | resume | continue ]
 .RI [ SESSION ]
-.RB [ \-\-kind=claude | omp ]
+.RB [ \-\-kind=claude | omp | agy ]
 .RB [ \-\-sys=\c
 .IR PROMPT ]
 .RB [ \-\-extra=\c
@@ -65,7 +65,7 @@ warren \- a colony of Claude Code and OMP agents from one terminal
 .RI [ NAME ]
 .br
 .B warren sessions
-.RB [ claude | omp ]
+.RB [ claude | omp | agy ]
 .br
 .B warren help
 .SH DESCRIPTION
@@ -110,7 +110,7 @@ id, or for OMP a session file), or
 .B \-\-kind
 picks the harness,
 .B \-\-sys
-its system prompt,
+its system prompt (Claude Code and OMP),
 .B \-\-extra
 extra arguments for its command line, and
 .B \-\-title
@@ -232,7 +232,7 @@ detaches.
 Bring back agents this machine lost when it stopped, asleep.
 The dashboard does this by itself on launch.
 .TP
-.BR "warren sessions " [ claude | omp ]
+.BR "warren sessions " [ claude | omp | agy ]
 List resumable sessions, tab-separated: id, time, directory, title.
 .SH THE DASHBOARD
 The dashboard is modal.

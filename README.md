@@ -1,9 +1,10 @@
 # warren
 
-**A meta-harness for Claude Code and OMP: run a colony of agents from one
-terminal.**
+**A meta-harness for Claude Code, OMP, and Antigravity: run a colony of agents
+from one terminal.**
 
-Claude Code is a harness for one agent; so is OMP. warren is the layer above
+Claude Code is a harness for one agent; so are OMP and Antigravity (`agy`).
+warren is the layer above
 them — a dashboard for running *many* agents at once, each in its own
 independent process, switched between like vim buffers, over an SSH
 connection you're allowed to lose. Pick the harness per agent when you create
@@ -117,11 +118,11 @@ programs.warren = {
 ```
 warren                 open the dashboard (rebuilds the view from running agents)
 warren new NAME [DIR] [COLOR 0-255] [new|resume|continue] [session-id]
-           [--kind=claude|omp] [--sys=SYSTEM-PROMPT] [--extra=EXTRA-AGENT-ARGS]
+           [--kind=claude|omp|agy] [--sys=SYSTEM-PROMPT] [--extra=EXTRA-AGENT-ARGS]
            [--matrix|--no-matrix]
 warren ls              list agents and their states
 warren kill NAME       terminate an agent
-warren sleep NAME      stop its claude process, keep the agent (resumable)
+warren sleep NAME      stop its harness process, keep the agent (resumable)
                        --force: even mid-turn
 warren wake NAME       start it again on the same conversation
 warren set NAME [--dir=DIR [--move]] [--extra=ARGS] [--sys=PROMPT] [--matrix=on|off]
@@ -130,8 +131,8 @@ warren set NAME [--dir=DIR [--move]] [--extra=ARGS] [--sys=PROMPT] [--matrix=on|
 warren join NAME ROOM  invite an agent to a Matrix room (see Chat)
 warren rename NAME NEW-NAME [--force]
                        a new name everywhere: what warren calls it, its row,
-                       and its Claude session's title (told with /rename once
-                       it is idle); conversation, chat account and slot stay
+                       and its session's title (told with /rename once it is
+                       idle); conversation, chat account and slot stay
 warren renew NAME [--matrix=on|off] [--force]
                        the same agent on a fresh daemon from this warren; a
                        daemon keeps the binary it started from, so this is
@@ -142,7 +143,7 @@ warren cycle [NAME...] [--renew]
                        --renew renews each, for after an upgrade
 warren attach NAME     view a single agent raw (no sidebar; Ctrl-\ detaches)
 warren restore [NAME]  bring back agents this machine lost when it stopped, asleep
-warren sessions [KIND] all resumable sessions (id, mtime, cwd, title) — claude, or omp
+warren sessions [KIND] all resumable sessions (id, mtime, cwd, title) — claude, omp, or agy
 warren help
 ```
 
@@ -192,9 +193,9 @@ picker selects it, the wheel scrolls that list, and palette swatches have
 always been clickable.
 
 The **new-agent form** (the `+` tab): pick the machine (once there is more
-than one), the harness (`claude` / `omp`), then `new` / `resume` /
+than one), the harness (`claude` / `omp` / `agy`), then `new` / `resume` /
 `continue`, title, root dir, a session from that harness's resume picker, a
-system prompt (`--system-prompt`), extra CLI args, and a tab color.
+system prompt, extra CLI args, and a tab color.
 
 A root dir that isn't there yet is **created** — asking for an agent in
 `~/Developer/new-thing` is how you say you want that directory — and one
@@ -208,33 +209,35 @@ for another machine is read by that machine, against its own home.
 Tab/Shift+Tab cycle fields; NORMAL always navigates away — the form never
 traps you.
 
-### Two harnesses, one colony
+### Three harnesses, one colony
 
-`--kind=claude` (the default) and `--kind=omp` are the only place the choice
-appears. Both harnesses spell `--continue`, `--resume` and `--system-prompt`
-identically, so modes, the resume picker, per-agent system prompts, extra
-args, title sync, folders, sleep and wake all work the same either way — and
+`--kind=claude` (the default), `--kind=omp` and `--kind=agy` are the only
+place the choice appears. Modes, the resume picker, per-agent system prompts,
+extra args, title sync, folders, sleep and wake all work the same way — and
 the sidebar deliberately doesn't say which is which, because the row is
 narrow and the pane already tells you.
 
-What differs is how much an agent can say about itself. Claude Code runs
-warren's generated lifecycle hooks, which push exact states and the session
-id. OMP has no equivalent settings file, so its agents fall back to the
-output-activity heuristic every viewer already computes: they read *working*
-and *idle* correctly, but never `!`, because nothing tells us a permission
-prompt is up.
+What differs is how each harness speaks to warren:
 
-Sleep still works, because OMP says which session it is running another way:
-it writes `<cwd>` and the session file to
-`~/.omp/agent/terminal-sessions/<tty>` at startup, and the daemon owns that
-pty — so the row keyed by its own slave tty is that agent's own session, even
-with several agents in one directory. A row is rejected if it predates the
-agent (tty names get recycled) or names another directory.
+- **Claude Code** runs warren's generated lifecycle hooks (`--settings`),
+  which push exact states and the session id.
+- **Antigravity (`agy`)** gets a session-only `--settings` file whose `title`
+  command runs `warren hook agy`: `agy` pipes live JSON telemetry
+  (`agent_state`, `conversation_id`, `conversation_title`) to it on every
+  state change, so warren gets exact states (`!`, working, idle), the
+  conversation id to resume with `agy --conversation`, and live title sync
+  (plus `/rename` once idle). Antigravity has no CLI `--system-prompt` flag
+  (workspace instructions belong in `AGENTS.md` or `GEMINI.md`), so `--sys` is
+  not offered for `agy`.
+- **OMP** has no settings hook, so its agents fall back to the output-activity
+  heuristic every viewer already computes (reading *working* and *idle*
+  accurately, though never `!`). Sleep still works because OMP writes `<cwd>`
+  and its session file to `~/.omp/agent/terminal-sessions/<tty>` at startup,
+  keyed by the slave tty the daemon owns.
 
 Everything harness-specific lives in `src/kind.rs`: the command line for a
 run, whether lifecycle state can reach the daemon, where sessions are kept,
-and how a live agent's session is identified. A third harness is a variant
-and those four answers.
+and how a live agent's session is identified.
 
 ### Folders
 
@@ -443,14 +446,18 @@ back within a session, and the conversations were always resumable anyway.
 
 ### Chat
 
-Agents can talk to you, and to each other, over Matrix — Claude Code and OMP
-alike, and anything else that speaks Matrix. warren is not the chat client:
-each agent runs its own copy of matrix-channel (from the IAI repo), an MCP server that pushes
-messages into the running session and gives the agent `reply`, `react`,
-`send_file`, `fetch_messages` and `download`. Claude Code takes it as a
-channel (you approve that each time the agent starts); OMP takes it through
-`omp/warren-matrix.ts`, an extension built into warren that does the same
-job. What warren adds is the part only it can: starting each agent's
+Agents can talk to you, and to each other, over Matrix — Claude Code, OMP and
+Antigravity alike, and anything else that speaks Matrix. warren is not the
+chat client: each agent runs its own copy of matrix-channel (from the IAI
+repo), an MCP server that pushes messages into the running session and gives
+the agent `reply`, `react`, `send_file`, `fetch_messages` and `download`.
+Claude Code takes it as a channel (you approve that each time the agent
+starts); OMP takes it through `omp/warren-matrix.ts`, an extension built into
+warren; Antigravity takes it through a `warren-matrix` plugin registered under
+`~/.gemini/config/plugins/` whose `warren __mcp` bridge proxies each agent's
+own channel by `$WARREN_AGENT`, wakes idle prompts via bracketed paste, and
+drains mid-turn pushes between steps through `PostInvocation` and `Stop`
+hooks. What warren adds is the part only it can: starting each agent's
 channel with it, and vouching for the agents it made.
 
 - **Agents name themselves.** A new agent has no account. When it wants one
@@ -569,6 +576,7 @@ socket, and it always exits 0 — a wedged daemon can never stall Claude.
 ~/.warren/run/<name>.sock   one unix socket per live agent daemon
 ~/.warren/notes/<name>.json  what an agent was, for restoring it after a restart
 ~/.warren/hooks.json        Claude Code hook settings (regenerated on spawn)
+~/.warren/agy-settings.json Antigravity session settings (regenerated on spawn)
 ~/.warren/hosts             optional: ssh destinations whose agents join the sidebar
 ~/.warren/ssh/              ssh's shared connection sockets, one per host
 ~/.warren/matrix.json       optional: chat setup (see Chat)
@@ -576,9 +584,11 @@ socket, and it always exits 0 — a wedged daemon can never stall Claude.
 ~/.warren/omp-warren-matrix.ts  the OMP chat extension (regenerated on spawn)
 ```
 
-That's everything warren writes — it only ever reads `~/.claude` and
-`~/.omp`. Agents die with the machine; `warren restore` puts the colony back
-from its notes, asleep, on the conversations their harnesses kept.
+For Antigravity agents with Matrix chat enabled, warren writes
+`~/.gemini/config/plugins/warren-matrix/`; it reads `~/.claude`, `~/.omp`, and
+`~/.gemini/antigravity-cli`. Agents die with the machine; `warren restore` puts
+the colony back from its notes, asleep, on the conversations their harnesses
+kept.
 
 ## Development
 

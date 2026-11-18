@@ -16,7 +16,7 @@
 mod client;
 mod term;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{ErrorKind, Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -131,6 +131,9 @@ fn stale_working() -> Duration {
 /// bytes land in the resumed prompt). Bounded: a stuck wake must not grow a
 /// queue forever.
 const ASLEEP_INPUT_CAP: usize = 16 * 1024;
+/// Pushed `<channel …>` messages buffered while an Antigravity agent is busy
+/// or has a draft in its prompt.
+const CHANNEL_QUEUE_CAP: usize = 128;
 
 pub struct DaemonArgs {
     pub name: String,
@@ -222,17 +225,21 @@ struct Spawn {
 }
 
 impl Spawn {
-    /// The shell command line for one run of the agent. Both harnesses spell
-    /// the modes and `--system-prompt` alike; `Kind` owns what differs.
+    /// The shell command line for one run of the agent; `Kind` owns what
+    /// differs between harnesses.
     fn command(&self, mode: &str, sid: Option<&str>) -> Result<String> {
         if let Some(custom) = &self.custom {
             return Ok(custom.clone());
         }
+        let name = self
+            .env
+            .get("WARREN_AGENT")
+            .map(String::as_str)
+            .unwrap_or_default();
         let mut cmd = self.kind.base_command(mode, sid);
-        if let Some(sys) = &self.sys {
-            // Single-quote for the shell, escaping embedded quotes.
-            let escaped = sys.replace('\'', r"'\''");
-            cmd.push_str(&format!(" --system-prompt '{escaped}'"));
+        if let Some(flag) = self.sys.as_deref().and_then(|s| self.kind.sys_flag(s)) {
+            cmd.push(' ');
+            cmd.push_str(&flag);
         }
         if let Some(flag) = self.title.as_deref().and_then(|t| self.kind.name_flag(t)) {
             cmd.push(' ');
@@ -245,20 +252,19 @@ impl Spawn {
         if self.matrix {
             // A start that cannot have the chat it was promised fails out
             // loud, rather than come up quietly deaf.
-            let name = self
-                .env
-                .get("WARREN_AGENT")
-                .map(String::as_str)
-                .unwrap_or_default();
             let flags = crate::matrix::launch_flags(self.kind, name, &self.dir)
                 .context("setting up chat (`:set matrix off` starts it without)")?;
-            cmd.push(' ');
-            cmd.push_str(&flags);
+            if !flags.is_empty() {
+                cmd.push(' ');
+                cmd.push_str(&flags);
+            }
+        } else if self.kind == Kind::Agy && !name.is_empty() {
+            let _ = crate::matrix::set_agy_enabled(name, false);
         }
         // Re-passed on every spawn: a resumed session does NOT inherit the
         // --settings of the run that created it, so the lifecycle hooks (and
         // with them the sidebar states and the session id) must be rewired.
-        if let Some(hooks) = self.kind.hooks_flag()? {
+        if let Some(hooks) = self.kind.hooks_flag(self.extra.as_deref())? {
             cmd.push(' ');
             cmd.push_str(&hooks);
         }
@@ -374,6 +380,12 @@ struct Daemon {
     /// Someone typed at the agent since its last turn began: the prompt may
     /// hold a draft, and a `/rename` typed over it would mangle both.
     typed_since_turn: bool,
+    /// Pushed `<channel …>` events from `warren __mcp`, waiting either for an
+    /// idle Antigravity prompt (woken via bracketed paste) or for a mid-turn
+    /// hook (`PreInvocation` / `PostInvocation` / `Stop`) to drain them.
+    channel_queue: VecDeque<String>,
+    /// Pasted `<channel …>` text is in the prompt; Enter follows a moment later.
+    channel_enter_at: Option<Instant>,
 }
 
 pub fn run(args: DaemonArgs) -> Result<()> {
@@ -522,6 +534,8 @@ pub fn run(args: DaemonArgs) -> Result<()> {
         retitle: None,
         retitle_enter_at: None,
         typed_since_turn: false,
+        channel_queue: VecDeque::new(),
+        channel_enter_at: None,
     };
 
     // Up: anything said on stderr from here on is not a reason it failed to
@@ -599,11 +613,16 @@ impl Daemon {
             // Wake for whichever comes first: the damage timer, or a stop
             // signal that needs escalating.
             let mut timeout = flush_at.map(|at| at.saturating_duration_since(Instant::now()));
+            let settle_at = (!self.channel_queue.is_empty() || self.retitle.is_some())
+                .then(|| self.last_output + RETITLE_QUIET)
+                .filter(|&at| at > Instant::now());
             for at in [
                 self.sleep_deadline,
                 self.probe_at,
                 self.background_at,
                 self.retitle_enter_at,
+                self.channel_enter_at,
+                settle_at,
             ]
             .into_iter()
             .flatten()
@@ -680,12 +699,13 @@ impl Daemon {
             }
 
             self.drain_term_events();
+            self.deliver_retitle();
+            self.deliver_channel();
             self.write_pty();
             self.update_pty_interest()?;
             self.escalate_sleep();
             self.poll_session();
             self.poll_background();
-            self.deliver_retitle();
             self.remember();
 
             // Damage coalescing: first dirtying event arms the timer; the
@@ -969,6 +989,9 @@ impl Daemon {
         self.sleep_deadline = None;
         self.woke_at = None;
         self.sigkilled = false;
+        self.retitle_enter_at = None;
+        self.channel_enter_at = None;
+        self.typed_since_turn = !self.pty_in.is_empty();
         self.hook = None; // no process, no lifecycle state
         self.power = Power::Asleep;
         self.flush_frame(); // the frozen screen is the agent's last word
@@ -1165,9 +1188,9 @@ impl Daemon {
                 retitle,
             } => {
                 if let Some(n) = name {
-                    // Claude Code can be told; OMP has no rename, and the
-                    // pinned row is all it gets.
-                    if retitle && self.spawn.kind == crate::kind::Kind::Claude {
+                    // Claude Code and Antigravity can be told; OMP has no
+                    // `/rename`, and the pinned row is all it gets.
+                    if retitle && self.spawn.kind.can_retitle() {
                         self.retitle = Some(n.clone());
                     }
                     self.meta.display = n;
@@ -1232,16 +1255,17 @@ impl Daemon {
             // a `new`/`continue` agent becomes resumable — and how the id
             // stays right if claude ever moves the conversation.
             ToDaemon::Session(sid) => {
-                // Claude names a session before it writes a byte of it. While
-                // the new one has no transcript and the current one does, keep
-                // the current one: a sleep now would otherwise `--resume` a
-                // file that doesn't exist and lose the conversation. Every
-                // hook carries the id, so the switch comes with the next one
-                // after the first turn is written.
-                let unwritten = |id: &str| crate::procs::transcript(id).is_none();
+                // A harness can name a new session before writing a byte of
+                // it. While the new one has no transcript and the current one
+                // does, keep the current one: a sleep now would otherwise
+                // resume a file that doesn't exist and lose the conversation.
+                let unwritten = |id: &str| !crate::procs::has_transcript(self.spawn.kind, id);
                 if !sid.is_empty()
                     && self.sid.as_deref() != Some(sid.as_str())
-                    && self.spawn.kind == crate::kind::Kind::Claude
+                    && matches!(
+                        self.spawn.kind,
+                        crate::kind::Kind::Claude | crate::kind::Kind::Agy
+                    )
                     && unwritten(&sid)
                     && self.sid.as_deref().is_some_and(|cur| !unwritten(cur))
                 {
@@ -1282,6 +1306,26 @@ impl Daemon {
                 // so closing the tab has to end the daemon directly.
                 None => self.quit = Some(0),
             },
+            ToDaemon::ChannelPush(xml) => {
+                if !xml.is_empty()
+                    && xml.len() <= 256 * 1024
+                    && self.channel_queue.len() < CHANNEL_QUEUE_CAP
+                {
+                    self.logf(&format!("channel push queued ({} bytes)", xml.len()));
+                    self.channel_queue.push_back(xml);
+                }
+            }
+            ToDaemon::DrainChannel => {
+                let batch: Vec<String> = self.channel_queue.drain(..).collect();
+                if !batch.is_empty() {
+                    self.logf(&format!("channel drained ({} messages)", batch.len()));
+                }
+                let reply = ToClient::ChannelBatch(batch);
+                let conn = self.conns.get_mut(&key).unwrap();
+                send_to(conn, &reply);
+                conn.close_after_write = true;
+                conn.flush();
+            }
         }
     }
 
@@ -1447,7 +1491,10 @@ impl Daemon {
         // waiting on a permission prompt or a question is still too.
         if self.hook == Some(HookState::Working)
             && self.last_output.elapsed() >= stale_working()
-            && self.sid.as_deref().is_some_and(crate::procs::turn_ended)
+            && self
+                .sid
+                .as_deref()
+                .is_some_and(|s| crate::procs::turn_ended(self.spawn.kind, s))
         {
             self.logf("hook: working, but the screen has been still; taking the turn as over");
             self.hook = Some(HookState::Waiting);
@@ -1652,9 +1699,11 @@ impl Daemon {
             return;
         }
         if self.retitle.is_none()
+            || self.channel_enter_at.is_some()
             || self.pty.is_none()
             || self.power != Power::Awake
             || self.hook != Some(HookState::Waiting)
+            || (self.spawn.kind == Kind::Agy && self.sid.is_none())
             || self.typed_since_turn
             || self.last_output.elapsed() < RETITLE_QUIET
         {
@@ -1674,6 +1723,61 @@ impl Daemon {
         self.retitle_enter_at = Some(Instant::now() + RETITLE_ENTER_AFTER);
     }
 
+    /// Wake an idle Antigravity prompt with queued `<channel …>` pushes from
+    /// Matrix or sidecars. Mid-turn (or when someone has typed a draft in the
+    /// prompt), the queue stays untouched so `PostInvocation`, `Stop`, or
+    /// `PreInvocation` drains it cleanly as injected turn steps instead.
+    fn deliver_channel(&mut self) {
+        if let Some(at) = self.channel_enter_at {
+            if Instant::now() >= at {
+                self.channel_enter_at = None;
+                if self.pty.is_some() {
+                    self.pty_in.push(b'\r');
+                    self.typed_since_turn = false;
+                }
+            }
+            return;
+        }
+        if self.channel_queue.is_empty()
+            || self.retitle.is_some()
+            || self.retitle_enter_at.is_some()
+            || self.pty.is_none()
+            || self.power != Power::Awake
+            || self.hook != Some(HookState::Waiting)
+            || self.typed_since_turn
+            || self.last_output.elapsed() < RETITLE_QUIET
+        {
+            return;
+        }
+        let batch: Vec<String> = self.channel_queue.drain(..).collect();
+        // Strip raw terminal control bytes (notably ESC) so untrusted chat
+        // text can never smuggle escape sequences into the TUI.
+        let body: String = batch
+            .join("\n\n")
+            .chars()
+            .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
+            .collect();
+        if body.trim().is_empty() {
+            return;
+        }
+        self.logf(&format!("channel wake: pasting {} bytes", body.len()));
+        if self.term.bracketed_paste() {
+            self.pty_in.extend_from_slice(b"\x1b[200~");
+            self.pty_in.extend_from_slice(body.as_bytes());
+            self.pty_in.extend_from_slice(b"\x1b[201~");
+        } else {
+            let flat = body.replace('\n', " ");
+            self.pty_in.extend_from_slice(flat.as_bytes());
+        }
+        // Mark working immediately so a second push arriving during the Enter
+        // gap waits in `channel_queue` for `PostInvocation` instead of pasting
+        // over this one.
+        self.hook = Some(HookState::Working);
+        self.channel_enter_at = Some(Instant::now() + RETITLE_ENTER_AFTER);
+        let update = ToClient::StateChanged(self.state());
+        self.broadcast(&update);
+    }
+
     /// v0 dvtm's warren_sync_name: mirror Claude's terminal title into the
     /// sidebar name. Skip leading control/space/non-ASCII bytes (spinner
     /// glyphs); manual renames are pinned; the idle title is noise.
@@ -1686,7 +1790,7 @@ impl Daemon {
             .unwrap_or("");
         if self.meta.pinned
             || stripped.is_empty()
-            || stripped == "Claude Code"
+            || matches!(stripped, "Claude Code" | "Antigravity" | "agy")
             || stripped == self.meta.display
         {
             return;

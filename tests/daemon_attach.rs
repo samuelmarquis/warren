@@ -2929,21 +2929,39 @@ fn a_conversation_that_is_already_open_is_not_opened_twice_by_accident() {
 fn the_form_offers_a_fork_only_where_the_harness_has_one() {
     let inner = TestHome::new("forkin");
     let outer = TestHome::new("forkout");
+    let empty_claude = inner.dir.join("claude-empty");
+    std::fs::create_dir_all(empty_claude.join("projects")).unwrap();
+    // Configure a host so Machine leads the form (Agent is field 1, Mode is
+    // field 2), exercising chip navigation when Agent is not at index 0.
+    std::fs::write(inner.dir.join("hosts"), "faraway\n").unwrap();
     new_agent_in(&inner, "svm", &inner.dir.join("Research"), "sleep 300");
-    let dash_cmd = format!("WARREN_HOME={} {} up", inner.dir.display(), BIN);
+    let dash_cmd = format!(
+        "WARREN_SSH=/usr/bin/false CLAUDE_CONFIG_DIR={} WARREN_OMP_HOME={} WARREN_AGY_HOME={} WARREN_HOME={} {} up",
+        empty_claude.display(),
+        inner.dir.join("omp-empty").display(),
+        inner.dir.join("agy-empty").display(),
+        inner.dir.display(),
+        BIN
+    );
     new_agent(&outer, "dash", &dash_cmd);
     let (mut viewer, snap) = Viewer::attach(&outer.sock("dash"), 100, 22);
     let grid = std::cell::RefCell::new(Vec::<String>::new());
     apply_frame(&grid, &snap);
+    let up = viewer.await_frame(15_000, |m| {
+        apply_frame(&grid, m);
+        sidebar_of(&grid).iter().any(|r| r.contains("svm"))
+    });
+    assert!(up.is_some(), "agent is up: {:?}", sidebar_of(&grid));
 
     viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x00n")));
     let form = viewer.await_frame(15_000, |m| {
         apply_frame(&grid, m);
-        grid.borrow().iter().any(|r| r.contains("Mode"))
+        grid.borrow().iter().any(|r| r.contains("Machine"))
+            && grid.borrow().iter().any(|r| r.contains("Mode"))
     });
     assert!(
         form.is_some(),
-        "the form is open: {:?}",
+        "the form is open with Machine and Mode: {:?}",
         grid.borrow().clone()
     );
     let mode_row = |grid: &std::cell::RefCell<Vec<String>>| -> String {
@@ -2958,11 +2976,14 @@ fn the_form_offers_a_fork_only_where_the_harness_has_one() {
         "claude can fork: {:?}",
         mode_row(&grid)
     );
+    assert!(
+        grid.borrow().iter().any(|r| r.contains("Sys prompt")),
+        "claude offers Sys prompt"
+    );
 
-    // Land on fork, then switch the harness out from under it. Picking a
-    // chip drops the cursor back to the first field, so each step is its own
-    // Tab: new -> resume -> continue -> fork.
-    viewer.send(&ToDaemon::Input(proto::b64_encode(b"\tl\tl\tl")));
+    // Tab past Machine and Agent to Mode, then step right in place:
+    // new -> resume -> continue -> fork.
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"\t\tlll")));
     let forked = viewer.await_frame(10_000, |m| {
         apply_frame(&grid, m);
         grid.borrow().iter().any(|r| r.contains("Fork of"))
@@ -2973,7 +2994,9 @@ fn the_form_offers_a_fork_only_where_the_harness_has_one() {
         grid.borrow().clone()
     );
 
-    viewer.send(&ToDaemon::Input(proto::b64_encode(b"l")));
+    // Shift-Tab up to Agent, then Right-arrow to omp: focus stays on Agent so
+    // another Right-arrow reaches agy without tabbing back.
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x1b[Z\x1b[C")));
     let omp = viewer.await_frame(10_000, |m| {
         apply_frame(&grid, m);
         grid.borrow().iter().any(|r| r.contains("new omp agent"))
@@ -2991,6 +3014,23 @@ fn the_form_offers_a_fork_only_where_the_harness_has_one() {
     assert!(
         !grid.borrow().iter().any(|r| r.contains("Fork of")),
         "and is not left on one: {:?}",
+        grid.borrow().clone()
+    );
+
+    viewer.send(&ToDaemon::Input(proto::b64_encode(b"\x1b[C")));
+    let agy = viewer.await_frame(10_000, |m| {
+        apply_frame(&grid, m);
+        grid.borrow().iter().any(|r| r.contains("new agy agent"))
+    });
+    assert!(agy.is_some(), "cycled to agy: {:?}", grid.borrow().clone());
+    assert!(
+        !mode_row(&grid).contains("fork"),
+        "agy is offered none either: {:?}",
+        mode_row(&grid)
+    );
+    assert!(
+        !grid.borrow().iter().any(|r| r.contains("Sys prompt")),
+        "agy has no --sys flag, so Sys prompt is hidden: {:?}",
         grid.borrow().clone()
     );
 }
@@ -4544,4 +4584,248 @@ fn rename_moves_the_agent_and_what_is_kept_under_its_name() {
     assert_eq!(meta.display, "newname");
     assert_eq!(state.session.as_deref(), Some("conv-n"));
     assert_ne!(state.power, Power::Asleep, "it was awake, so it is woken");
+}
+
+#[test]
+fn agy_hook_roundtrip_and_sessions_cli() {
+    let home = TestHome::new("agyhook");
+    let out = home
+        .warren("cat")
+        .args(["new", "agy1", "--kind=agy"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let sock = home.sock("agy1");
+
+    // Antigravity's title command receives telemetry JSON on stdin and prints
+    // the conversation title to stdout so agy updates the terminal title.
+    let mut child = Command::new(BIN)
+        .env("WARREN_SOCK", &sock)
+        .args(["hook", "agy"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            br#"{"agent_state":"waiting","conversation_id":"agy-conv-42","conversation_title":"Wire up Antigravity"}"#,
+        )
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "Wire up Antigravity"
+    );
+
+    let (_, snap) = Viewer::attach(&sock, 80, 24);
+    let ToClient::Snapshot { state, .. } = snap else {
+        unreachable!()
+    };
+    assert_eq!(state.hook, Some(HookState::Attention));
+    assert_eq!(state.session.as_deref(), Some("agy-conv-42"));
+    assert!(state.resumable);
+
+    // `warren sessions agy` reads from WARREN_AGY_HOME.
+    let agy_home = home.dir.join("agy-store");
+    std::fs::create_dir_all(agy_home.join("conversations")).unwrap();
+    std::fs::write(agy_home.join("conversations/agy-conv-42.db"), b"").unwrap();
+    std::fs::write(
+        agy_home.join("history.jsonl"),
+        r#"{"conversationId":"agy-conv-42","timestamp":1760000000000,"workspace":"/w/warren","display":"Add agy support"}"#,
+    )
+    .unwrap();
+    let out = Command::new(BIN)
+        .env("WARREN_AGY_HOME", &agy_home)
+        .args(["sessions", "agy"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let listed = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        listed.contains("agy-conv-42\t1760000000\t/w/warren\tAdd agy support"),
+        "unexpected sessions output: {listed}"
+    );
+}
+
+#[test]
+fn agy_matrix_push_drains_mid_turn_and_wakes_idle_prompt() {
+    use std::io::BufRead;
+
+    let home = TestHome::new("agymcp");
+    let gem_cfg = home.dir.join("gemini-config");
+
+    // Outside warren (no WARREN_AGENT), `warren __mcp` is a zero-tool no-op.
+    let mut noop = Command::new(BIN)
+        .args(["__mcp", "warren-matrix"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    noop.stdin
+        .take()
+        .unwrap()
+        .write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}\n\
+              {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n",
+        )
+        .unwrap();
+    let noop_out = noop.wait_with_output().unwrap();
+    assert!(noop_out.status.success());
+    let noop_txt = String::from_utf8_lossy(&noop_out.stdout);
+    assert!(noop_txt.contains("\"tools\":[]"), "{noop_txt}");
+
+    // Fake `matrix_channel.py`: answers MCP initialize, then emits two channel
+    // pushes when triggered by files on disk.
+    let fake_channel = home.dir.join("fake_channel.sh");
+    let trig_mid = home.dir.join("push_mid");
+    let trig_idle = home.dir.join("push_idle");
+    std::fs::write(
+        &fake_channel,
+        format!(
+            "#!/bin/sh\n\
+             IFS= read -r _init\n\
+             printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":\"2025-06-18\",\"instructions\":\"Use matrix tools.\",\"capabilities\":{{\"tools\":{{}}}}}}}}'\n\
+             IFS= read -r _inited\n\
+             while [ ! -f '{mid}' ]; do sleep 0.05; done\n\
+             printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/claude/channel\",\"params\":{{\"content\":\"mid-turn ping\",\"meta\":{{\"room\":\"!r:x\",\"sender\":\"@sam:x\"}}}}}}'\n\
+             while [ ! -f '{idle}' ]; do sleep 0.05; done\n\
+             printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/claude/channel\",\"params\":{{\"content\":\"wake up ada\",\"meta\":{{\"room\":\"!r:x\",\"sender\":\"@sam:x\"}}}}}}'\n\
+             sleep 30\n",
+            mid = trig_mid.display(),
+            idle = trig_idle.display(),
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake_channel, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Configure matrix.json and write the agent's MCP profile as `launch_flags` does.
+    std::fs::write(
+        home.dir.join("matrix.json"),
+        format!(
+            r#"{{"channel":"{}","python":"/bin/sh","machine":"smq","allowedUsers":["@sam:x"],"inviters":["@sam:x"]}}"#,
+            fake_channel.display()
+        ),
+    )
+    .unwrap();
+
+    // Spawn a real `--kind=agy` daemon whose pty child enables bracketed paste
+    // and echoes whatever lands on its stdin so we can see the wakeup paste.
+    let out = home
+        .warren("printf '\\033[?2004hready\\r\\n'; cat")
+        .env("WARREN_GEMINI_CONFIG", &gem_cfg)
+        .args(["new", "ada", "--kind=agy", "--matrix"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let sock = home.sock("ada");
+
+    // Set up ada's matrix files directly (since WARREN_AGENT_CMD bypassed Spawn::command's flags).
+    let ada_mat = home.dir.join("matrix").join("ada");
+    std::fs::create_dir_all(&ada_mat).unwrap();
+    std::fs::write(ada_mat.join("agy.on"), b"1\n").unwrap();
+    std::fs::write(
+        ada_mat.join("mcp.json"),
+        format!(
+            r#"{{"mcpServers":{{"warren-matrix":{{"command":"{}"}}}}}}"#,
+            fake_channel.display()
+        ),
+    )
+    .unwrap();
+
+    // Start `warren __mcp warren-matrix` as Antigravity would.
+    let mut mcp = Command::new(BIN)
+        .env("WARREN_HOME", &home.dir)
+        .env("WARREN_AGENT", "ada")
+        .env("WARREN_SOCK", &sock)
+        .args(["__mcp", "warren-matrix"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut mcp_in = mcp.stdin.take().unwrap();
+    let mut mcp_out = std::io::BufReader::new(mcp.stdout.take().unwrap());
+    mcp_in
+        .write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}\n",
+        )
+        .unwrap();
+    let mut init_line = String::new();
+    mcp_out.read_line(&mut init_line).unwrap();
+    assert!(init_line.contains("Use matrix tools."), "{init_line}");
+    mcp_in
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
+        .unwrap();
+
+    // SessionStart hook injects the captured channel instructions once.
+    let sess_hook = Command::new(BIN)
+        .env("WARREN_HOME", &home.dir)
+        .env("WARREN_AGENT", "ada")
+        .env("WARREN_SOCK", &sock)
+        .args(["hook", "agy-session"])
+        .output()
+        .unwrap();
+    let sess_json = String::from_utf8_lossy(&sess_hook.stdout);
+    assert!(sess_json.contains("Use matrix tools."), "{sess_json}");
+
+    // 1) Mid-turn: agent is Working, so a push stays queued until PostInvocation drains it.
+    let _ = Command::new(BIN)
+        .env("WARREN_SOCK", &sock)
+        .args(["hook", "working"])
+        .output()
+        .unwrap();
+    std::fs::write(&trig_mid, b"1").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut drained_out = String::new();
+    while Instant::now() < deadline {
+        let post = Command::new(BIN)
+            .env("WARREN_HOME", &home.dir)
+            .env("WARREN_AGENT", "ada")
+            .env("WARREN_SOCK", &sock)
+            .args(["hook", "agy-post"])
+            .output()
+            .unwrap();
+        let s = String::from_utf8_lossy(&post.stdout).trim().to_string();
+        if s.contains("mid-turn ping") {
+            drained_out = s;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        drained_out.contains("mid-turn ping") && drained_out.contains("force_continue"),
+        "expected PostInvocation drain, got: {drained_out}"
+    );
+
+    // 2) Idle: agent is Waiting and screen has settled, so a push wakes the pty directly!
+    let (mut viewer, _) = Viewer::attach(&sock, 80, 24);
+    let _ = Command::new(BIN)
+        .env("WARREN_SOCK", &sock)
+        .args(["hook", "waiting"])
+        .output()
+        .unwrap();
+    std::fs::write(&trig_idle, b"1").unwrap();
+    let woke = viewer.await_frame(8_000, |m| match m {
+        ToClient::Damage { lines, .. } => lines
+            .iter()
+            .any(|(_, l)| screen_text(std::slice::from_ref(l)).contains("wake up ada")),
+        ToClient::Snapshot { screen, .. } => screen_text(screen).contains("wake up ada"),
+        _ => false,
+    });
+    assert!(
+        woke.is_some(),
+        "idle pty should be woken by pushed channel message; screen:\n{}",
+        screen_of(&sock)
+    );
+
+    drop(mcp_in);
+    let _ = mcp.wait();
 }

@@ -1,16 +1,17 @@
-//! warren - a Claude Code agent multiplexer.
+//! warren - a meta-harness for Claude Code, OMP, and Antigravity.
 //!
 //! One binary, several roles:
 //!   warren                 open the dashboard (stateless viewer; reconstructs from daemons)
 //!   warren new NAME [DIR] [COLOR 0-255] [new|resume|continue] [session-id]
 //!   warren ls              list agents and their status
 //!   warren kill NAME       terminate an agent
-//!   warren sleep NAME      kill the agent's claude process, keeping the resumable tab
-//!   warren wake NAME       respawn it with --resume on the same conversation
+//!   warren sleep NAME      kill the agent's harness process, keeping the resumable tab
+//!   warren wake NAME       respawn it on the same conversation
 //!   warren attach NAME     raw single-agent viewer
 //!   warren restore [NAME]  re-create agents that died with the machine, asleep
-//!   warren sessions [claude|omp]  resumable sessions (id<TAB>mtime<TAB>cwd<TAB>title)
-//!   warren hook STATE      called by Claude Code hooks; reports state to the agent daemon
+//!   warren sessions [claude|omp|agy]  resumable sessions (id<TAB>mtime<TAB>cwd<TAB>title)
+//!   warren hook STATE      called by Claude / Antigravity hooks; reports state to the daemon
+//!   warren __mcp SERVER    internal: Antigravity per-agent MCP and push-to-wake bridge
 //!   warren __daemon …      internal: the per-agent daemon process
 
 mod cli;
@@ -32,14 +33,14 @@ mod spans;
 use anyhow::Result;
 
 const HELP: &str = "\
-warren - a Claude Code agent multiplexer
+warren - a meta-harness for Claude Code, OMP, and Antigravity
 
   warren                 open the dashboard, or rebuild the view if agents are running
-  warren new NAME [DIR] [COLOR 0-255] [new|resume|continue] [session-id] [--kind=claude|omp]
+  warren new NAME [DIR] [COLOR 0-255] [new|resume|continue] [session-id] [--kind=claude|omp|agy]
   warren ls              list agents and their status
   warren kill NAME       terminate an agent
   warren sleep NAME [--force]
-                         stop the agent's claude process, keep the agent
+                         stop the agent's harness process, keep the agent
                          (--force: even mid-turn, losing the turn)
   warren wake NAME       start it again on the same conversation
   warren set NAME [--dir=DIR [--move]] [--extra=ARGS] [--sys=PROMPT] [--matrix=on|off]
@@ -49,7 +50,7 @@ warren - a Claude Code agent multiplexer
   warren join NAME ROOM  invite an agent to a Matrix room (chat; see man warren)
   warren rename NAME NEW-NAME [--force]
                          give an agent a new name: the command line's, the
-                         row's and its Claude session's; same conversation
+                         row's and its session's; same conversation
   warren renew NAME [--matrix=on|off] [--force]
                          move an agent onto this warren (its daemon keeps the
                          binary it started from), optionally turning chat on
@@ -59,7 +60,7 @@ warren - a Claude Code agent multiplexer
                          subagents (--renew: renew each instead)
   warren attach NAME     view a single agent raw (no sidebar)
   warren restore [NAME]  bring back agents this machine lost when it stopped (asleep)
-  warren sessions [KIND] list resumable sessions (claude, or omp)
+  warren sessions [KIND] list resumable sessions (claude, omp, or agy)
   warren help            show this help
 
 Agents run as independent daemons: the dashboard (and your SSH connection)
@@ -91,6 +92,7 @@ fn main() {
         "restore" => cli::cmd_restore(rest),
         "sessions" => sessions::cmd_sessions(rest),
         "hook" => hooks::cmd_hook(rest),
+        "__mcp" => matrix::cmd_mcp(rest),
         "__roster" => remote::wire::cmd_roster(),
         "__pipe" => remote::wire::cmd_pipe(rest),
         "__daemon" => daemon::DaemonArgs::parse(rest).and_then(daemon::run),

@@ -32,7 +32,7 @@ pub struct Session {
 pub fn cmd_sessions(args: &[String]) -> Result<()> {
     let kind = match args.first() {
         Some(arg) => crate::kind::Kind::parse(arg)
-            .ok_or_else(|| anyhow::anyhow!("unknown agent kind '{arg}' (claude or omp)"))?,
+            .ok_or_else(|| anyhow::anyhow!("unknown agent kind '{arg}' (claude, omp, or agy)"))?,
         None => crate::kind::Kind::default(),
     };
     let sessions = kind.sessions();
@@ -306,6 +306,293 @@ fn read_session_file(path: &Path) -> Option<(String, String)> {
     Some((cwd, label))
 }
 
+/// Antigravity indexes top-level conversations in `conversation_summaries.db`
+/// (with `title`, `preview`, `last_modified_time`, and `workspace_uris`) and
+/// logs prompt history in `history.jsonl`. Prefer the SQLite summary table so
+/// `/rename`d and AI-generated titles win; fall back to `history.jsonl` if the
+/// database is absent or `sqlite3` is not installed.
+pub fn scan_agy(agy_home: &Path) -> Vec<Session> {
+    let db = agy_home.join("conversation_summaries.db");
+    if db.is_file() {
+        if let Some(mut rows) = scan_agy_sqlite(&db) {
+            newest_first(&mut rows);
+            return rows;
+        }
+    }
+    let mut rows = scan_agy_history(agy_home);
+    newest_first(&mut rows);
+    rows
+}
+
+fn scan_agy_sqlite(db: &Path) -> Option<Vec<Session>> {
+    let query = "SELECT conversation_id, title, preview, last_modified_time, workspace_uris \
+                 FROM conversation_summaries \
+                 WHERE parent_conversation_id = '' AND nesting_depth = 0 \
+                 AND killed = 0 AND conversation_id != ''";
+    let out = std::process::Command::new("sqlite3")
+        .args(["-readonly", "-cmd", ".timeout 1000", "-json"])
+        .arg(db)
+        .arg(query)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let trimmed = String::from_utf8_lossy(&out.stdout);
+    let trimmed = trimmed.trim();
+    if trimmed.is_empty() {
+        return Some(Vec::new());
+    }
+    let items: Vec<Value> = serde_json::from_str(trimmed).ok()?;
+    let mut rows = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(id) = item
+            .get("conversation_id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let mtime = item
+            .get("last_modified_time")
+            .and_then(Value::as_str)
+            .and_then(parse_iso_epoch)
+            .unwrap_or(0.0);
+        let cwd = item
+            .get("workspace_uris")
+            .and_then(Value::as_str)
+            .and_then(first_workspace_path)
+            .unwrap_or_else(|| "?".to_string());
+        let title = item
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let preview = item
+            .get("preview")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let label = [title, preview]
+            .into_iter()
+            .find(|s| !s.is_empty())
+            .unwrap_or("(untitled)");
+        rows.push(Session {
+            id: id.to_string(),
+            mtime,
+            cwd,
+            title: tidy(label),
+        });
+    }
+    Some(rows)
+}
+
+fn scan_agy_history(agy_home: &Path) -> Vec<Session> {
+    let path = agy_home.join("history.jsonl");
+    let Ok(file) = std::fs::File::open(&path) else {
+        return Vec::new();
+    };
+    let conv_dir = agy_home.join("conversations");
+    let brain_dir = agy_home.join("brain");
+    let check_store = conv_dir.is_dir() || brain_dir.is_dir();
+
+    // Preserves insertion order cleanly after sorting by mtime.
+    struct Acc {
+        mtime: f64,
+        cwd: String,
+        renamed: String,
+        first_prompt: String,
+    }
+    let mut map: std::collections::HashMap<String, Acc> = std::collections::HashMap::new();
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        if !line.contains("conversationId") {
+            continue;
+        }
+        let Ok(d) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let Some(id) = d
+            .get("conversationId")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let ts = d.get("timestamp").and_then(Value::as_f64).unwrap_or(0.0);
+        let mtime = if ts > 1e11 { ts / 1000.0 } else { ts };
+        let ws = d.get("workspace").and_then(Value::as_str).unwrap_or("");
+        let display = d
+            .get("display")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let entry = map.entry(id.to_string()).or_insert_with(|| Acc {
+            mtime: 0.0,
+            cwd: String::new(),
+            renamed: String::new(),
+            first_prompt: String::new(),
+        });
+        if mtime > entry.mtime {
+            entry.mtime = mtime;
+        }
+        if !ws.is_empty() {
+            entry.cwd = ws.to_string();
+        }
+        if let Some(rest) = display.strip_prefix("/rename ") {
+            let rest = rest.trim();
+            if !rest.is_empty() {
+                entry.renamed = rest.to_string();
+            }
+        } else if entry.first_prompt.is_empty() && !display.starts_with('/') && !display.is_empty()
+        {
+            entry.first_prompt = display.to_string();
+        }
+    }
+
+    map.into_iter()
+        .filter(|(id, _)| {
+            !check_store
+                || conv_dir.join(format!("{id}.db")).is_file()
+                || brain_dir.join(id).is_dir()
+        })
+        .map(|(id, acc)| {
+            let label = if !acc.renamed.is_empty() {
+                acc.renamed
+            } else if !acc.first_prompt.is_empty() {
+                acc.first_prompt
+            } else {
+                "(untitled)".to_string()
+            };
+            Session {
+                id,
+                mtime: acc.mtime,
+                cwd: if acc.cwd.is_empty() {
+                    "?".to_string()
+                } else {
+                    acc.cwd
+                },
+                title: tidy(&label),
+            }
+        })
+        .collect()
+}
+
+/// First `file://` URI out of Antigravity's `workspace_uris` JSON column
+/// (`["file:///Users/sam/Developer/warren"]`), percent-decoded to a path.
+fn first_workspace_path(raw: &str) -> Option<String> {
+    let uris: Vec<String> = serde_json::from_str(raw).ok()?;
+    let uri = uris.first()?.trim();
+    let rest = uri
+        .strip_prefix("file://localhost")
+        .or_else(|| uri.strip_prefix("file://"))
+        .unwrap_or(uri);
+    let decoded = percent_decode(rest);
+    (!decoded.is_empty()).then_some(decoded)
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push(hi << 4 | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Parse an ISO-8601 / SQLite timestamp (`2026-11-17 23:36:54.367012+00:00` or
+/// `2026-11-17T18:35:59-05:00`) to Unix epoch seconds.
+fn parse_iso_epoch(s: &str) -> Option<f64> {
+    let s = s.trim();
+    if s.len() < 19 {
+        return None;
+    }
+    let b = s.as_bytes();
+    if b[4] != b'-'
+        || b[7] != b'-'
+        || !matches!(b[10], b'T' | b't' | b' ')
+        || b[13] != b':'
+        || b[16] != b':'
+    {
+        return None;
+    }
+    let y: i64 = s.get(0..4)?.parse().ok()?;
+    let m: u32 = s.get(5..7)?.parse().ok()?;
+    let d: u32 = s.get(8..10)?.parse().ok()?;
+    let hh: u32 = s.get(11..13)?.parse().ok()?;
+    let mi: u32 = s.get(14..16)?.parse().ok()?;
+    let ss: u32 = s.get(17..19)?.parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mi > 59 || ss > 60 {
+        return None;
+    }
+
+    let mut rest = &s[19..];
+    let mut frac = 0.0f64;
+    if let Some(after_dot) = rest.strip_prefix('.') {
+        let digits = after_dot.bytes().take_while(|c| c.is_ascii_digit()).count();
+        if digits > 0 {
+            if let Ok(v) = after_dot[..digits].parse::<f64>() {
+                frac = v / 10f64.powi(digits as i32);
+            }
+        }
+        rest = &after_dot[digits..];
+    }
+
+    let rest = rest.trim();
+    let tz_secs: i64 = if rest.is_empty() || matches!(rest, "Z" | "z") {
+        0
+    } else {
+        let sign = match rest.as_bytes().first() {
+            Some(b'+') => 1i64,
+            Some(b'-') => -1i64,
+            _ => return None,
+        };
+        let off = &rest[1..];
+        let (oh, om) = if let Some((h, m)) = off.split_once(':') {
+            (h.parse::<i64>().ok()?, m.parse::<i64>().ok()?)
+        } else if off.len() >= 4 {
+            (
+                off[..2].parse::<i64>().ok()?,
+                off[2..4].parse::<i64>().ok()?,
+            )
+        } else if off.len() == 2 {
+            (off.parse::<i64>().ok()?, 0)
+        } else {
+            return None;
+        };
+        sign * (oh * 3600 + om * 60)
+    };
+
+    // Civil date to days since 1970-01-01 (Howard Hinnant).
+    let y_adj = if m <= 2 { y - 1 } else { y };
+    let era = if y_adj >= 0 { y_adj } else { y_adj - 399 } / 400;
+    let yoe = (y_adj - era * 400) as u32;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe as i64 - 719468;
+    let epoch = days * 86400 + (hh as i64) * 3600 + (mi as i64) * 60 + (ss as i64) - tz_secs;
+    Some(epoch as f64 + frac)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,6 +750,92 @@ mod tests {
         .unwrap();
         let s = scan_claude(&root);
         assert_eq!(s[0].title.chars().count(), 80);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn iso_timestamps_and_workspace_uris_decode_cleanly() {
+        assert_eq!(parse_iso_epoch("1970-01-01T00:00:00Z"), Some(0.0));
+        assert_eq!(
+            parse_iso_epoch("2026-11-17 23:36:54+00:00"),
+            parse_iso_epoch("2026-11-17T18:36:54-05:00")
+        );
+        let sub = parse_iso_epoch("1970-01-01 00:00:01.250000+00:00").unwrap();
+        assert!((sub - 1.25).abs() < 1e-6);
+
+        assert_eq!(
+            first_workspace_path(r#"["file:///Users/sam/My%20Code/warren"]"#).as_deref(),
+            Some("/Users/sam/My Code/warren")
+        );
+        assert_eq!(first_workspace_path("[]"), None);
+    }
+
+    #[test]
+    fn agy_sessions_read_sqlite_summaries_and_skip_subagents() {
+        let root = fixture_root("agy_db");
+        let db = root.join("conversation_summaries.db");
+        let schema_and_rows = "\
+            CREATE TABLE conversation_summaries (\
+                conversation_id text PRIMARY KEY,\
+                title text NOT NULL DEFAULT '',\
+                preview text NOT NULL DEFAULT '',\
+                last_modified_time datetime NOT NULL,\
+                workspace_uris text NOT NULL,\
+                parent_conversation_id text NOT NULL DEFAULT '',\
+                nesting_depth integer NOT NULL DEFAULT 0,\
+                killed numeric NOT NULL DEFAULT 0\
+            );\
+            INSERT INTO conversation_summaries VALUES \
+                ('c-old', '', 'First   prompt preview', '2026-11-17 10:00:00+00:00', '[\"file:///w/one\"]', '', 0, 0),\
+                ('c-new', 'Renamed   Title', 'Older preview', '2026-11-17 12:00:00+00:00', '[\"file:///w/two\"]', '', 0, 0),\
+                ('c-sub', 'Subagent work', '', '2026-11-17 13:00:00+00:00', '[\"file:///w/two\"]', 'c-new', 1, 0),\
+                ('c-dead', 'Killed', '', '2026-11-17 14:00:00+00:00', '[\"file:///w/two\"]', '', 0, 1);";
+        let ok = std::process::Command::new("sqlite3")
+            .arg(&db)
+            .arg(schema_and_rows)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            let s = scan_agy(&root);
+            assert_eq!(s.len(), 2);
+            assert_eq!(s[0].id, "c-new");
+            assert_eq!(s[0].cwd, "/w/two");
+            assert_eq!(s[0].title, "Renamed Title");
+            assert_eq!(s[1].id, "c-old");
+            assert_eq!(s[1].cwd, "/w/one");
+            assert_eq!(s[1].title, "First prompt preview");
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn agy_history_fallback_aggregates_prompts_and_renames() {
+        let root = fixture_root("agy_hist");
+        fs::create_dir_all(root.join("conversations")).unwrap();
+        fs::write(root.join("conversations/u1.db"), b"").unwrap();
+        fs::write(root.join("conversations/u2.db"), b"").unwrap();
+        fs::write(
+            root.join("history.jsonl"),
+            concat!(
+                r#"{"conversationId":"u1","timestamp":1700000000000,"workspace":"/w/a","display":"initial   ask"}"#,
+                "\n",
+                r#"{"conversationId":"u1","timestamp":1700000005000,"workspace":"/w/a","display":"/rename Clean Name"}"#,
+                "\n",
+                r#"{"conversationId":"u2","timestamp":1700000010000,"workspace":"/w/b","display":"second thread"}"#,
+                "\n",
+                r#"{"conversationId":"gone","timestamp":1700000020000,"workspace":"/w/c","display":"deleted db"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let s = scan_agy(&root);
+        assert_eq!(s.len(), 2);
+        assert_eq!(s[0].id, "u2");
+        assert_eq!(s[0].title, "second thread");
+        assert_eq!(s[1].id, "u1");
+        assert_eq!(s[1].title, "Clean Name");
         let _ = fs::remove_dir_all(&root);
     }
 }

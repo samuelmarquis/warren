@@ -1,5 +1,5 @@
 {
-  description = "warren — a meta-harness for Claude Code and OMP: a colony of agents from one terminal";
+  description = "warren — a meta-harness for Claude Code, OMP, and Antigravity: a colony of agents from one terminal";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 

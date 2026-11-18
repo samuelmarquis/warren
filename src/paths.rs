@@ -58,7 +58,19 @@ pub fn hooks_json() -> PathBuf {
     home().join("hooks.json")
 }
 
+/// Session-scoped settings file passed to `agy --settings`.
+pub fn agy_settings_json(autonomous: bool) -> PathBuf {
+    if autonomous {
+        home().join("agy-settings-autonomous.json")
+    } else {
+        home().join("agy-settings.json")
+    }
+}
+
 pub fn claude_projects() -> PathBuf {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()) {
+        return PathBuf::from(dir).join("projects");
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     PathBuf::from(home).join(".claude").join("projects")
 }
@@ -82,6 +94,43 @@ pub fn omp_sessions() -> PathBuf {
 /// One row per tty: the cwd and session file of the OMP running on it.
 pub fn omp_terminal_sessions() -> PathBuf {
     omp_home().join("agent").join("terminal-sessions")
+}
+
+/// Antigravity CLI's data directory (`WARREN_AGY_HOME` overrides it, for tests).
+pub fn agy_home() -> PathBuf {
+    if let Ok(dir) = std::env::var("WARREN_AGY_HOME") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    PathBuf::from(home).join(".gemini").join("antigravity-cli")
+}
+
+/// One `<uuid>.db` trajectory database per Antigravity conversation.
+pub fn agy_conversations() -> PathBuf {
+    agy_home().join("conversations")
+}
+
+/// One `<uuid>/` directory per Antigravity conversation (artifacts and JSONL transcripts).
+pub fn agy_brain() -> PathBuf {
+    agy_home().join("brain")
+}
+
+/// Antigravity's global customization directory (`WARREN_GEMINI_CONFIG` overrides it, for tests).
+pub fn gemini_config() -> PathBuf {
+    if let Ok(dir) = std::env::var("WARREN_GEMINI_CONFIG") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    PathBuf::from(home).join(".gemini").join("config")
+}
+
+/// Global Antigravity plugins (`~/.gemini/config/plugins/`).
+pub fn agy_plugins_dir() -> PathBuf {
+    gemini_config().join("plugins")
 }
 
 fn restrict_to_owner(dir: &std::path::Path) -> Result<()> {

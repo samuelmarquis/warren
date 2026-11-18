@@ -330,6 +330,7 @@ impl AgentConn {
             ToClient::Clipboard(b64) => {
                 self.clipboard_pending = Some(b64);
             }
+            ToClient::ChannelBatch(_) => {}
         }
     }
 

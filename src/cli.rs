@@ -107,7 +107,7 @@ pub fn cmd_new(args: &[String]) -> Result<()> {
     let Some(raw) = pos.first() else {
         bail!(
             "usage: warren new NAME [DIR] [COLOR 0-255] [new|resume|continue|fork] [session-id] \
-             [--kind=claude|omp] [--title=SESSION-NAME] [--sys=SYSTEM-PROMPT] \
+             [--kind=claude|omp|agy] [--title=SESSION-NAME] [--sys=SYSTEM-PROMPT] \
              [--extra=EXTRA-AGENT-ARGS] [--matrix|--no-matrix]"
         );
     };
@@ -133,6 +133,12 @@ pub fn cmd_new(args: &[String]) -> Result<()> {
     if mode == "fork" && !kind.can_fork() {
         bail!(
             "{} cannot fork a conversation — resume it instead",
+            kind.as_str()
+        );
+    }
+    if sys.is_some_and(|s| !s.trim().is_empty()) && !kind.has_sys() {
+        bail!(
+            "{} has no --sys flag — put workspace instructions in AGENTS.md or GEMINI.md instead",
             kind.as_str()
         );
     }
@@ -506,7 +512,9 @@ pub fn restorable(live: &std::collections::HashSet<String>) -> Restorable {
         // live agent's session by its file — that is what its tty row says,
         // and so what the note keeps — while the store lists ids; either
         // one still being there is the conversation still being there.
-        let on_disk = || Path::new(&note.session).is_file();
+        let on_disk = || {
+            Path::new(&note.session).is_file() || crate::procs::has_transcript(kind, &note.session)
+        };
         if ids.is_empty() || ids.contains(&note.session) || on_disk() {
             out.ready.push(note);
         } else {
@@ -781,6 +789,18 @@ pub fn cmd_set(args: &[String]) -> Result<()> {
     let sock = crate::paths::sock_path(name);
     let (meta, state) =
         query_agent(&sock).with_context(|| format!("no live agent named '{name}'"))?;
+    if sys.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+        let kind = crate::record::all()
+            .into_iter()
+            .find(|n| n.name == name)
+            .and_then(|n| Kind::parse(&n.kind));
+        if kind.is_some_and(|k| !k.has_sys()) {
+            bail!(
+                "{} has no --sys flag — put workspace instructions in AGENTS.md or GEMINI.md instead",
+                kind.unwrap().as_str()
+            );
+        }
+    }
     // A Claude conversation is filed by the directory it ran in, so --move
     // carries it (and the old directory's memories, as a copy) to the new one.
     // Only while asleep: a running claude is still writing the transcript.

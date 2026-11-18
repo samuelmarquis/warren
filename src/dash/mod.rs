@@ -153,6 +153,7 @@ impl Dash {
         } else {
             // Arriving on the + tab gets a fresh form (v0's nf_reset).
             self.newform = forms::NewForm::reset();
+            sync_form_machines(self);
             self.form_dirty = true;
         }
         self.sidebar_dirty = true;

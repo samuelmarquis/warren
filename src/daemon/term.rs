@@ -88,6 +88,10 @@ impl AgentTerm {
         self.term.mode().contains(TermMode::SGR_MOUSE)
     }
 
+    pub fn bracketed_paste(&self) -> bool {
+        self.term.mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
     pub fn cursor_visible(&self) -> bool {
         self.term.mode().contains(TermMode::SHOW_CURSOR)
     }
